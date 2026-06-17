@@ -2,7 +2,7 @@
 """Export pii-gpu-xlmr-base-v11r5 -> fp32 ONNX -> static-calibrated INT8 (embedding Gather kept
 fp32) for a CPU tier. Adapted from export_quantize_npu.py (export) + static_quant_cpu.py
 (static-no-embed = the recall-preserving variant). Quantizes directly from the raw fp32 ONNX
-(quant_pre_process is skipped -- it corrupts xlm-r shapes). CPU-only; never touches the GPU.
+(quant_pre_process is skipped -- it corrupts xlm-r shapes). CPU-only; never touches card 4.
 100% synthetic calibration data (v11r5 train rows).
 """
 import json
@@ -15,10 +15,10 @@ from onnxruntime.quantization import (quantize_dynamic, quantize_static, QuantTy
                                       CalibrationDataReader, CalibrationMethod, QuantFormat)
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 
-MDIR = Path('/opt/ossredact/models/privacy-filters/pii-gpu-xlmr-base-v11r5')
+MDIR = Path('/home/steven/Sparx/models/privacy-filters/pii-gpu-xlmr-base-v11r5')
 FP32 = MDIR / 'model.onnx'
 INT8 = MDIR / 'model.int8.onnx'  # dynamic (weights-only) int8 -- the proven v6/v7 recipe
-CALIB = '/opt/ossredact/datasets/pii-merged-v11r5-win/train.jsonl'
+CALIB = '/home/steven/Sparx/datasets/pii-merged-v11r5-win/train.jsonl'
 N_CALIB = 200
 MAXLEN = 512
 

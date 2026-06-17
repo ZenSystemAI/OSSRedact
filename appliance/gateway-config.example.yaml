@@ -1,6 +1,6 @@
-# ossredact egress gateway policy (SPECS §4).
+# qc-pii egress gateway policy (SPECS §4).
 # Resolution order for PII: session override > project override > default. Secrets ALWAYS redact (exempt).
-# Edits are picked up live (mtime-watched) — no restart needed for policy changes.
+# Edits are picked up live (mtime-watched) -- no restart needed for policy changes.
 
 secrets:
   enabled: true            # always-on; here for visibility. Ignores the PII toggle below.
@@ -25,4 +25,4 @@ upstream:
 
 map:
   ttl_hours: 24
-  store: /opt/ossredact-npu/maps
+  store: /home/steven/sparx-npu/maps

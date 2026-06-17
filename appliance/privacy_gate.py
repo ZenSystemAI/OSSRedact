@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiered local PII privacy gate — sanitize text before egress to a hosted LLM.
+"""Tiered local PII privacy gate -- sanitize text before egress to a hosted LLM.
 
 Architecture (informed by this project's benchmarks):
   Tier 0  Deterministic pre-scan (regex + Luhn, ~0 latency). OWNS the digit-spacing / structured-ID case
@@ -47,7 +47,7 @@ def _normcase(s: str) -> str:
 # (U+2013) or others as separators, which broke the digit-run/phone/date regexes: "006–02761–1234567"
 # (en-dash) was seen as 3 short groups and only the last was caught, leaking the institution+transit.
 # Every replacement is single-char -> single-char, so it is LENGTH-PRESERVING and offsets map 1:1 back.
-_DASH_RE = re.compile('[‐‑‒–—―−⁃﹘﹣－]')
+_DASH_RE = re.compile('[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2043\ufe58\ufe63\uff0d]')
 def _normdash(s: str) -> str:
     return _DASH_RE.sub('-', s)
 
@@ -70,6 +70,29 @@ def _luhn_ok(digits: str) -> bool:
             if d > 9: d -= 9
         s += d
     return s % 10 == 0
+
+# IBAN mod-97 deterministic backstop. BACKPORTED from gate/privacy_gate.py to close F14: the deployed floor
+# had NO IBAN catch, so an IBAN the NER model missed had no deterministic guarantee (a catastrophic-tier
+# financial ID with no backstop). A mod-97 pass is a near-certain real IBAN, so there is no precision risk.
+IBAN_RE = re.compile(r'\b([A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30})\b')
+def _iban_ok(s: str) -> bool:
+    s = re.sub(r'\s', '', s).upper()
+    if not re.fullmatch(r'[A-Z]{2}\d{2}[A-Z0-9]+', s):
+        return False
+    s2 = s[4:] + s[:4]
+    digits = ''.join(str(ord(c) - 55) if c.isalpha() else c for c in s2)
+    try:
+        return int(digits) % 97 == 1
+    except ValueError:
+        return False
+
+# Canadian Business Number program-account suppression (real-doc Finding A + Codex review) -- mirrors
+# gate/privacy_gate.py. A 9-digit Luhn number immediately followed by an RT/RP/RC... program account is a
+# Business Number (GST/QST registration printed on invoices), NOT a SIN; suppress it UNLESS a SIN cue
+# precedes the number (then a real SIN must always win the never-leak guarantee).
+_BN_PROGRAM_SUFFIX_RE = re.compile(r'^[ \-]?(?:RT|RP|RC|RZ|RM|RR|RG)[ \-]?\d{4}(?!\d)', re.I)
+_SIN_CUE_RE = re.compile(
+    r'(?i)(?:(?<![a-z])(?:n\.?a\.?s|s\.?i\.?n)(?![a-z])|social\s*insurance|assurance\s*sociale|num[ée]ro\s*d.?assurance)')
 
 # ---------------- Context-cued structured IDs (Presidio LemmaContextAwareEnhancer pattern) ----------------
 # A long digit run GLUED to letters is deliberately rejected by DIGIT_RUN_RE's word boundary (else every
@@ -118,6 +141,8 @@ def tier0_spans(text: str):
         if all(0 <= int(o) <= 255 for o in m.group().split('.')): add(m.start(), m.end(), 'ip_address', 0.95, 'tier0:ip')
     for m in POSTAL_RE.finditer(t): add(m.start(), m.end(), 'postal_code', 0.9, 'tier0:postal')
     for m in UUID_RE.finditer(t): add(m.start(), m.end(), 'sensitive_account_id', 0.99, 'tier0:uuid')
+    for m in IBAN_RE.finditer(t):
+        if _iban_ok(m.group(1)): add(m.start(1), m.end(1), 'iban', 0.99, 'tier0:iban', validator='mod97_ok')
     for m in PHONE_RE.finditer(t): add(m.start(), m.end(), 'phone_number', 0.85, 'tier0:phone')
     for m in DATE_RE.finditer(t): add(m.start(1), m.end(1), 'sensitive_date', 0.8, 'tier0:date')
     for m in DIGIT_RUN_RE.finditer(t):
@@ -126,6 +151,9 @@ def tier0_spans(text: str):
         if n == 16 or n == 15:
             ok = _luhn_ok(digits); lab, conf, val = 'payment_card', (0.97 if ok else 0.7), ('luhn_ok' if ok else 'luhn_fail')
         elif n == 9:
+            e9 = m.end(1)
+            if _BN_PROGRAM_SUFFIX_RE.match(t[e9:e9 + 12]) and not _SIN_CUE_RE.search(t[max(0, m.start(1) - 40):m.start(1)]):
+                continue  # Business Number (GST/QST), not a SIN, and no SIN cue forces emission -- Finding A
             ok = _luhn_ok(digits); lab, conf, val = 'government_id', (0.9 if ok else 0.75), ('luhn_ok' if ok else 'luhn_fail')  # SIN
         elif 7 <= n <= 19:
             lab, conf = ('sensitive_account_id', 0.6)  # generic structured id (account/transit/reference/etc.)
@@ -137,7 +165,11 @@ def tier0_spans(text: str):
 
 # ---------------- Tier 1: NPU INT8 ONNX ----------------
 class NPUTier:
-    def __init__(self, model_dir, max_len=256):
+    # max_len=512 (not 256): the prod gate chunks at 600 chars, and a token-DENSE 600-char chunk (secrets,
+    # hashes, long IDs) reaches ~300 tokens; max_len 256 truncated the chunk tail and dropped PII there
+    # (measured: password recall 0.85 -> 0.99 when 256 -> 512, 46% of dense chunks exceeded 256 tokens).
+    # Mirrors gate/privacy_gate.py NPUTier.
+    def __init__(self, model_dir, max_len=512):
         import onnxruntime as ort
         from transformers import AutoTokenizer
         import json as _json
@@ -267,6 +299,76 @@ def explain(spans):
         out.append(rec)
     return out
 
+# ---------------- repeated-value sweep (Finding C backstop) ----------------
+# A <LABEL_NNN> placeholder token (the canonical angle-bracket form, matching entity_map.py and the
+# redaction-core twin). The positional pass inserts these; the sweep must PRESERVE them verbatim and never
+# rewrite inside one (else a value equal to a label-like token, e.g. an org literally named "EMAIL", would
+# corrupt "<EMAIL_001>" -- Codex review 2026-06-17). Counter is 3+ digits to also match larger sessions.
+# Accepted low-risk edge (Codex MEDIUM-1, mirrors the TS twin): a RAW detected value shaped exactly like
+# <LABEL_NNN> is skipped by this split and not swept -- over-masking is the safe error and real PII almost
+# never takes this exact shape, so we do not add handling.
+_PLACEHOLDER_TOKEN_RE = re.compile(r'<[A-Z][A-Z0-9_]*_\d{3,}>')
+# Minimum value length to sweep -- below this a value is too generic to mask globally without spurious
+# matches (and tiny tokens are rarely uniquely-identifying on their own). Mirrors the egress proxy len>=4.
+_MIN_SWEEP_LEN = 4
+
+def _build_known_re(values):
+    """Regex over already-known session entity VALUES (len>=4, word-boundary-guarded, longest-first).
+    The known-entity backstop (Finding C): positional redaction masks only DETECTED span positions, so a value
+    that repeats across a long/multi-page document (footers, repeated headers, line items) leaks at the
+    occurrences the detector skipped. Pure deterministic, no model. Longest-first alternation makes the engine
+    prefer the longer value at any position (so a 7-digit value can not be matched as a prefix of an 8-digit one).
+    NOTE: Python stdlib re has no \\p{M}; we use \\w boundaries (letter/digit/underscore, ASCII-by-default), so a
+    DECOMPOSED combining accent immediately adjacent to a value is not part of the guard. The egress proxy twin
+    has the same limitation; the JS twin uses \\p{M}. Acceptable: over-masking is the safe error here anyway.
+    Compiled IGNORECASE (Codex HIGH-1): a known value must be masked regardless of case, else "John" detected
+    once leaks as "JOHN"/"john" elsewhere. _sweep_known resolves the placeholder via a casefolded lookup."""
+    vals = [v for v in values if v and len(v) >= _MIN_SWEEP_LEN]
+    if not vals:
+        return None
+    vals.sort(key=len, reverse=True)
+    parts = []
+    for v in vals:
+        esc = re.escape(v)
+        if v[0].isalnum():
+            esc = r'(?<!\w)' + esc   # do not match a value that starts alnum inside a longer word/number
+        if v[-1].isalnum():
+            esc = esc + r'(?!\w)'    # ...nor one that ends alnum
+        parts.append(esc)
+    return re.compile('|'.join(parts), re.IGNORECASE)
+
+def _sweep_known(text, known_re, value_to_placeholder):
+    """Replace every literal occurrence of a known value with its EXISTING placeholder (never mint a new one),
+    running ONLY on the literal segments BETWEEN already-inserted placeholders so it can never rewrite a
+    placeholder the positional pass produced. Returns (text, n_swept). Over-masking an already-detected value
+    is the safe error; rehydrate() restores every occurrence regardless of which pass inserted it."""
+    if known_re is None:
+        return text, 0
+    # Case-insensitive resolution (Codex HIGH-1): known_re matches any case, so look up the placeholder by the
+    # casefolded match. If two differently-cased values collide on casefold, first-wins is fine -- it still
+    # masks, and rehydrate restores a same-PII value.
+    cf_lookup = {}
+    for v, ph in value_to_placeholder.items():
+        cf_lookup.setdefault(v.casefold(), ph)
+    n = 0
+    def repl(m):
+        nonlocal n
+        ph = cf_lookup.get(m.group().casefold())
+        if ph is None:
+            return m.group()
+        n += 1
+        return ph
+    # Split into literal gaps (swept) and placeholder tokens (preserved verbatim). A capture-free split drops
+    # the delimiters, so parts.length == tokens.length + 1; reassemble interleaved so a value equal to a
+    # placeholder token can never corrupt the token itself.
+    parts = _PLACEHOLDER_TOKEN_RE.split(text)
+    tokens = _PLACEHOLDER_TOKEN_RE.findall(text)
+    out = [known_re.sub(repl, parts[0])]
+    for i, tok in enumerate(tokens):
+        out.append(tok)
+        out.append(known_re.sub(repl, parts[i + 1]))
+    return ''.join(out), n
+
 class PrivacyGate:
     def __init__(self, npu_model_dir=None):
         self.npu = NPUTier(npu_model_dir) if npu_model_dir else None
@@ -282,18 +384,42 @@ class PrivacyGate:
     def redact(self, text, min_score=0.5):
         spans = self.detect(text, min_score)
         mapping = {}; counters = defaultdict(int); out = []; last = 0
+        # Dedup placeholders by CASEFOLDED value (Codex 2026-06-17): case variants of the same string are the
+        # same sensitive token, so they share ONE placeholder. This keeps the case-insensitive Finding-C sweep
+        # coherent -- the value->placeholder map can never hold two case-only-different values pointing at
+        # DIFFERENT placeholders (which would restore the wrong original on rehydrate). Mirrors the TS twin
+        # (buildEntityMap dedupKey lowercases) and the EntityMap session dedup.
+        cf_to_ph = {}
         for s in spans:
-            counters[s['label']] += 1
-            ph = f"[{s['label'].upper()}_{counters[s['label']]}]"
-            mapping[ph] = text[s['start']:s['end']]
+            value = text[s['start']:s['end']]
+            ph = cf_to_ph.get(value.casefold())
+            if ph is None:
+                counters[s['label']] += 1
+                # Canonical angle-bracket placeholder (entity_map.py:116 / gate_service.py:94 / redaction-core):
+                # UPPERCASE label, underscores preserved, 3-digit zero-padded counter. round-trips via rehydrate().
+                ph = f"<{s['label'].upper()}_{counters[s['label']]:03d}>"
+                cf_to_ph[value.casefold()] = ph
+                mapping[ph] = value
             out.append(text[last:s['start']]); out.append(ph); last = s['end']
         out.append(text[last:])
-        return ''.join(out), mapping, spans
+        redacted = ''.join(out)
+        # Finding C backstop: after the positional pass, sweep the redacted text for any repeated occurrence of
+        # an already-known value the detector missed at OTHER positions, masking it with its EXISTING placeholder.
+        # The map is now collision-free by casefold, so the sweep's case-insensitive lookup resolves uniquely.
+        value_to_placeholder = {v: ph for ph, v in mapping.items()}
+        known_re = _build_known_re(value_to_placeholder.keys())
+        redacted, _ = _sweep_known(redacted, known_re, value_to_placeholder)
+        return redacted, mapping, spans
     @staticmethod
     def rehydrate(text, mapping):
-        for ph, v in mapping.items():
-            text = text.replace(ph, v)
-        return text
+        # Single-pass substitution (Codex MEDIUM-2): a naive per-key str.replace in map-iteration order can
+        # recursively corrupt a round-trip if a restored value itself contains another placeholder string.
+        # One alternation over the placeholder tokens (longest-first, so no token is a prefix of another)
+        # replaces each match exactly once; restored text is never re-scanned.
+        if not mapping:
+            return text
+        pat = re.compile('|'.join(re.escape(ph) for ph in sorted(mapping, key=len, reverse=True)))
+        return pat.sub(lambda m: mapping[m.group()], text)
 
 def _norm(s):
     s = re.sub(r'\s+', ' ', s.strip().lower())
@@ -333,7 +459,7 @@ def show(gate, s, min_score=0.5):
 if __name__ == '__main__':
     import argparse, sys
     ap = argparse.ArgumentParser()
-    ap.add_argument('--model', default='/opt/ossredact/models/privacy-filters/pii-npu-xlmr-quebec-v1')
+    ap.add_argument('--model', default='/home/steven/Sparx/models/privacy-filters/pii-npu-xlmr-quebec-v1')
     ap.add_argument('--eval', default='')
     ap.add_argument('--text', default='', help='redact this string and exit')
     ap.add_argument('--repl', action='store_true', help='load model once, then redact each line of stdin')
@@ -358,7 +484,7 @@ if __name__ == '__main__':
     samples = [
         "Bonjour, Marie Tremblay (NAS 5 8 1 6 5 3 6 1 2) au 4567 boulevard René-Lévesque, Montréal H3B 1A1; carte 4539-1488-0343-6467.",
         "Hi, this is jean.cote@videotron.ca, my account 81234567 and phone (514) 555-0188, DOB 1985-03-12.",
-        "Le service tourne sur le port 8080, GPU a dedicated GPU, aucune donnée personnelle ici.",
+        "Le service tourne sur le port 8080, GPU 3090, aucune donnée personnelle ici.",
     ]
     for s in samples:
         red, mp, spans = gate.redact(s)

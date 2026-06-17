@@ -23,7 +23,7 @@ _ACCENT_MAP = str.maketrans(
 
 _NBSP = " "
 _ENDASH = "–"
-_EMDASH = "—"
+_EMDASH = "\u2014"
 
 
 def _upper_char(c: str) -> str:

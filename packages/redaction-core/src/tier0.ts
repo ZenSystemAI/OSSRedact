@@ -86,6 +86,17 @@ const DIGIT_RUN_RE = /(?<![\w.])(\d+(?:[ \-]\d+)*)(?![\w.])/g
 const PHONE_RE = /(?<![\w])(?:\+?1[ .\-]?)?\(?\d{3}\)?[ .\-]?\d{3}[ .\-]?\d{4}(?![\w])/g
 const BARE_TEN_DIGITS_RE = /^\d{10}$/
 
+// Canadian Business Number program-account suffix (RT=GST/HST, RP=payroll, RC=corp tax, RZ/RM/RR/RG=other).
+// A 9-digit Luhn number IMMEDIATELY followed by this is a Business Number (the GST/QST registration printed
+// on every invoice), NOT a SIN. Suppress it so the client floor stops mislabeling + over-redacting public
+// merchant tax ids -- UNLESS a SIN cue precedes the number (then a real SIN must win the never-leak
+// guarantee). Mirrors gate/privacy_gate.py exactly: single space/hyphen separator (no newline), (?!\d) not
+// \b for engine parity. See validation/RESULT-realworld-expenses.md (Finding A) + the Codex review.
+const BN_PROGRAM_SUFFIX_RE = /^[ \-]?(?:RT|RP|RC|RZ|RM|RR|RG)[ \-]?\d{4}(?!\d)/i
+// nas/sin are ASCII-word-boundary-gated (else "Business"/"casino"/"using" would falsely fire the override and
+// un-suppress a real BN -- Codex round 2) and tolerate dotted forms (N.A.S., S.I.N.). Mirrors privacy_gate.py.
+const SIN_CUE_RE = /(?:(?<![a-z])(?:n\.?a\.?s|s\.?i\.?n)(?![a-z])|social\s*insurance|assurance\s*sociale|num[ée]ro\s*d.?assurance)/i
+
 const MONTHS =
   'jan(?:vier|uary)?|f[eé]v(?:rier)?|feb(?:ruary)?|mar(?:s|ch)?|avr(?:il)?|apr(?:il)?|mai|may|' +
   'juin|june|juil(?:let)?|jul(?:y)?|ao[uû]t|aug(?:ust)?|sep(?:t(?:embre|ember)?)?|' +
@@ -237,6 +248,12 @@ export function tier0Spans(text: string): RawSpan[] {
       const ok = luhnOk(digits)
       add(start, end, 'payment_card', ok ? 0.97 : 0.7, 'tier0:digit_run', { validator: ok ? 'luhn_ok' : 'luhn_fail' })
     } else if (n === 9) {
+      // A 9-digit number followed by an "...RT0001" program account is a Business Number, not a SIN, so
+      // suppress it (Finding A: ~78% of real-doc government_id hits were merchant BNs) -- UNLESS a SIN cue
+      // precedes it, in which case a real SIN must always win the never-leak guarantee (Codex review).
+      const bn = BN_PROGRAM_SUFFIX_RE.test(t.slice(end, end + 12))
+      const sinCue = SIN_CUE_RE.test(t.slice(Math.max(0, start - 40), start))
+      if (bn && !sinCue) continue
       const ok = luhnOk(digits)
       add(start, end, 'government_id', ok ? 0.9 : 0.75, 'tier0:digit_run', { validator: ok ? 'luhn_ok' : 'luhn_fail' })
     } else if (n >= 7 && n <= 19) {

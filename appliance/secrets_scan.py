@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic secrets detector for the egress proxy (SPECS §3) — ALWAYS on, ignores PII policy.
+"""Deterministic secrets detector for the egress proxy (SPECS §3) -- ALWAYS on, ignores PII policy.
 
 Ports the high-value, high-precision gitleaks provider regexes + a context-aware generic-assignment rule
 + an AWS-secret-shaped entropy backstop, with detect-secrets-style false-positive filters (UUID, git-SHA,

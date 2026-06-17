@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import type * as React from 'react'
 import type { Span } from '../lib/types'
 import { labelMeta } from '../lib/labels'
+import { resolveRenderSpans } from '../lib/redaction'
 
 type Props = {
   text: string
@@ -57,7 +58,9 @@ export default function DocCanvas({ text, spans, placeholderOf, selectedId, onSe
     }
   }
 
-  const segs = buildSegments(text, spans)
+  // resolveRenderSpans makes active PII win any overlap with an inactive "kept" span, so an inactive manual
+  // span can never render an active detection's value as plaintext (display-leak fix; pre-merge review).
+  const segs = buildSegments(text, resolveRenderSpans(spans))
 
   return (
     <div

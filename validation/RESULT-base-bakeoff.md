@@ -2,7 +2,7 @@
 
 > Measured 2026-06-15. Each candidate was full-fine-tuned on pii-merged-v9-remap (same config: 3 epochs,
 > max_len 256, entity-F1 selection) and scored MODEL-ALONE on the v9remap val via the label-aware harness;
-> GPU(fp16) + CPU(fp32) latency measured on gpu-host the GPU (a dedicated GPU) over a fixed sample. Numbers only.
+> GPU(fp16) + CPU(fp32) latency measured on P620 card 4 (3090 Ti) over a fixed sample. Numbers only.
 >
 > IMPORTANT: v9remap is near-saturated for the strong encoders, so this pass discriminates on LATENCY +
 > trainability + export-class and gives a quality FLOOR. The final quality crown is decided on the v10

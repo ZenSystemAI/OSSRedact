@@ -1,0 +1,39 @@
+[
+  {
+    "id": "email_plain",
+    "note": "Plain email -- floor:email on all three surfaces (EMAIL_RE is byte-identical).",
+    "text": "Contact: erica.demo+test@example.org for details.",
+    "expect": [{ "label": "email", "value": "erica.demo+test@example.org" }]
+  },
+  {
+    "id": "iban_mod97_valid",
+    "note": "Canonical ISO 13616 GB82 test IBAN -- mod-97 VALID, so floor:iban fires (no precision risk). A drift in _iban_ok / ibanOk on any surface drops this. Synthetic public test vector, not a real account.",
+    "text": "Solde sur IBAN GB82WEST12345698765432 confirme.",
+    "expect": [{ "label": "iban", "value": "GB82WEST12345698765432" }]
+  },
+  {
+    "id": "card_luhn_valid_16",
+    "note": "Luhn-VALID 16-digit Visa test number -- floor:card. A drift in _luhn_ok / luhnOk or the 15/16-digit gate drops this. Public Luhn test vector, not a real card.",
+    "text": "Paiement par carte 4539148803436467 approuve.",
+    "expect": [{ "label": "payment_card", "value": "4539148803436467" }]
+  },
+  {
+    "id": "sin_luhn_valid_with_cue",
+    "note": "Luhn-VALID 9-digit value (public SIN test vector 046454286) with a preceding NAS cue and OQLF 3-3-3 spacing. Must emit government_id on all three. The cue forces emission even past BN suppression (never-leak SIN-cue override). value is the digit-normalized form so the assert is separator-agnostic.",
+    "text": "NAS du client: 046 454 286 au dossier.",
+    "expect": [{ "label": "government_id", "value": "046454286", "digits_only": true }]
+  },
+  {
+    "id": "bn_suppressed_no_cue",
+    "note": "SAME Luhn-VALID 9-digit value, but immediately followed by an RT0001 program account and with NO SIN cue -> it is a Canadian Business Number (GST/QST registration printed on invoices), NOT a SIN. Must be SUPPRESSED on all three (no government_id span). suppress lists the label that must be ABSENT.",
+    "text": "Fournisseur TPS 046454286 RT0001 sur la facture.",
+    "expect": [],
+    "suppress": ["government_id"]
+  },
+  {
+    "id": "uuid_v4_shape",
+    "note": "8-4-4-4-12 hex UUID -- floor:uuid, emitted as sensitive_account_id on all three (UUID_RE is byte-identical). Synthetic id, never occurs by accident in prose.",
+    "text": "Session ID 446062b5-366a-4a17-d308-8a7cb0524be4 ouverte.",
+    "expect": [{ "label": "sensitive_account_id", "value": "446062b5-366a-4a17-d308-8a7cb0524be4" }]
+  }
+]

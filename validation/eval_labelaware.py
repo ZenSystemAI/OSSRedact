@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LABEL-AWARE eval harness for the ossredact gate (plan A baseline).
+"""LABEL-AWARE eval harness for the qc-pii gate (plan A baseline).
 
 Measures what the existing label-AGNOSTIC evals cannot:
   - per-category PRECISION / RECALL / F1 (labeled, overlap-based)
@@ -8,7 +8,7 @@ Measures what the existing label-AGNOSTIC evals cannot:
   - FR vs EN split
   - three modes: TIER0-ALONE vs MODEL-ALONE vs FULL-STACK (the "base model strong alone" question)
 
-Runs on gpu-host against the deployed GPU v7 model, replicating prod line-boundary chunking exactly
+Runs on P620 against the deployed GPU v7 model, replicating prod line-boundary chunking exactly
 (gate_service_gpu.py). Eval set = v8 val.jsonl (in the 23-label scheme). NOTE: the v7 checkpoint was
 selected on this val (eval_loss), so absolute numbers are mildly optimistic; the relative patterns
 (confusion, FP sources, model-alone vs full-stack gaps) are the diagnostic and are robust to that.
@@ -16,11 +16,11 @@ selected on this val (eval_loss), so absolute numbers are mildly optimistic; the
 """
 import os, sys, json, collections
 
-GATE_DIR = os.environ.get('GATE_DIR', '/opt/ossredact-gpu-gate')
-MODEL_DIR = os.environ.get('GPU_GATE_MODEL', '/opt/ossredact/models/privacy-filters/pii-gpu-xlmr-large-v7')
+GATE_DIR = os.environ.get('GATE_DIR', '/home/steven/sparx-gpu-gate')
+MODEL_DIR = os.environ.get('GPU_GATE_MODEL', '/home/steven/Sparx/models/privacy-filters/pii-gpu-xlmr-large-v7')
 # VAL is env-configurable so the same harness scores any scheme: LABELS auto-derives from the sibling
 # labels.json, so pointing GPU_GATE_VAL at the v9remap val loads the 20-label scheme automatically.
-VAL = os.environ.get('GPU_GATE_VAL', '/opt/ossredact/datasets/pii-merged-v8/val.jsonl')
+VAL = os.environ.get('GPU_GATE_VAL', '/home/steven/Sparx/datasets/pii-merged-v8/val.jsonl')
 MIN_SCORE = 0.5
 OUT_JSON = os.environ.get('GPU_GATE_OUT', '/tmp/eval_labelaware_v7.json')
 

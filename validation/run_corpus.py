@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Run the synthetic corpus through the gpu-host GPU gate (/redact) for PII, and the deterministic
+"""Run the synthetic corpus through the P620 GPU gate (/redact) for PII, and the deterministic
 secret_spans locally for secrets. Aggregate honest numbers + leak-check against ground truth.
 
 PII headline (comparable to the original 'PII spans redacted'): GPU gate tier0+neural.
-Secrets: always-on deterministic layer (secret_spans) — the GPU gate does not run it.
+Secrets: always-on deterministic layer (secret_spans) -- the GPU gate does not run it.
 Leak = an injected sensitive VALUE survives verbatim in the redacted output (substring match,
 the gate's own recall-as-leak-prevention metric).
 """
-import json, sys, time, urllib.request
+import json, os, sys, time, urllib.request
 from collections import Counter, defaultdict
 from secrets_scan import secret_spans
 
-GATE = sys.argv[2] if len(sys.argv) > 2 else 'http://localhost:8001'
+# Gate URL: CLI arg 2, else $OSSREDACT_GATE_URL, else localhost (no internal host committed for OSS release).
+GATE = sys.argv[2] if len(sys.argv) > 2 else os.environ.get('OSSREDACT_GATE_URL', 'http://localhost:8001')
 CORPUS = sys.argv[1] if len(sys.argv) > 1 else 'corpus.jsonl'
 # high-confidence categories where a leak is a hard failure (mirror the original '0 email/UUID/SIN leaks')
 HARD = {'email', 'government_id', 'sensitive_account_id', 'credit_card'}

@@ -49,7 +49,7 @@ def test_dashes_substitutes_hyphens_length_preserving():
     assert len(r['input']) == len(_row()['input'])
     assert _offsets_still_valid(r)
     spans = {lab: r['input'][s:e] for s, e, lab in r['output']['spans']}
-    assert "–" in spans['government_id'] or "—" in spans['government_id']
+    assert "\u2013" in spans['government_id'] or "\u2014" in spans['government_id']
 
 
 def test_accents_fold_length_preserving_and_ascii():

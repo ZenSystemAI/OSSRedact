@@ -8,7 +8,7 @@ Gives cross-turn placeholder stability: the same value -> the same placeholder t
 import os, re, json, time, base64, hashlib, threading
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-MAPS_DIR = os.environ.get('GATEWAY_MAPS_DIR', '/opt/ossredact-npu/maps')
+MAPS_DIR = os.environ.get('GATEWAY_MAPS_DIR', '/home/steven/sparx-npu/maps')
 KEY_FILE = os.environ.get('GATEWAY_MAP_KEY', os.path.join(MAPS_DIR, '.mapkey'))
 TTL_S = int(os.environ.get('GATEWAY_MAP_TTL_H', '24')) * 3600
 MAX_ENTITIES = int(os.environ.get('GATEWAY_MAP_MAX', '5000'))
@@ -61,6 +61,7 @@ class EntityMap:
         self.path = os.path.join(MAPS_DIR, _safe_name(self.session, self.project) + '.json.enc')
         self.v2p = {}
         self.p2v = {}
+        self.v2p_cf = {}   # casefold(value) -> placeholder, in-memory dedup index (rebuilt on load)
         self.counters = {}
         self.created = time.time()
         self.new_this_load = 0
@@ -85,6 +86,7 @@ class EntityMap:
             self.v2p = data.get('v2p', {})
             self.p2v = data.get('p2v', {})
             self.counters = data.get('counters', {})
+            self.v2p_cf = {k.casefold(): p for k, p in self.v2p.items()}  # rebuild casefold dedup index
             self.created = data.get('created', time.time())
         except Exception as e:
             print(f"[entity_map load err] {type(e).__name__}", flush=True)  # never log values
@@ -111,12 +113,22 @@ class EntityMap:
         ph = self.v2p.get(value)
         if ph is not None:
             return ph, False
+        # Case-variant dedup (Codex 2026-06-17): a casefold-equal value already mapped reuses its placeholder,
+        # so case variants of the same sensitive token share ONE placeholder. Keeps the case-insensitive
+        # known-value sweep coherent (no two case-only-different values pointing at different placeholders).
+        vcf = value.casefold()
+        ph = self.v2p_cf.get(vcf)
+        if ph is not None:
+            if len(self.v2p) < MAX_ENTITIES:
+                self.v2p[value] = ph   # bind this exact form too for O(1) future exact lookups
+            return ph, False
         lab = re.sub(r'[^A-Z0-9]', '', label.upper()) or 'PII'
         self.counters[lab] = self.counters.get(lab, 0) + 1
         ph = f"<{lab}_{self.counters[lab]:03d}>"
         if len(self.v2p) < MAX_ENTITIES:
             self.v2p[value] = ph
             self.p2v[ph] = value
+            self.v2p_cf[vcf] = ph
         self.new_this_load += 1
         return ph, True
 

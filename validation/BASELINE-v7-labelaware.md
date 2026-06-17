@@ -1,13 +1,13 @@
-# ossredact v7 — Label-Aware Baseline (plan A)
+# qc-pii v7 -- Label-Aware Baseline (plan A)
 
-> Measured 2026-06-14 on gpu-host (GPU xlm-r-large **v7**, the GPU) against `pii-merged-v8/val.jsonl`
+> Measured 2026-06-14 on P620 (GPU xlm-r-large **v7**, card 4) against `pii-merged-v8/val.jsonl`
 > (n=2942, 23-label scheme). Harness: `validation/eval_labelaware.py`. Raw: `baseline_v7_labelaware.json`.
 > Prod line-boundary chunking replicated. **First eval that is label-aware** (existing evals are leak-only).
 > Caveat: v7 was selected on v7-val; the **flinks rows in v8-val are unseen** by v7, so flinks-specific
 > behavior (transaction dates, account numbers) is genuine generalization, not memorization.
 > "FP" = a redaction overlapping no gold span = over-redaction **relative to the data's labeling policy**.
 
-## Headline — is the base model strong alone?
+## Headline -- is the base model strong alone?
 
 | mode | labeled-recall | precision | clean-row FP |
 |---|---|---|---|
@@ -25,7 +25,7 @@ narrow leak-floor, not an always-on layer that taxes precision.**
 ## The weak spot is PRECISION (~0.71), not recall
 
 Detect-recall is ~1.0 (almost nothing leaks). Labeled-recall is 0.92. **Precision 0.71 means ~29% of
-redactions are over-redactions or mislabels** — exactly what breaks the manual category-filter and what
+redactions are over-redactions or mislabels** -- exactly what breaks the manual category-filter and what
 the operator feels as over-redaction. Ranked precision sinks:
 
 | sink | what | evidence |
@@ -35,7 +35,7 @@ the operator feels as over-redaction. Ranked precision sinks:
 | **`postal_code → address`** | postal labeled-recall **0.382** (632 relabeled `address`) | `post_merge_address` stitches postal into the address span → label lost (post-processing, not model) |
 | **`bank_account → government_id`** | 234 spans | numeric-ID disambiguation |
 | **`username → file_path`** | 229 spans | env/code context overlap |
-| **`date_of_birth → sensitive_date`** | 226 spans | the predicted linchpin — DOB collapsed to generic date |
+| **`date_of_birth → sensitive_date`** | 226 spans | the predicted linchpin -- DOB collapsed to generic date |
 | `access_token`/`api_key` ↔ `sensitive_account_id` | ~65 spans | secret-vs-id confusion in env dumps |
 
 ## What's already excellent (don't touch)
@@ -43,7 +43,7 @@ the operator feels as over-redaction. Ranked precision sinks:
 `phone_number` F1 0.99 · `file_path` 0.999 · `address` F1 0.997 · `person` F1 0.97 · `tax_id` 1.00.
 
 ## FR vs EN
-Near-parity: EN labeled-recall 0.932, FR 0.914. FR carries more FP (4208 vs 1984) — mostly the
+Near-parity: EN labeled-recall 0.932, FR 0.914. FR carries more FP (4208 vs 1984) -- mostly the
 FR flinks/bank statements where the date/numeric over-fire concentrates. FR/EN is **not** a weakness.
 
 ## Reads directly into the plan set

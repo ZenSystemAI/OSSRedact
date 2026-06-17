@@ -1,9 +1,9 @@
 {
-  "name": "ossredact-workbench",
+  "name": "sparx-workbench",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "ossredact redaction workbench -- local-first manual + auto PII redaction, click-to-unredact, multi-format, round-trip rehydration. The document never leaves the machine.",
+  "description": "Sparx redaction workbench -- local-first manual + auto PII redaction, click-to-unredact, multi-format, round-trip rehydration. The document never leaves the machine.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -12,6 +12,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource-variable/inter-tight": "^5.2.7",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@ossredact/core": "file:../packages/redaction-core",
     "jszip": "^3.10.1",
     "pdf-lib": "^1.17.1",

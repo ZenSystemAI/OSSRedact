@@ -3,7 +3,7 @@
 
 Run: .venv-test/bin/python -m pytest validation/test_parity_check.py -v
 The model runners (_run_torch/_run_onnx) need torch+onnxruntime+the weights and are
-exercised on gpu-host, not here.
+exercised on P620, not here.
 """
 import numpy as np
 import pytest

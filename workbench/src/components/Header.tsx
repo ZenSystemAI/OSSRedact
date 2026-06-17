@@ -18,7 +18,7 @@ export default function Header() {
         </span>
         <div className="leading-none">
           <div style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 17, color: '#fff', letterSpacing: '-.02em' }}>
-            ossredact Workbench
+            Sparx Workbench
           </div>
         </div>
       </div>

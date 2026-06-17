@@ -1,7 +1,20 @@
 {
   "name": "@ossredact/core",
-  "version": "0.1.0",
-  "description": "Tier-0 deterministic PII detector and span/redaction core for ossredact. Pure TypeScript, browser-safe, zero runtime dependencies.",
+  "version": "0.1.1",
+  "description": "Tier-0 deterministic PII detector and span/redaction core for OSSRedact. Pure TypeScript, browser-safe, zero runtime dependencies.",
+  "license": "MIT",
+  "author": "ZenSystemAI",
+  "keywords": [
+    "pii",
+    "redaction",
+    "privacy",
+    "anonymization",
+    "ner",
+    "gdpr",
+    "detector",
+    "typescript",
+    "browser"
+  ],
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -14,8 +27,12 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",

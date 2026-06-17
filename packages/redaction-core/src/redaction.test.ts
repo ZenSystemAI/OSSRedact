@@ -12,6 +12,8 @@ import {
   toSpans,
   newPlaceholderIndex,
   explain,
+  sweepKnownValues,
+  resolveRenderSpans,
 } from './redaction'
 import type { RawSpan, Span } from './types'
 
@@ -296,5 +298,44 @@ describe('explain', () => {
     const result = explain([active, inactive])
     expect(result).toHaveLength(1)
     expect(result[0].label).toBe('email')
+  })
+})
+
+// -------------------------
+// Finding C: repeated-value sweep + active-over-inactive overlap resolution (leak-safety)
+// -------------------------
+describe('sweepKnownValues (repeated-value masking)', () => {
+  it('masks a duplicate occurrence positional redaction would miss', () => {
+    const text = 'Contact a.user@example.test then footer a.user@example.test'
+    const out = redactedText(text, [span(8, 27, 'email')]) // detector found only the FIRST occurrence
+    expect(out).not.toContain('a.user@example.test')
+    expect((out.match(/<EMAIL_001>/g) || []).length).toBe(2)
+  })
+
+  it('does NOT mask a numeric value inside a longer number (token-boundary safe)', () => {
+    const out = redactedText('acct 1234567 ref 12345678', [span(5, 12, 'account_number', 0.6)])
+    expect(out).toContain('12345678')
+  })
+
+  it('does NOT rewrite inside an already-inserted placeholder, even across sweep passes', () => {
+    // an org value literally "EMAIL_001" must not corrupt the "<EMAIL_001>" placeholder
+    const out = sweepKnownValues('Footer a@b.example and EMAIL_001', { '<EMAIL_001>': 'a@b.example', '<ORG_001>': 'EMAIL_001' })
+    expect(out).toBe('Footer <EMAIL_001> and <ORG_001>')
+    expect(out).not.toMatch(/<</)
+  })
+})
+
+describe('resolveRenderSpans (active PII wins over an overlapping inactive span)', () => {
+  it('clips an inactive span around an active span it overlaps (active value never swallowed)', () => {
+    const out = resolveRenderSpans([span(0, 26, 'manual', 1, false), span(9, 21, 'phone_number', 0.9, true)])
+    expect(out.find((s) => s.start === 9 && s.end === 21)?.active).toBe(true)
+    for (let off = 9; off < 21; off++) {
+      expect(out.find((s) => !s.active && s.start <= off && s.end > off)).toBeUndefined()
+    }
+  })
+
+  it('drops an inactive span fully contained in an active one', () => {
+    const out = resolveRenderSpans([span(5, 10, 'manual', 1, false), span(0, 20, 'phone_number', 0.9, true)])
+    expect(out.filter((s) => !s.active)).toHaveLength(0)
   })
 })

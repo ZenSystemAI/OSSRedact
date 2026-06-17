@@ -307,3 +307,51 @@ describe('tier0Spans Quebec IDs', () => {
     expect(spans.some((s) => s.label === 'sensitive_account_id')).toBe(true)
   })
 })
+
+// -------------------------
+// Canadian Business Number suppression (real-doc Finding A)
+// -------------------------
+describe('tier0Spans Business Number suppression', () => {
+  it('does NOT emit government_id for a 9-digit number with a BN program-account suffix (RT0001)', () => {
+    // 046454286 is a Luhn-valid public SIN test vector, but "046454286 RT0001" is a Canadian Business
+    // Number (GST/HST registration printed on invoices), not a SIN.
+    const spans = labeledSpans('TPS 046454286 RT0001')
+    expect(spans.some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('does NOT emit government_id for an RP (payroll) program account', () => {
+    expect(labeledSpans('046454286 RP0001').some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('does NOT emit government_id for a hyphen-separated BN program account', () => {
+    expect(labeledSpans('046454286-RT0001').some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('emits government_id when a SIN cue precedes the number, even with a BN-looking suffix (never-leak)', () => {
+    // A real SIN must always win: a SIN cue before the number overrides the BN suppression (Codex review).
+    expect(labeledSpans('NAS 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(true)
+    expect(labeledSpans('N.A.S. 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(true)
+  })
+
+  it('SIN cue is word-bounded, not a substring (Business/casino must NOT un-suppress a BN)', () => {
+    // "Business" contains "sin"; without ASCII word boundaries it would falsely fire the SIN override and
+    // re-emit a real BN as a SIN (Codex round 2). It must stay suppressed.
+    expect(labeledSpans('Business number 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('does NOT treat a newline as the BN separator (no suppression across a line break)', () => {
+    expect(labeledSpans('compte 046454286\nRT0001').some((s) => s.label === 'government_id')).toBe(true)
+  })
+
+  it('still emits government_id for a bare 9-digit Luhn number (SIN recall preserved)', () => {
+    const gov = labeledSpans('NAS 046454286').find((s) => s.label === 'government_id')
+    expect(gov).toBeDefined()
+    expect(gov!.sub.replace(/\D/g, '')).toBe('046454286')
+  })
+
+  it('does NOT suppress when the trailing token is a letter code that is not a BN program code', () => {
+    // "ST0001" is not an RT/RP/RC/RZ/RM/RR/RG program account, so the 9-digit run still flags as a SIN.
+    // (A trailing plain digit group like "046454286 1234" instead merges into one 13-digit account-id run.)
+    expect(labeledSpans('046454286 ST0001').some((s) => s.label === 'government_id')).toBe(true)
+  })
+})

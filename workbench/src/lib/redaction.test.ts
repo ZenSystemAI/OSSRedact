@@ -3,7 +3,7 @@
 
 import { describe, it, expect } from 'vitest'
 import JSZip from 'jszip'
-import { mergeSpans, combineWithManual, buildEntityMap, redactedText, rehydrate, toSpans, newPlaceholderIndex } from './redaction'
+import { mergeSpans, combineWithManual, buildEntityMap, redactedText, rehydrate, toSpans, newPlaceholderIndex, sweepKnownValues, resolveRenderSpans } from './redaction'
 import { extOf, typeBucket, sameTypeError, neutralName, assembleZip } from './batch'
 import type { RawSpan, Span } from './types'
 
@@ -332,5 +332,115 @@ describe('batch helpers', () => {
     expect(names.some((n) => /entity-map|map\.json/i.test(n))).toBe(false)
     // and no upload filename leaked in as an archive entry
     expect(names.every((n) => /^redacted-\d+\.txt$|^audit-trail\.json$/.test(n))).toBe(true)
+  })
+})
+
+// -------------------------
+// Finding C: repeated-value sweep (positional redaction misses duplicate occurrences)
+// -------------------------
+describe('sweepKnownValues + redactedText repeated-value hardening', () => {
+  it('redactedText masks a duplicate occurrence the detector missed', () => {
+    // detector found ONLY the first email occurrence (recall gap on the repeated footer copy)
+    const text = 'Contact a.user@example.test for details. Footer: a.user@example.test'
+    const spans: Span[] = [
+      { id: 's1', start: 8, end: 27, label: 'email', tier: 0, conf: 0.99, rule: 'tier0:email', source: 'auto', active: true },
+    ]
+    expect(text.slice(8, 27)).toBe('a.user@example.test') // sanity: span covers the first occurrence
+    const out = redactedText(text, spans)
+    expect(out).not.toContain('a.user@example.test') // BOTH occurrences masked
+    expect((out.match(/<EMAIL_001>/g) || []).length).toBe(2)
+  })
+
+  it('does NOT mask a numeric value inside a longer number (token-boundary safe)', () => {
+    // "1234567" is detected; "12345678" elsewhere must NOT be corrupted by the sweep
+    const text = 'acct 1234567 then ref 12345678 end'
+    const spans: Span[] = [
+      { id: 's1', start: 5, end: 12, label: 'account_number', tier: 0, conf: 0.6, rule: 'x', source: 'auto', active: true },
+    ]
+    expect(text.slice(5, 12)).toBe('1234567')
+    const out = redactedText(text, spans)
+    expect(out).toContain('12345678') // longer number intact
+    expect(out).not.toMatch(/(?<![\d])1234567(?![\d])/) // the standalone value is gone
+  })
+
+  it('does NOT mask a short value inside a longer word', () => {
+    const out = sweepKnownValues('Live wire', { '<X_001>': 'Live' })
+    // "Live" (4 chars) is a whole word here -> masked; but it must not match inside "Lives"
+    expect(out).toBe('<X_001> wire')
+    expect(sweepKnownValues('He Lives here', { '<X_001>': 'Live' })).toBe('He Lives here')
+  })
+
+  it('does NOT rewrite inside an already-inserted placeholder (Codex DO-NOT-SHIP fix)', () => {
+    // an org literally named "EMAIL" must not corrupt the "<EMAIL_001>" placeholder the positional pass made
+    const map = { '<EMAIL_001>': 'a@b.example', '<ORG_001>': 'EMAIL' }
+    const positional = '<EMAIL_001> ref a@b.example for EMAIL'
+    const out = sweepKnownValues(positional, map)
+    expect(out).not.toMatch(/<<|_001>_\d/) // no nested / corrupted placeholder
+    expect(out.startsWith('<EMAIL_001> ')).toBe(true) // the inserted placeholder survived verbatim
+    expect(out).not.toContain('a@b.example') // the duplicate value still got masked
+    expect(rehydrate(out, map)).toContain('a@b.example') // and round-trips cleanly
+  })
+
+  it('does NOT let a later sweep entry corrupt a placeholder an earlier entry inserted (Codex round 2)', () => {
+    // an org value literally "EMAIL_001" must not rewrite the "<EMAIL_001>" the email sweep just inserted
+    const map = { '<EMAIL_001>': 'a@b.example', '<ORG_001>': 'EMAIL_001' }
+    const out = sweepKnownValues('Footer a@b.example and EMAIL_001', map)
+    expect(out).toBe('Footer <EMAIL_001> and <ORG_001>')
+    expect(out).not.toMatch(/<</) // no nested/corrupted placeholder
+    expect(rehydrate(out, map)).toBe('Footer a@b.example and EMAIL_001') // round-trips exactly
+  })
+
+  it('does NOT mask a value immediately before a combining accent mark', () => {
+    // decomposed "Jose" + U+0301 is one visual token; masking "Jose" would orphan the accent
+    const out = sweepKnownValues('José paid', { '<PERSON_001>': 'Jose' })
+    expect(out).toBe('José paid')
+  })
+
+  it('does NOT mask a value inside an underscore-compound token', () => {
+    expect(sweepKnownValues('Live_Wire on', { '<X_001>': 'Live' })).toBe('Live_Wire on')
+  })
+
+  it('round-trips: rehydrate restores all swept occurrences', () => {
+    const text = 'a.user@example.test x a.user@example.test'
+    const spans: Span[] = [
+      { id: 's1', start: 0, end: 19, label: 'email', tier: 0, conf: 0.99, rule: 'x', source: 'auto', active: true },
+    ]
+    const { map } = buildEntityMap(text, spans)
+    const out = redactedText(text, spans)
+    expect(rehydrate(out, map)).toBe(text)
+  })
+})
+
+// -------------------------
+// resolveRenderSpans: active PII must win over an overlapping inactive span (display-leak fix, pre-merge review)
+// -------------------------
+describe('resolveRenderSpans', () => {
+  const span = (id: string, start: number, end: number, active: boolean, label = 'x'): Span => ({
+    id, start, end, label, tier: 0, conf: 1, rule: 'r', source: id.startsWith('m') ? 'manual' : 'auto', active,
+  })
+
+  it('clips an inactive span around an active span it overlaps (active value never swallowed)', () => {
+    // the EXACT pre-merge-review leak: inactive manual [0,26) overlapping active phone [9,21)
+    const out = resolveRenderSpans([span('m1', 0, 26, false), span('p1', 9, 21, true, 'phone_number')])
+    const act = out.find((s) => s.id === 'p1')!
+    expect([act.start, act.end]).toEqual([9, 21]) // active span survives whole
+    // NO inactive span may cover ANY offset inside the active range -> renders as a chip, not kept plaintext
+    for (let off = 9; off < 21; off++) {
+      expect(out.find((s) => !s.active && s.start <= off && s.end > off)).toBeUndefined()
+    }
+    // the inactive span is preserved only in the gaps around the active one
+    expect(out.some((s) => !s.active && s.start === 0 && s.end === 9)).toBe(true)
+    expect(out.some((s) => !s.active && s.start === 21 && s.end === 26)).toBe(true)
+  })
+
+  it('drops an inactive span fully contained in an active one', () => {
+    const out = resolveRenderSpans([span('m', 5, 10, false), span('a', 0, 20, true)])
+    expect(out.filter((s) => !s.active)).toHaveLength(0)
+  })
+
+  it('is a no-op (sort only) when nothing overlaps', () => {
+    const out = resolveRenderSpans([span('a', 10, 15, true), span('b', 0, 5, false)])
+    expect(out.map((s) => s.id)).toEqual(['b', 'a'])
+    expect(out).toHaveLength(2)
   })
 })

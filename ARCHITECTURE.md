@@ -1,21 +1,20 @@
-# ossredact Architecture
+# qc-pii Architecture
 
-A technical deep-dive of the ossredact local privacy gateway, written for a reader who wants to
+A technical deep-dive of the qc-pii local privacy gateway, written for a reader who wants to
 understand or audit the design.
 
-## What ossredact is
+## What qc-pii is
 
-ossredact is a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs. On
+qc-pii is a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs. On
 egress it redacts PII and secrets in the request's free-text fields to stable placeholders; on
 the response it rehydrates those placeholders back to the real values. The local client (Claude
 Code, Codex, Hermes) sees real data; the cloud model only ever sees placeholders.
 
-The wire formats supported today are Anthropic `/v1/messages` and OpenAI-compatible
-`/v1/chat/completions` (routing Codex, omp, and other OpenAI-compatible clients through the same
-redact/rehydrate contract via openai_adapter.py). Two honest caveats: the proxy code that serves
-these routes is not yet version-controlled in this repo (finding F6), and only
-`/v1/chat/completions` is routed -- the newer `/v1/responses` API used by some Codex versions is
-not yet routed. Hermes is still planned. Point any tool at the gateway with:
+The wire formats supported today are Anthropic `/v1/messages`, OpenAI-compatible
+`/v1/chat/completions` (routing Codex, omp, and other OpenAI-compatible clients via openai_adapter.py),
+and OpenAI `/v1/responses` (the API Codex CLI speaks, via responses_adapter.py) -- all through the same
+redact/rehydrate contract. The egress-proxy code now lives in this repo under `appliance/`; the GPU NER
+gate service it calls remains host-only (finding F6). Hermes is still planned. Point any tool at the gateway with:
 
 ```
 ANTHROPIC_BASE_URL=http://<host>:8011
@@ -32,7 +31,7 @@ rather than another cloud DLP hop.
 ### Why the proxy approach
 
 Going fully local for data sovereignty is too expensive (256GB+ VRAM to run a SOTA model at
-home). ossredact takes the other route: filter private data out, use cloud SOTA, redact on egress
+home). qc-pii takes the other route: filter private data out, use cloud SOTA, redact on egress
 and rehydrate transparently. Two users motivate the design:
 
 1. The hobbyist who wants data sovereignty but cannot afford GPUs.
@@ -41,7 +40,7 @@ and rehydrate transparently. Two users motivate the design:
 ### Honest positioning
 
 The redaction-proxy concept already exists. og-local/OutGate (BSL license) and rehydra-sdk (MIT)
-both proxy these wire formats with round-trip streaming rehydration. ossredact does **not** claim to
+both proxy these wire formats with round-trip streaming rehydration. qc-pii does **not** claim to
 be first or only. Its distinct contribution is:
 
 - A trained French-Quebec + English PII NER model (competitors use generic Presidio/regex).
@@ -402,7 +401,7 @@ Underneath the NER suite sit two deterministic layers (in the deployed appliance
 - **Deterministic secrets layer** (gitleaks-style patterns + Shannon-entropy backstop with
   UUID/git-SHA/sequential FP filters).
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, and the validation code. The egress proxy (`:8011`), SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer run in the separately-deployed appliance, which is not yet version-controlled in this repo (tracked as finding F6). The pipeline described in this document is that of the deployed appliance.
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The deployed GPU NER gate service (`gate_service_gpu.py`) remains host-only (tracked as finding F6). The pipeline described in this document is that of the deployed appliance.
 
 ### 20 labels
 
@@ -452,13 +451,13 @@ why the base model is the always-on tier (deployed as CPU INT8).
 
 Presidio configured with English + French large spaCy, union, same sets, same metric:
 
-| Test          | ossredact recall | Presidio recall | ossredact clean_fp | Presidio clean_fp |
+| Test          | qc-pii recall | Presidio recall | qc-pii clean_fp | Presidio clean_fp |
 |---------------|---------------|-----------------|-----------------|-------------------|
 | ALL-CAPS gate | 0.955         | 0.779           | 0               | (n/a)             |
 | v6 val        | 0.990         | 0.759           | 0               | 343               |
 | canonical     | 0.986         | 0.798           | 0               | 508               |
 
-ossredact wins recall by **17 to 23 points** and has **far fewer false positives**.
+qc-pii wins recall by **17 to 23 points** and has **far fewer false positives**.
 
 ### Synthetic Québec corpus
 
@@ -509,4 +508,4 @@ Charts: `./charts/fig1..fig5` (png).
 - **Track A appliance is built**, running as a **systemd service**, and **verified end-to-end**: a
   real Claude Code session through the proxy redacts and rehydrates transparently.
 - **Not yet published.**
-- The workbench UI is **planned**. The OpenAI/Codex adapter (`/v1/chat/completions`) is live; the `/v1/responses` route and the Hermes adapter are still planned. (The egress-proxy code that serves it is not yet version-controlled here -- finding F6.)
+- The workbench UI is **built**. The OpenAI/Codex adapters (`/v1/chat/completions` and `/v1/responses`) are live; the Hermes adapter is still planned. (The egress-proxy code now lives in this repo under `appliance/`; the GPU NER gate service remains host-only -- finding F6.)

@@ -1,15 +1,15 @@
-# ossredact
+# qc-pii
 
 **A local privacy gateway that strips PII and secrets before they reach a cloud LLM, and puts them back in the reply.**
 
-ossredact is an HTTP proxy that sits in front of cloud LLM APIs. On the way out it redacts PII and secrets in the request's free-text fields to stable placeholders. On the way back it rehydrates those placeholders into the real values. Your local tool (Claude Code and Codex today, Hermes planned) sees real data the whole time. The cloud model only ever sees placeholders. The detection model runs locally on-device (CPU INT8 always-on; NPU/OpenVINO alternate), so no detection call ever leaves your machine.
+qc-pii is an HTTP proxy that sits in front of cloud LLM APIs. On the way out it redacts PII and secrets in the request's free-text fields to stable placeholders. On the way back it rehydrates those placeholders into the real values. Your local tool (Claude Code and Codex today, Hermes planned) sees real data the whole time. The cloud model only ever sees placeholders. The detection model runs locally on-device (CPU INT8 always-on; NPU/OpenVINO alternate), so no detection call ever leaves your machine.
 
 ## Why
 
-Going fully local for data sovereignty is too expensive: SOTA-quality local inference needs 256GB+ of VRAM. ossredact takes the other path. Filter the private data out, use cloud SOTA, redact on egress and rehydrate transparently. Two users:
+Going fully local for data sovereignty is too expensive: SOTA-quality local inference needs 256GB+ of VRAM. qc-pii takes the other path. Filter the private data out, use cloud SOTA, redact on egress and rehydrate transparently. Two users:
 
 1. **The hobbyist** who wants data sovereignty but cannot justify a GPU rig. Keep using cloud Claude, keep your data home.
-2. **The employee** who unknowingly leaks client PII into ChatGPT or Claude. ossredact is always-on DLP that catches it before it ships.
+2. **The employee** who unknowingly leaks client PII into ChatGPT or Claude. qc-pii is always-on DLP that catches it before it ships.
 
 ## How it works
 
@@ -63,11 +63,11 @@ claude
 
 That is it. Your Claude Code session now redacts on egress and rehydrates on the response, transparently.
 
-Anthropic `/v1/messages` and OpenAI-compatible `/v1/chat/completions` (Codex, omp) are supported today, through the same redact/rehydrate contract. The newer `/v1/responses` API and the Hermes adapter are still planned. (The proxy code that serves these is not yet version-controlled in this repo -- finding F6.)
+Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions` (Codex, omp), and OpenAI `/v1/responses` (Codex) are supported today, through the same redact/rehydrate contract. The Hermes adapter is still planned. (The egress-proxy code now lives in this repo under `appliance/`; the GPU NER gate service it calls remains host-only -- finding F6.)
 
 ## What it catches
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, and the validation code. The egress proxy (`:8011`), SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline above run in the separately-deployed appliance, which is not yet version-controlled in this repo (tracked as finding F6).
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline above). The deployed GPU NER gate service (`gate_service_gpu.py`) remains host-only (tracked as finding F6).
 
 **Tier-0 deterministic floor (always on, in the deployed appliance).** Regex + Luhn for the catastrophic structured categories, plus a deterministic secrets layer: ported gitleaks-style patterns and a Shannon-entropy backstop, with UUID / git-SHA / sequential false-positive filters. This layer is the reliable floor and runs on every request.
 
@@ -107,15 +107,15 @@ Earlier results on the v6 generation sets (in-distribution held-out, train and v
 
 **NER vs Microsoft Presidio** (English + French large spaCy, union, same sets, same metric):
 
-![ossredact vs Presidio](charts/fig5_vs_presidio.png)
+![qc-pii vs Presidio](charts/fig5_vs_presidio.png)
 
-| Set | ossredact recall | Presidio recall | ossredact clean_fp | Presidio clean_fp |
+| Set | qc-pii recall | Presidio recall | qc-pii clean_fp | Presidio clean_fp |
 |-----|---------------|-----------------|-----------------|-------------------|
 | ALL-CAPS gate | 0.955 | 0.779 | 0 | - |
 | v6 val | 0.990 | 0.759 | 0 | 343 |
 | canonical | 0.986 | 0.798 | 0 | 508 |
 
-ossredact wins recall by 17 to 23 points **and** has far fewer false positives.
+qc-pii wins recall by 17 to 23 points **and** has far fewer false positives.
 
 **Recall by tier (v6/v7):**
 
@@ -151,15 +151,15 @@ State plainly:
 
 The redaction-proxy concept already exists. [og-local / OutGate](https://github.com/outgate-ai/og-local) (BSL license) and rehydra-sdk (MIT) both proxy these wire formats with round-trip streaming rehydration.
 
-ossredact's distinct contribution:
+qc-pii's distinct contribution:
 
 - A **trained French-Quebec + English PII NER model** (competitors use generic Presidio / regex).
 - Running the model **locally on-device** (CPU INT8 always-on; NPU/OpenVINO alternate): no cloud detection call, true data sovereignty.
 - An always-on **deterministic secrets + structured-PII floor**.
 - **Quebec Law 25** framing.
 
-ossredact does not claim to be first or only at the proxy pattern.
+qc-pii does not claim to be first or only at the proxy pattern.
 
 ## Status
 
-The Track A appliance is built, running as a systemd service, and verified end-to-end: a real Claude Code session through the proxy redacts and rehydrates transparently. **Not yet published.** The workbench UI is planned. The OpenAI / Codex `/v1/chat/completions` adapter is live; `/v1/responses` and Hermes are still planned.
+The Track A appliance is built, running as a systemd service, and verified end-to-end: a real Claude Code session through the proxy redacts and rehydrates transparently. **Not yet published.** The workbench UI is built. The OpenAI / Codex `/v1/chat/completions` and `/v1/responses` (Codex) adapters are live; the Hermes adapter is still planned.

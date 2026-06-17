@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a BIG synthetic Québec PII corpus for validating the ossredact gate.
+"""Generate a BIG synthetic Québec PII corpus for validating the Sparx gate.
 
 100% SYNTHETIC. Every name/SIN/email/account/secret is fabricated from curated pools + random.
 No real client data is ever read. Secrets are format-valid but fake (random bodies), never real keys.
@@ -198,7 +198,7 @@ def doc_bank_fr(truth, decoys):
             desc = f"Achat {m}"
         lines.append(f"{d:<22} {desc:<40} {amount():>12}")
     dec = invalid_sin(); decoys.append(dec)
-    txt = (f"RELEVÉ BANCAIRE — {random.choice(BANKS_FR)}\n"
+    txt = (f"RELEVÉ BANCAIRE \u2014 {random.choice(BANKS_FR)}\n"
            f"Titulaire: {p}\nAdresse: {a} {postal()}\nNAS: {s}\n"
            f"Téléphone: {ph}    Courriel: {em}\n"
            f"No de compte: {acc}    Identifiant de connexion: {uid}\n"
@@ -220,7 +220,7 @@ def doc_bank_en(truth, decoys):
     for _ in range(random.randint(8, 20)):
         d = date_en(); add(truth, 'date', d)
         lines.append(f"{d:<22} {('Purchase ' + random.choice(MERCHANTS)):<40} {amount():>12}")
-    txt = (f"ACCOUNT STATEMENT — {random.choice(BANKS_EN)}\n"
+    txt = (f"ACCOUNT STATEMENT \u2014 {random.choice(BANKS_EN)}\n"
            f"Account holder: {p}\nAddress: {a} {postal()}\nSIN: {s}\n"
            f"Phone: {ph}    Email: {em}\n"
            f"Account No: {acc}    Card on file: {cc}    Session ID: {uid}\n"
@@ -249,7 +249,7 @@ def doc_email_thread(truth, decoys):
 
 
 def doc_env(truth, decoys):
-    lines = ["# .env — service configuration"]
+    lines = ["# .env \u2014 service configuration"]
     keys = ['OPENAI_API_KEY', 'AWS_ACCESS_KEY_ID', 'GITHUB_TOKEN', 'SLACK_BOT_TOKEN', 'STRIPE_SECRET_KEY',
             'DATABASE_URL', 'MONGO_URI', 'JWT_SECRET', 'GCP_API_KEY', 'SESSION_SECRET']
     for k in random.sample(keys, random.randint(6, 10)):
@@ -271,7 +271,7 @@ def doc_code(truth, decoys):
     conn = f"postgres://app:{b62(20)}@10.0.0.{random.randint(2,250)}:5432/db"
     add(truth, 'secret', conn)
     sha = benign_hash(); decoys.append(sha)
-    txt = ("# settings.py — generated config\n"
+    txt = ("# settings.py \u2014 generated config\n"
            "import os\n\n"
            f'OWNER = "{p}"  # contact {em}\n'
            f'API_KEY = "{sk}"\n'

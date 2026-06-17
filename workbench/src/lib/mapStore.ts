@@ -7,7 +7,7 @@
 // Design notes the next maintainer must keep:
 // - The fingerprint MUST be over the redacted body, never the original. Hashing originals would itself
 //   be a (weak) leak and would not match the returned (colleague-edited) file anyway.
-// - Raw IndexedDB is used (browser-native, no runtime dep). DB `ossredact-maps`, store `entityMaps`,
+// - Raw IndexedDB is used (browser-native, no runtime dep). DB `sparx-maps`, store `entityMaps`,
 //   keyPath `id`. `id` == `fpExact`, so a re-redact of the same body is idempotent (matters under
 //   React StrictMode, which double-invokes effects in dev -- main.tsx).
 // - The record carries a forward-compatible `fingerprints` array (one entry per source body) so a
@@ -16,14 +16,14 @@
 
 import type { EntityMap } from './types'
 
-const DB_NAME = 'ossredact-maps'
+const DB_NAME = 'sparx-maps'
 const STORE = 'entityMaps'
 const DB_VERSION = 1
 
 // Opt-in preference key. ONLY a boolean preference lives in localStorage -- never the map (which holds
 // originals). Default ON for usability: when OFF, putMap callers must write nothing. Shared by the
 // redact-side write gate (App.tsx) and the toggle UI (Dropzone.tsx) so there is one source of truth.
-const REMEMBER_KEY = 'ossredact-remember-maps'
+const REMEMBER_KEY = 'sparx-remember-maps'
 
 export function getRemember(): boolean {
   try {

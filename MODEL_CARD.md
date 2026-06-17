@@ -2,7 +2,7 @@
 language:
   - fr
   - en
-license: apache-2.0
+license: mit
 tags:
   - token-classification
   - pii
@@ -12,16 +12,17 @@ tags:
 pipeline_tag: token-classification
 ---
 
-# ossredact NER Suite (3 tiers)
+# qc-pii NER Suite (3 tiers)
 
+> License: MIT, (c) 2026 ZenSystemAI. Matches the published `@ossredact/core` package and its `LICENSE`.
 
 ## Model description
 
-ossredact is the detection model behind a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs (Anthropic `/v1/messages` and OpenAI-compatible `/v1/chat/completions` today, the latter routing Codex/omp; the newer `/v1/responses` API is not yet routed). On egress the gateway redacts PII and secrets in the request's free-text fields to stable placeholders; on the response it rehydrates those placeholders back to the real values. The local client (Claude Code, Codex, Hermes) sees real data; the cloud model only ever sees placeholders. The NER model runs **locally on-device** (deployed always-on tier: dynamic-INT8 ONNX on CPU via onnxruntime; Intel NPU / OpenVINO FP16 preserved as a drop-in alternate), so detection never leaves the machine.
+qc-pii is the detection model behind a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs (Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions` routing Codex/omp, and OpenAI `/v1/responses` for Codex CLI today). On egress the gateway redacts PII and secrets in the request's free-text fields to stable placeholders; on the response it rehydrates those placeholders back to the real values. The local client (Claude Code, Codex, Hermes) sees real data; the cloud model only ever sees placeholders. The NER model runs **locally on-device** (deployed always-on tier: dynamic-INT8 ONNX on CPU via onnxruntime; Intel NPU / OpenVINO FP16 preserved as a drop-in alternate), so detection never leaves the machine.
 
 The motivation: going fully local for data sovereignty is too expensive (256GB+ of VRAM). Instead, filter private data out, use cloud SOTA, redact on egress and rehydrate transparently. Two users are served: (1) the hobbyist who wants data sovereignty but cannot afford GPUs; (2) the employee who unknowingly leaks client PII into ChatGPT or Claude (always-on DLP).
 
-This card describes a **3-tier NER suite** with a French-Quebec + English focus. **This bilingual Quebec PII focus is the moat**: competitors lean on generic Presidio or regex, while ossredact is trained for French-Quebec and English PII.
+This card describes a **3-tier NER suite** with a French-Quebec + English focus. **This bilingual Quebec PII focus is the moat**: competitors lean on generic Presidio or regex, while qc-pii is trained for French-Quebec and English PII.
 
 | Tier | Base model | Footprint / format | Role |
 |---|---|---|---|
@@ -34,7 +35,7 @@ The suite covers **20 labels** (shipped model, `training/labels_v20.json`): `acc
 
 The prior 23-label scheme was consolidated: `bank_account` + `routing_number` folded into `account_number` / `sensitive_account_id`; `api_key` + `access_token` folded into `secret` / `password`; `sensitive_date` folded into `date_of_birth`; `phone` renamed `phone_number`; `postal` renamed `postal_code`; `ip` renamed `ip_address`.
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, and the validation code. The egress proxy, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline below run in the separately-deployed appliance, which is not yet version-controlled in this repo (tracked as finding F6).
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline below). The deployed GPU NER gate service (`gate_service_gpu.py`) remains host-only (tracked as finding F6).
 
 Alongside the NER model run two deterministic layers (in the deployed appliance):
 - **Tier-0** (regex + Luhn) owns the catastrophic structured categories.
@@ -108,13 +109,13 @@ GPU xlm-r-large recall is identical to NPU on the reported sets (0.955 ALL-CAPS 
 
 Presidio configured with English + French large spaCy, union, evaluated on the same sets with the same metric.
 
-| Set | ossredact recall | Presidio recall | ossredact clean_fp | Presidio clean_fp |
+| Set | qc-pii recall | Presidio recall | qc-pii clean_fp | Presidio clean_fp |
 |---|---|---|---|---|
 | ALL-CAPS gate | 0.955 | 0.779 | 0 | (n/a) |
 | v6 val | 0.990 | 0.759 | 0 | 343 |
 | canonical | 0.986 | 0.798 | 0 | 508 |
 
-ossredact wins recall by **17 to 23 points** and has far fewer false positives.
+qc-pii wins recall by **17 to 23 points** and has far fewer false positives.
 
 ### Synthetic Québec corpus
 
@@ -148,7 +149,7 @@ Charts are available at `./charts/fig1..fig5` (png).
 
 ### Honest positioning
 
-The redaction-proxy concept already exists. og-local/OutGate (BSL license) and rehydra-sdk (MIT) both proxy these wire formats with round-trip streaming rehydration. ossredact's distinct contribution is: a trained French-Quebec + English PII NER model (competitors use generic Presidio / regex), running the model locally on-device (CPU INT8 always-on; NPU/OpenVINO alternate tier): no cloud detection call, true data sovereignty, an always-on deterministic secrets + structured-PII floor, and Quebec Law 25 framing. **No "first" or "only" claim is made.**
+The redaction-proxy concept already exists. og-local/OutGate (BSL license) and rehydra-sdk (MIT) both proxy these wire formats with round-trip streaming rehydration. qc-pii's distinct contribution is: a trained French-Quebec + English PII NER model (competitors use generic Presidio / regex), running the model locally on-device (CPU INT8 always-on; NPU/OpenVINO alternate tier): no cloud detection call, true data sovereignty, an always-on deterministic secrets + structured-PII floor, and Quebec Law 25 framing. **No "first" or "only" claim is made.**
 
 ## How to use
 
@@ -162,4 +163,4 @@ Then run Claude Code, Codex, or Hermes as usual. The gateway redacts PII and sec
 
 ## Status
 
-The Track A appliance is built, running as a systemd service, and verified end-to-end (a real Claude Code session through the proxy redacts and rehydrates transparently). It is **not yet published**. The workbench UI is planned. The OpenAI/Codex `/v1/chat/completions` adapter is live; `/v1/responses` and the Hermes adapter are still planned.
+The Track A appliance is built, running as a systemd service, and verified end-to-end (a real Claude Code session through the proxy redacts and rehydrates transparently). It is **not yet published**. The workbench UI is built. The OpenAI/Codex `/v1/chat/completions` and `/v1/responses` (Codex) adapters are live; the Hermes adapter is still planned.

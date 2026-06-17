@@ -105,6 +105,32 @@ export function combineWithManual(prev: Span[], detected: Span[]): Span[] {
   return [...manual, ...fresh].sort((a, b) => a.start - b.start)
 }
 
+// Resolve active-over-inactive overlaps for DISPLAY. combineWithManual only treats ACTIVE manual spans as
+// blockers (redaction.ts combineWithManual), so an INACTIVE manual span can overlap an ACTIVE detection in
+// app state. A naive renderer that picks the lowest-start span then paints its whole range would render the
+// inactive "kept" region across the active PII and show the original value as plaintext (a DISPLAY LEAK on
+// the review surface, copyable). Active PII MUST always win: keep every active span whole and clip every
+// inactive span to the gaps BETWEEN active spans. No-op when nothing overlaps (the common case). Used by
+// both DocCanvas (flat) and LayoutCanvas (layout) so neither view can disagree with the redacted output.
+export function resolveRenderSpans(spans: Span[]): Span[] {
+  const active = spans.filter((s) => s.active).sort((a, b) => a.start - b.start)
+  if (!active.length) return [...spans].sort((a, b) => a.start - b.start)
+  const out: Span[] = [...active]
+  for (const s of spans) {
+    if (s.active) continue
+    let cursor = s.start
+    for (const a of active) {
+      if (a.end <= cursor) continue // active interval already behind the cursor
+      if (a.start >= s.end) break // remaining active intervals are past this inactive span
+      if (a.start > cursor) out.push({ ...s, start: cursor, end: Math.min(a.start, s.end) }) // gap before active
+      cursor = Math.max(cursor, a.end)
+      if (cursor >= s.end) break
+    }
+    if (cursor < s.end) out.push({ ...s, start: cursor, end: s.end }) // tail after the last active overlap
+  }
+  return out.sort((a, b) => a.start - b.start)
+}
+
 // Shared placeholder index for a SESSION (one document, or one whole same-type batch). Holds the
 // running per-label counters AND a value->placeholder dedup table so the SAME original value resolves
 // to the SAME placeholder everywhere it appears -- within a doc AND across every file in a batch
@@ -158,10 +184,60 @@ export function buildEntityMap(
   return { map: idx.map, placeholderOf, index: idx }
 }
 
+// Minimum value length to sweep -- below this, a value is too generic to mask globally without risking
+// spurious matches (and tiny tokens are rarely uniquely-identifying on their own).
+const MIN_SWEEP_LEN = 4
+const RE_SPECIAL = /[.*+?^${}()|[\]\\]/g
+// A <LABEL_NNN> placeholder token (matches the buildEntityMap shape). These are inserted by the positional
+// pass and must be PRESERVED verbatim by the sweep -- never rewritten (else a value equal to a label-like
+// token, e.g. an org named "EMAIL", would corrupt "<EMAIL_001>"; Codex review 2026-06-17).
+const PLACEHOLDER_TOKEN_RE = /<[A-Z][A-Z0-9_]*_\d{3,}>/g
+// Token characters for the boundary guard: letter, number, combining mark (decomposed accents), underscore
+// (so a value is not matched inside a `José` / `Live_Wire` compound). Hyphen/slash stay boundaries.
+const TOK = '[\\p{L}\\p{N}\\p{M}_]'
+
+// Mask EVERY remaining verbatim occurrence of an already-detected value that positional redaction missed.
+// Real-doc Finding C (2026-06-17): positional redaction masks only DETECTED span positions, so a value that
+// repeats across a long/multi-page document (per-page footers, repeated headers, line items) leaks at the
+// occurrences the detector skipped. This sweeps only KNOWN (already-mapped) values -- never a new guess --
+// longest-first, at TOKEN BOUNDARIES so a 7-digit value can NOT be matched inside an 8-digit number and a
+// short name can NOT be matched inside a longer word (the boundary guard is what makes the sweep safe -- a
+// naive global replace is the known "sweep_known fragility"). The sweep runs ONLY on the literal segments
+// BETWEEN placeholders, so it can never rewrite a placeholder the positional pass already inserted. Over-
+// masking an already-detected value is the safe error; rehydrate() restores every occurrence regardless.
+export function sweepKnownValues(redacted: string, map: EntityMap): string {
+  const entries = Object.entries(map)
+    .filter(([, v]) => v && v.trim().length >= MIN_SWEEP_LEN)
+    .sort((a, b) => b[1].length - a[1].length) // longest first -> the alternation prefers the longer value
+  if (!entries.length) return redacted
+  // value -> placeholder (values are unique in an EntityMap; longest-first insertion preserved by the Map)
+  const valueToPh = new Map<string, string>()
+  for (const [ph, v] of entries) if (!valueToPh.has(v)) valueToPh.set(v, ph)
+  // ONE combined left-to-right pass per gap. String.replace matches against the ORIGINAL gap and never
+  // re-scans the placeholders it inserts, so a later value can NOT rewrite a placeholder produced by an
+  // earlier match in the same sweep (the cascade bug Codex caught in the per-value loop). Longest-first
+  // alternation order makes the engine prefer the longer value at any position.
+  const alt = [...valueToPh.keys()].map((v) => v.replace(RE_SPECIAL, '\\$&')).join('|')
+  // Case-insensitive (parity with the Python gate, Codex HIGH-1): a known value must be masked regardless of
+  // case, so match with the 'i' flag and resolve the placeholder by the lowercased match. The map is already
+  // casefold-deduped (dedupKey lowercases), so each lowercased value maps to exactly one placeholder.
+  const re = new RegExp(`(?<!${TOK})(?:${alt})(?!${TOK})`, 'giu')
+  const valueToPhCi = new Map<string, string>()
+  for (const [v, ph] of valueToPh) if (!valueToPhCi.has(v.toLowerCase())) valueToPhCi.set(v.toLowerCase(), ph)
+  const sweepGap = (gap: string): string => gap.replace(re, (m) => valueToPhCi.get(m.toLowerCase()) ?? m)
+  // Split into literal gaps (swept) and placeholder tokens (preserved verbatim). split() with a global,
+  // capture-free regex drops the delimiters, so parts.length === tokens.length + 1; reassemble interleaved.
+  const parts = redacted.split(PLACEHOLDER_TOKEN_RE)
+  const tokens = redacted.match(PLACEHOLDER_TOKEN_RE) ?? []
+  let out = sweepGap(parts[0] ?? '')
+  for (let i = 0; i < tokens.length; i++) out += tokens[i] + sweepGap(parts[i + 1] ?? '')
+  return out
+}
+
 // Redacted text with <LABEL_NNN> placeholders (round-trip-capable). Inactive spans keep their original text.
 // Pass a shared `index` (the batch carry-in) so the same label+value gets the same placeholder across files.
 export function redactedText(text: string, spans: Span[], index?: PlaceholderIndex): string {
-  const { placeholderOf } = buildEntityMap(text, spans, index)
+  const { map, placeholderOf } = buildEntityMap(text, spans, index)
   const active = spans.filter((s) => s.active).sort((a, b) => a.start - b.start)
   let out = ''
   let last = 0
@@ -169,7 +245,9 @@ export function redactedText(text: string, spans: Span[], index?: PlaceholderInd
     out += text.slice(last, s.start) + placeholderOf.get(s.id)
     last = s.end
   }
-  return out + text.slice(last)
+  out += text.slice(last)
+  // Finding C hardening: catch any duplicate occurrence positional redaction missed (token-boundary-safe).
+  return sweepKnownValues(out, map)
 }
 
 export function rehydrate(text: string, map: EntityMap): string {

@@ -1,6 +1,6 @@
 @import 'tailwindcss';
 
-/* ===== ZenSystem tokens (mirrors ~/dev/ossredact-web/landing/index.html :root -- canonical source) ===== */
+/* ===== ZenSystem tokens (mirrors ~/dev/sparx-web/landing/index.html :root -- canonical source) ===== */
 @theme {
   --color-bg: #0f0f0f;
   --color-black: #050505;
@@ -16,9 +16,9 @@
   --color-error: #ef4444;
   --color-warning: #f59e0b;
 
-  --font-head: 'Inter Tight', sans-serif;
-  --font-body: 'Inter', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-head: 'Inter Tight Variable', 'Inter Tight', sans-serif;
+  --font-body: 'Inter Variable', 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', monospace;
 }
 
 :root {

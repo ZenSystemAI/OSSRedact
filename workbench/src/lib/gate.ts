@@ -1,4 +1,4 @@
-// OPTIONAL neural tier. A local gate (reached via the Vite /gate proxy, default = the gpu-host GPU gate on the
+// OPTIONAL neural tier. A local gate (reached via the Vite /gate proxy, default = the P620 GPU gate on the
 // tailnet) runs the full gate (Tier-0 + neural XLM-R + union merge) and returns spans WITH provenance. This
 // is the only path where text leaves the browser, and only to the user's own local gate over the tailnet --
 // never to the cloud. The workbench is fully functional without it (client-side Tier-0 in tier0.ts).

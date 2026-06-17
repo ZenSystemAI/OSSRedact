@@ -2,7 +2,7 @@
 """flinks_stmt generator: synthetic Quebec/Canada consumer bank statements in the REAL Flinks export layout.
 
 RE-GROUNDED (v11) on the actual Flinks export structure: the tab-delimited COLUMN-HEADER-ROW / VALUE-ROW
-tabular skeleton from <external-parser>/lib/privacy-filter.ts (the canonical parser) + samples/sanitized/*.txt.
+tabular skeleton from ci-pdf-parser/lib/privacy-filter.ts (the canonical parser) + samples/sanitized/*.txt.
 This replaces the v10 flat "Label: value" approximation. The header identity block is the ONLY PII; the
 whole transaction table is hard negatives (the operator's false-positive fix), with rich realistic
 descriptions (E-TFR / EFT / PAIE / Achat Visa Débit / Frais sur effet / NCR LOAN) ported from

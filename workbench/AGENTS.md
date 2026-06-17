@@ -1,6 +1,6 @@
-# AGENTS.md -- workbench (ossredact client-side redaction app)
+# AGENTS.md -- workbench (Sparx client-side redaction app)
 
-The **app domain** of `ossredact-privacy-gateway`. Working here you do NOT need the model/training
+The **app domain** of `sparx-privacy-gateway`. Working here you do NOT need the model/training
 context -- this is a self-contained front end. (The repo-root `AGENTS.md` covers the model/gate
 domain; read it only if your change touches the shared detection contract -- see below.)
 
@@ -35,6 +35,6 @@ drift silently. If you change the label set or a Tier-0 detector, mirror it on t
 
 ## Notes
 - Design tokens in `src/index.css` mirror the landing page palette, now at
-  `~/dev/ossredact-web/landing/index.html :root` (the canonical source). The comment at the top of
+  `~/dev/sparx-web/landing/index.html :root` (the canonical source). The comment at the top of
   `src/index.css` still points at the old in-repo path -- update it when you next touch that file.
-- No em dashes; use `--`. Never commit without the maintainer's approval.
+- No em dashes; use `--`. Never commit without Steven's approval.

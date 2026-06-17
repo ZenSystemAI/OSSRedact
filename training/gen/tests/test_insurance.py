@@ -158,7 +158,7 @@ def test_no_em_dash_in_output():
     for sp in ("train", "heldout"):
         for _ in range(60):
             t = insurance.gen(split=sp)['input']
-            assert "—" not in t          # no em dash anywhere in emitted text
+            assert "\u2014" not in t          # no em dash anywhere in emitted text
 
 
 def test_train_new_cue_vocabulary_present():

@@ -11,20 +11,20 @@ Tier-0 regex (incl. unicode-dash-normalized accounts, UUIDs, NAS, cards) + NPU n
 import sys, time, json, uuid
 from collections import defaultdict
 import numpy as np
-sys.path.insert(0, '/opt/ossredact-npu')
+sys.path.insert(0, '/home/steven/sparx-npu')
 from openvino import Core
 from transformers import AutoTokenizer
-from privacy_gate import PrivacyGate
+from privacy_gate import PrivacyGate, _build_known_re, _sweep_known
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 
-MODEL_DIR = '/opt/ossredact-npu/model'
+MODEL_DIR = '/home/steven/sparx-npu/model'
 XML = MODEL_DIR + '/openvino/model_fp16.xml'
 DEVICE = 'NPU'
-MAXLEN = 256
-CACHE_DIR = '/opt/ossredact-npu/.ovcache'
-MODEL_NAME = 'ossredact/npu-xlmr-base-v7 (OpenVINO FP16, Intel NPU)'
+MAXLEN = 512   # match NPUTier/GPUTier + the 600-char chunking: a token-dense 600-char chunk reaches ~300 tokens; 256 truncated the tail and dropped PII (see NPUTier note in privacy_gate.py)
+CACHE_DIR = '/home/steven/sparx-npu/.ovcache'
+MODEL_NAME = 'qc-pii/npu-xlmr-base-v7 (OpenVINO FP16, Intel NPU)'
 START = time.time()
 
 
@@ -75,7 +75,7 @@ gate.npu = OVTier(XML, MODEL_DIR, DEVICE, MAXLEN)
 gate.npu.spans('warmup Jean Tremblay NAS 046 454 286 compte 006-02761-1234567')
 print('NPU gate ready', flush=True)
 
-app = FastAPI(title='ossredact NPU sidecar')
+app = FastAPI(title='qc-pii NPU sidecar')
 
 
 class RedactReq(BaseModel):
@@ -97,8 +97,19 @@ def redact(req: RedactReq):
         by_rule[s.get('rule', '?')] += 1
         out.append(req.text[last:s['start']]); out.append(ph); last = s['end']
     out.append(req.text[last:])
+    redacted_text = ''.join(out)
+    # Finding C backstop: the positional pass masks only DETECTED span positions, so a value that repeats
+    # across a long/multi-page document (footers, repeated headers, line items) leaks at the occurrences the
+    # detector skipped. Sweep the redacted text for every already-known value (len>=4, word-boundary-guarded,
+    # longest-first) and mask each remaining occurrence with its EXISTING placeholder -- never a new one. Runs
+    # only on the literal gaps BETWEEN placeholders, so it cannot rewrite a placeholder already inserted.
+    value_to_placeholder = {}
+    for ph_, v_ in mapping.items():
+        value_to_placeholder.setdefault(v_, ph_)
+    known_re = _build_known_re(value_to_placeholder.keys())
+    redacted_text, _swept = _sweep_known(redacted_text, known_re, value_to_placeholder)
     return {
-        'redacted_text': ''.join(out),
+        'redacted_text': redacted_text,
         'mapping': mapping,
         'stats': {
             'request_id': uuid.uuid4().hex[:12],
@@ -138,7 +149,7 @@ def healthz():
 
 
 if __name__ == '__main__':
-    # 0.0.0.0 so the dockerized parser can reach it via <docker-host> (host-gateway). The gate-host
+    # 0.0.0.0 so the dockerized parser can reach it via host.docker.internal (host-gateway). The Beelink
     # firewall gates LAN exposure (same posture the retired sidecar had on :8001). Parser is loopback-local
     # otherwise; PII text only crosses the host-internal docker bridge.
     uvicorn.run(app, host='0.0.0.0', port=8001, log_level='warning')

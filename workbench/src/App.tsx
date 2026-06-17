@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Header from './components/Header'
 import Toolbar from './components/Toolbar'
 import DocCanvas from './components/DocCanvas'
+import LayoutCanvas, { layoutKind } from './components/LayoutCanvas'
 import PageView from './components/PageView'
 import Inspector from './components/Inspector'
 import Dropzone from './components/Dropzone'
-import type { Span, RegionBox } from './lib/types'
+import type { Span, RegionBox, EntityMap } from './lib/types'
 import { tier0Spans } from './lib/tier0'
-import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
+import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, sweepKnownValues, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
 import { labelTier, type Tier } from './lib/labels'
 import { deepDetect, gateHealth, type GateHealth } from './lib/gate'
 import { renderRedactedPdf, verifyNoText } from './lib/pdfExport'
@@ -23,7 +24,7 @@ export default function App() {
   const [doc, setDoc] = useState<LoadedDoc | null>(null)
   const [spans, setSpans] = useState<Span[]>([])
   const [regions, setRegions] = useState<RegionBox[]>([])
-  const [view, setView] = useState<'text' | 'pages'>('text')
+  const [view, setView] = useState<'text' | 'layout' | 'pages'>('text')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [gate, setGate] = useState<GateHealth | null>(null)
@@ -41,6 +42,10 @@ export default function App() {
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
   const batchAbort = useRef<AbortController | null>(null)
   const inBatch = batch.length > 0
+
+  // Open a document in the layout-preserving view when one is available (PDF geometry, or an xlsx/csv grid),
+  // so page/table structure shows by default; plain text falls back to the flat view.
+  const initialView = (d: LoadedDoc): 'text' | 'layout' | 'pages' => (layoutKind(d.kind, d.pages) ? 'layout' : 'text')
 
   const flash = useCallback((m: string) => {
     setToast(m)
@@ -80,7 +85,7 @@ export default function App() {
     setDoc(d)
     setSelectedId(null)
     setRegions([])
-    setView('text')
+    setView(initialView(d))
     const fresh = toSpans(mergeSpans(tier0Spans(d.text)), 'auto', mutedLabels)
     setSpans(fresh)
     const imgPages = (d.assess ?? []).filter((a) => a.status !== 'text-clean').length
@@ -109,7 +114,7 @@ export default function App() {
     setSpans(first.spans)
     setRegions(first.regions)
     setSelectedId(null)
-    setView('text')
+    setView(initialView(first.doc))
     flash(`Batch loaded: ${entries.length} ${first.kind} files share one entity map. Review each, then export one .zip.`)
   }
 
@@ -128,7 +133,7 @@ export default function App() {
       setSpans(next.spans)
       setRegions(next.regions)
       setSelectedId(null)
-      setView('text')
+      setView(initialView(next.doc))
     },
     [activeId, batch, spans, regions],
   )
@@ -444,8 +449,12 @@ export default function App() {
       if (!verdict.ok) return null
       return { blob, ext: 'pdf' }
     }
-    // text-ish: splice placeholders into the body (round-trip-capable); verify no original value survives
-    const out = redactBodyWith(d.text, entry.spans, po)
+    // text-ish: splice placeholders, then sweep any duplicate occurrence of a detected value (Finding C),
+    // consistent with redactedText, so a repeated value does not block the whole batch. The verify below
+    // stays as a fail-closed backstop (also covers any cross-file value).
+    const entryMap: EntityMap = {}
+    for (const s of entry.spans) if (s.active) { const ph = po.get(s.id); if (ph) entryMap[ph] = d.text.slice(s.start, s.end) }
+    const out = sweepKnownValues(redactBodyWith(d.text, entry.spans, po), entryMap)
     if (values.some((v) => v && out.includes(v))) return null
     const ext = d.kind || 'txt'
     return { blob: new Blob([out], { type: (MIME[ext] ?? 'text/plain') + ';charset=utf-8' }), ext }
@@ -557,6 +566,7 @@ export default function App() {
             regionCount={regionCount}
             hasRedactions={hasRedactions}
             isPdf={doc.kind === 'pdf'}
+            hasLayout={!!layoutKind(doc.kind, doc.pages)}
             view={view}
             onView={setView}
             busy={busy}
@@ -648,62 +658,54 @@ export default function App() {
               })}
             </aside>
           )}
-          {view === 'pages' && doc.kind === 'pdf' && doc.bytes && doc.pages ? (
-            <>
-              <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid var(--border)' }}>
-                <PageView
-                  bytes={doc.bytes}
-                  pages={doc.pages}
-                  assess={doc.assess ?? []}
-                  spans={spans}
-                  regions={regions}
-                  selectedSpanId={selectedId}
-                  onSelectSpan={setSelectedId}
-                  onAddRegion={addRegion}
-                  onDeleteRegion={deleteRegion}
-                />
-              </div>
-              <aside style={{ width: 340, flex: '0 0 340px', overflowY: 'auto', background: 'var(--color-surface)' }}>
-                <Inspector
-                  span={selected}
-                  text={doc.text}
-                  placeholder={selected ? placeholderOf.get(selected.id) : undefined}
-                  spans={spans}
-                  onToggle={toggle}
-                  onRelabel={relabel}
-                  onDelete={del}
-                  onSetLabel={setLabel}
-                  onSetTier={setTier}
-                />
-              </aside>
-            </>
-          ) : (
-            <>
-              <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid var(--border)' }}>
-                <DocCanvas
-                  text={doc.text}
-                  spans={spans}
-                  placeholderOf={placeholderOf}
-                  selectedId={selectedId}
-                  onSelect={setSelectedId}
-                  onAddManual={addManual}
-                />
-              </div>
-              <aside style={{ width: 340, flex: '0 0 340px', overflowY: 'auto', background: 'var(--color-surface)' }}>
-                <Inspector
-                  span={selected}
-                  text={doc.text}
-                  placeholder={selected ? placeholderOf.get(selected.id) : undefined}
-                  spans={spans}
-                  onToggle={toggle}
-                  onRelabel={relabel}
-                  onDelete={del}
-                  onSetLabel={setLabel}
-                  onSetTier={setTier}
-                />
-              </aside>
-            </>
-          )}
+          <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid var(--border)' }}>
+            {view === 'pages' && doc.kind === 'pdf' && doc.bytes && doc.pages ? (
+              <PageView
+                bytes={doc.bytes}
+                pages={doc.pages}
+                assess={doc.assess ?? []}
+                spans={spans}
+                regions={regions}
+                selectedSpanId={selectedId}
+                onSelectSpan={setSelectedId}
+                onAddRegion={addRegion}
+                onDeleteRegion={deleteRegion}
+              />
+            ) : view === 'layout' && layoutKind(doc.kind, doc.pages) ? (
+              <LayoutCanvas
+                text={doc.text}
+                spans={spans}
+                placeholderOf={placeholderOf}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                onAddManual={addManual}
+                pages={doc.pages}
+                kind={doc.kind}
+              />
+            ) : (
+              <DocCanvas
+                text={doc.text}
+                spans={spans}
+                placeholderOf={placeholderOf}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                onAddManual={addManual}
+              />
+            )}
+          </div>
+          <aside style={{ width: 340, flex: '0 0 340px', overflowY: 'auto', background: 'var(--color-surface)' }}>
+            <Inspector
+              span={selected}
+              text={doc.text}
+              placeholder={selected ? placeholderOf.get(selected.id) : undefined}
+              spans={spans}
+              onToggle={toggle}
+              onRelabel={relabel}
+              onDelete={del}
+              onSetLabel={setLabel}
+              onSetTier={setTier}
+            />
+          </aside>
           </div>
         </>
       ) : (

@@ -55,5 +55,5 @@ def test_date_no_longer_swallows_adjacent_digit():
 # ---- pure-negative input: the floor must not invent spans on PII-free text ----
 
 def test_clean_text_no_spurious_spans():
-    t = "Le service tourne sur le port 8080, GPU a dedicated GPU, aucune donnee personnelle ici."
+    t = "Le service tourne sur le port 8080, GPU 3090, aucune donnee personnelle ici."
     assert pairs(t) == set()

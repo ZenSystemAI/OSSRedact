@@ -86,7 +86,7 @@ def compute_metrics(eval_pred):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--base', default='FacebookAI/xlm-roberta-base')
-    ap.add_argument('--data', default='/opt/ossredact/datasets/pii-merged-v6')
+    ap.add_argument('--data', default='/home/steven/Sparx/datasets/pii-merged-v6')
     ap.add_argument('--labels', default='')
     ap.add_argument('--out', required=True)
     ap.add_argument('--epochs', type=float, default=3.0)

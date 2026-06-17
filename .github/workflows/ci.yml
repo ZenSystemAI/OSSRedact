@@ -37,7 +37,7 @@ jobs:
         run: npm test
 
   # -----------------------------------------------------------------------
-  # Redaction core package: build + unit tests (56 tests)
+  # Redaction core package: build + unit tests
   # -----------------------------------------------------------------------
   redaction-core:
     name: redaction-core (Node 22)
@@ -68,7 +68,7 @@ jobs:
   # -----------------------------------------------------------------------
   # Gate: torch-free floor tests only (Tier-0 re + merge + regression).
   # Excluded: gate/tests/test_maxlen.py and training/tests/test_compute_metrics.py
-  # (both require torch/onnxruntime on the gpu-host GPU box).
+  # (both require torch/onnxruntime on the P620 GPU box).
   # Full Python torch-free suite will be added when plan 015 lands
   # a requirements.txt with pinned deps.
   # -----------------------------------------------------------------------
@@ -93,5 +93,8 @@ jobs:
             gate/tests/test_validated_floor.py \
             gate/tests/test_merge.py \
             gate/tests/test_gate_regression.py \
+            gate/tests/test_gate_parity_vectors.py \
+            appliance/tests/test_appliance_floor.py \
+            appliance/tests/test_appliance_parity_vectors.py \
             validation/test_parity_check.py \
             -v

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export-parity gate for the ossredact model (direction D4).
+"""Export-parity gate for the qc-pii model (direction D4).
 
 Asserts that a QUANTIZED / exported model still matches the trained fp32 reference at the
 logit level, BEFORE it is shipped. We have no automated check today that the ONNX-INT8 (CPU)
@@ -18,9 +18,9 @@ inputs match what the model sees in production):
     label (the "PII decision parity"), since that is what actually matters for redaction.
 
 THE EXPORT ITSELF IS A STOP-AND-ASK GATE. This script only COMPARES an already-produced
-export against the reference; it does not quantize or deploy. Run it on gpu-host (the GPU only)
+export against the reference; it does not quantize or deploy. Run it on P620 (card 4 only)
 AFTER an export has been produced and BEFORE shipping it:
-    CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 \\
+    CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \\
     python validation/parity_check.py \\
       --ref   /path/to/fp32-model-dir \\
       --exported /path/to/onnx-int8-model-dir \\
@@ -151,7 +151,7 @@ def parity_verdict(min_cosine, mean_cosine, argmax_rate, pii_argmax_rate,
 
 
 # --------------------------------------------------------------------------------------
-# Model runners (gpu-host only: torch + onnxruntime + transformers + the model weights)
+# Model runners (P620 only: torch + onnxruntime + transformers + the model weights)
 # --------------------------------------------------------------------------------------
 def _load_texts(corpus_path, limit=None):
     rows = [json.loads(l) for l in open(corpus_path, encoding='utf-8') if l.strip()]

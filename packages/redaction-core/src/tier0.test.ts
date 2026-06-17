@@ -281,3 +281,32 @@ describe('tier0Spans Quebec IDs', () => {
     expect(merged.some((s) => s.subtype === 'neq')).toBe(true)
   })
 })
+
+// -------------------------
+// Canadian Business Number suppression (real-doc Finding A; never-leak SIN-cue override)
+// -------------------------
+describe('tier0Spans Business Number suppression', () => {
+  it('does NOT emit government_id for a 9-digit number with a BN program-account suffix (RT0001)', () => {
+    expect(labeledSpans('TPS 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('does NOT emit government_id for an RP (payroll) or hyphen-separated BN program account', () => {
+    expect(labeledSpans('046454286 RP0001').some((s) => s.label === 'government_id')).toBe(false)
+    expect(labeledSpans('046454286-RT0001').some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('emits government_id when a SIN cue precedes the number, even with a BN-looking suffix (never-leak)', () => {
+    expect(labeledSpans('NAS 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(true)
+    expect(labeledSpans('N.A.S. 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(true)
+  })
+
+  it('SIN cue is word-bounded, not a substring ("Business" must NOT un-suppress a BN)', () => {
+    expect(labeledSpans('Business number 046454286 RT0001').some((s) => s.label === 'government_id')).toBe(false)
+  })
+
+  it('still emits government_id for a bare 9-digit Luhn number (SIN recall preserved)', () => {
+    const gov = labeledSpans('NAS 046454286').find((s) => s.label === 'government_id')
+    expect(gov).toBeDefined()
+    expect(gov!.sub.replace(/\D/g, '')).toBe('046454286')
+  })
+})

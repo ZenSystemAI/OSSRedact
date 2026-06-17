@@ -1,4 +1,4 @@
-# Internal planning docs (specs/plans) — never commit to a public repo
+# Internal planning docs (specs/plans) -- never commit to a public repo
 docs/superpowers/
 # Internal research references (public facts, but kept local until an OSS release pass)
 docs/research/
@@ -25,7 +25,18 @@ node_modules/
 *.tmp
 /tmp/
 
-# Appliance runtime data + artifacts (gate-host egress proxy -- never commit)
+# Real-document (PII) validation work area -- raw text + per-doc offsets stay LOCAL only.
+# The committed artifact is validation/RESULT-realworld-*.md (aggregate, PII-free).
+validation/realworld/
+expenses-eval/
+*.pii.json
+*.pii.txt
+
+# Local agent + tooling scratch (worktrees, MCP browser snapshots) -- never commit
+.claude/
+.playwright-mcp/
+
+# Appliance runtime data + artifacts (Beelink egress proxy -- never commit)
 # SENSITIVE: encrypted session entity maps + .mapkey AES key
 maps/
 # model weights (singular dir on the host)
@@ -40,12 +51,3 @@ model.bak-*/
 private/
 # live host-specific config (commit gateway-config.example.yaml instead)
 gateway-config.yaml
-
-# Internal planning docs -- keep local, never publish
-plans/
-
-# Local Claude Code tooling / agent worktrees / local settings
-.claude/
-
-# keep the README chart figures (override the *.png ignore above)
-!charts/*.png

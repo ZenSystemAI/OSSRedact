@@ -186,7 +186,7 @@ def test_no_em_dash_in_output():
     random.seed(17)
     for sp in ("train", "heldout"):
         for _ in range(40):
-            assert "—" not in tax_slip.gen(split=sp)['input']
+            assert "\u2014" not in tax_slip.gen(split=sp)['input']
 
 
 def test_layouts_split_distinct():

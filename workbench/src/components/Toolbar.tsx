@@ -8,8 +8,9 @@ type Props = {
   regionCount: number
   hasRedactions: boolean
   isPdf: boolean
-  view: 'text' | 'pages'
-  onView: (v: 'text' | 'pages') => void
+  hasLayout: boolean
+  view: 'text' | 'layout' | 'pages'
+  onView: (v: 'text' | 'layout' | 'pages') => void
   busy: boolean
   gate: GateHealth | null
   onAutoDetect: () => void
@@ -61,13 +62,18 @@ export default function Toolbar(p: Props) {
         Clear
       </button>
 
-      {p.isPdf && (
+      {(p.isPdf || p.hasLayout) && (
         <div className="flex rounded-lg ml-1" style={{ border: '1px solid var(--border)', overflow: 'hidden' }}>
-          {(['text', 'pages'] as const).map((v) => (
+          {([
+            ['text', 'Text'],
+            ...(p.hasLayout ? [['layout', 'Layout'] as const] : []),
+            ...(p.isPdf ? [['pages', 'Pages'] as const] : []),
+          ] as const).map(([v, label]) => (
             <button
               key={v}
               onClick={() => p.onView(v)}
               className="text-xs"
+              title={v === 'layout' ? 'Preserve the page/table layout (columns + rows aligned)' : undefined}
               style={{
                 padding: '5px 11px',
                 background: p.view === v ? 'var(--color-teal)' : 'transparent',
@@ -75,7 +81,7 @@ export default function Toolbar(p: Props) {
                 fontWeight: p.view === v ? 600 : 400,
               }}
             >
-              {v === 'text' ? 'Text' : 'Pages'}
+              {label}
             </button>
           ))}
         </div>

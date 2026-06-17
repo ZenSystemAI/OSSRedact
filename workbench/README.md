@@ -1,10 +1,10 @@
-# ossredact Workbench
+# Sparx Workbench
 
 A local-first redaction workbench: load a document, review the suggested redactions (with the reason each
 was flagged), redact anything else by hand, toggle individual redactions off, and export a redacted copy or
 save a redacted PDF. **The document never leaves the machine** -- auto-detect runs in the browser.
 
-This is the manual-review companion to the ossredact egress gateway. It shares the same detection logic and the
+This is the manual-review companion to the Sparx egress gateway. It shares the same detection logic and the
 same `<LABEL_NNN>` placeholder + entity-map format, so a document redacted here round-trips through the
 appliance's entity map.
 
@@ -46,7 +46,7 @@ Node 20.19+ / 22.12+.
 ## On-device map store (no separate map upload)
 
 To restore originals without hand-managing a separate `entity-map.json`, the workbench remembers the entity
-map LOCALLY in the browser (IndexedDB, DB `ossredact-maps`), keyed by a content fingerprint of the **redacted
+map LOCALLY in the browser (IndexedDB, DB `sparx-maps`), keyed by a content fingerprint of the **redacted
 (placeholder-bearing) body** -- never the original text and never the upload filename. When a redacted file
 comes back, the app hashes/scans it and auto-matches the stored map.
 
@@ -61,7 +61,7 @@ comes back, the app hashes/scans it and auto-matches the stored map.
 - **Fallback (kept forever)**: a different machine, cleared storage, or private browsing has no stored map,
   so the Restore tab reveals the manual `entity-map.json` picker and the original two-file flow still works.
 
-## Roadmap (see `memory/project_ossredact-workbench-and-integrations.md`)
+## Roadmap (see `memory/project_sparx-workbench-and-integrations.md`)
 
 - `.pptx` (PowerPoint) format-preserving redaction.
 - In-browser neural detection (run the model in the tab via onnxruntime-web, zero install).

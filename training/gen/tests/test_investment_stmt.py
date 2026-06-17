@@ -45,7 +45,7 @@ def test_no_em_dash():
     for sp in ("train", "heldout"):
         for _ in range(60):
             t = IS.gen(split=sp)['input']
-            assert "—" not in t and "–" not in t
+            assert "\u2014" not in t and "\u2013" not in t
 
 
 def test_decoys_never_labeled():

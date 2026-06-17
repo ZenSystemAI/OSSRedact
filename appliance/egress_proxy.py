@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""ossredact egress privacy proxy — the appliance (SPECS.md §2).
+"""qc-pii egress privacy proxy -- the appliance (SPECS.md §2).
 
 Sits in front of cloud LLM APIs. On egress it redacts PII + secrets in the request's free-text/data
 fields to stable placeholders; on the response it rehydrates the placeholders back to the real values, so
 the LOCAL client (Claude Code) sees real data while the upstream model only ever reasons over placeholders.
 
-Co-located with the NPU NER gate (:8001) on the gate-host; binds :8011. Built up across RUNBOOK steps:
+Co-located with the NPU NER gate (:8001) on the Beelink; binds :8011. Built up across RUNBOOK steps:
   S2 : /v1/messages field extraction + passthrough + DRYRUN echo.
   S3 : cheap deterministic gate (Tier-0) inline + forward-unchanged-if-clean fast path.
   S4 : targeted NPU pass (gate /detect, chunked, cached) + union merge + span substitution + non-stream rehydrate.
@@ -21,11 +21,12 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
-sys.path.insert(0, '/opt/ossredact-npu')
+sys.path.insert(0, '/home/steven/sparx-npu')
 from privacy_gate import tier0_spans, merge_spans, post_merge_address, explain   # cheap Tier-0 (no model load)
 from entity_map import EntityMap, derive_session
 from secrets_scan import secret_spans                                   # deterministic secrets (always-on)
 import openai_adapter   # OpenAI /v1/chat/completions schema translation (Codex / omp / OpenAI-compatible)
+import responses_adapter   # OpenAI /v1/responses schema translation (Codex CLI speaks /v1/responses ONLY)
 
 ANTHROPIC_UPSTREAM = os.environ.get('GATEWAY_ANTHROPIC_UPSTREAM', 'https://api.anthropic.com')
 OPENAI_UPSTREAM = os.environ.get('GATEWAY_OPENAI_UPSTREAM', 'https://api.openai.com')
@@ -35,14 +36,23 @@ EXPOSE_MAP = os.environ.get('GATEWAY_TEST_EXPOSE_MAP', '0') == '1'   # test-only
 PORT = int(os.environ.get('GATEWAY_PORT', '8011'))
 LOG_REQUESTS = os.environ.get('GATEWAY_LOG_REQUESTS', '1') == '1'   # logs COUNTS/LABELS/placeholder TOKENS only
 EXPLAIN = os.environ.get('GATEWAY_EXPLAIN', '0') == '1'   # opt-in: per-span provenance (no values) in meta['explain']
+# FAIL CLOSED when the neural gate is unreachable (FIX-ROUND-3 HIGH). Post-FIX-2 EVERY non-trivial field is
+# neural-scanned, so a gate outage means an NER-only name (no Tier-0 fallback) in ANY scanned field would pass
+# upstream RAW. When degraded (a field needed the gate and got None back), the route refuses to forward and returns
+# 503 instead of leaking. Default ON; set GATEWAY_FAIL_OPEN=1 ONLY to deliberately trade privacy for availability.
+FAIL_CLOSED = os.environ.get('GATEWAY_FAIL_OPEN', '0') != '1'
 START = time.time()
-_PH_TOKEN_RE = re.compile(r'<[A-Z0-9]+_\d{3,}>')
+# Placeholder TOKEN matcher for the wire_placeholders LOG line (observability only; never model-visible). A label
+# may carry INTERNAL underscores (gate-form <PHONE_NUMBER_001> / <SENSITIVE_ACCOUNT_ID_001>), so [A-Z0-9_]+ before
+# the final '_\d{3,}' separator (FIX-ROUND-2 LOW: the old [A-Z0-9]+ missed multi-underscore labels, so the log
+# under-reported which tokens actually went upstream -- a verification gap, not a leak).
+_PH_TOKEN_RE = re.compile(r'<[A-Z0-9_]+_\d{3,}>')
 
-# credential labels (from secrets_scan AND the NER model) — always redacted, ignore the PII toggle
+# credential labels (from secrets_scan AND the NER model) -- always redacted, ignore the PII toggle
 ALWAYS_REDACT = {'secret', 'password', 'api_key', 'access_token'}
 PROSE_MIN_WORDS = 8               # a field with >= this many word tokens of natural language → neural-scan it
 
-app = FastAPI(title='ossredact egress proxy')
+app = FastAPI(title='qc-pii egress proxy')
 
 
 # ----------------------------------------------------------------------------
@@ -105,7 +115,7 @@ def extract_text_fields(body):
 # flagged or natural-language fields; pure code with no Tier-0 hit is skipped).
 # ----------------------------------------------------------------------------
 SECRETS_ENTROPY = os.environ.get('GATEWAY_SECRETS_ENTROPY', '1') == '1'
-# git commit / content hash: lowercase hex of exactly 40 or 64 chars. Benign in dev text — never redact
+# git commit / content hash: lowercase hex of exactly 40 or 64 chars. Benign in dev text -- never redact
 # (would break the coding assistant). Narrower than the secrets FP filter so real UUIDs/accounts stay redacted.
 _BENIGN_HASH = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 
@@ -187,7 +197,7 @@ async def _detect_neural(aclient, text, min_score=0.5):
 # Policy (SPECS §4): per-project + per-session PII config, secrets always on.
 # Resolution: session override > project override > default. Config is mtime-watched (live edits).
 # ----------------------------------------------------------------------------
-CONFIG_PATH = os.environ.get('GATEWAY_CONFIG', '/opt/ossredact-npu/gateway-config.yaml')
+CONFIG_PATH = os.environ.get('GATEWAY_CONFIG', '/home/steven/sparx-npu/gateway-config.yaml')
 # operational labels excluded by DEFAULT (high-volume, low-sensitivity; redacting them adds noise + can
 # degrade the coding assistant). Toggle per-project if a DLP setup needs them.
 DEFAULT_EXCLUDE = ['filepath', 'username', 'org']
@@ -280,7 +290,9 @@ def substitute(text, spans, emap, ctx):
 def build_known_re(emap):
     """Regex over already-known session entity VALUES (len>=4, word-boundary-guarded, longest-first).
     The known-entity backstop: a once-identified entity must never leak later in the session even if the
-    model misses it in a new context. Pure deterministic, no model."""
+    model misses it in a new context. Pure deterministic, no model.
+    Compiled IGNORECASE (Codex HIGH-1): a known value must be masked regardless of case, else "John" detected
+    once leaks as "JOHN"/"john" elsewhere. sweep_known resolves the placeholder via a casefolded lookup."""
     vals = [v for v in emap.v2p.keys() if len(v) >= 4]
     if not vals:
         return None
@@ -293,17 +305,23 @@ def build_known_re(emap):
         if v[-1].isalnum():
             esc = esc + r'(?!\w)'
         parts.append(esc)
-    return re.compile('|'.join(parts))
+    return re.compile('|'.join(parts), re.IGNORECASE)
 
 
 def sweep_known(text, known_re, emap):
     """Replace any literal occurrence of a known value with its existing placeholder. Cannot mint a wrong
     placeholder (uses the exact value->placeholder already in the map). Returns (text, n_swept)."""
+    # Case-insensitive resolution (Codex HIGH-1): known_re matches any case, so look up the placeholder by the
+    # casefolded match against emap.v2p. If two differently-cased values collide on casefold, first-wins is
+    # fine -- it still masks, and rehydrate restores a same-PII value.
+    cf_lookup = {}
+    for v, ph in emap.v2p.items():
+        cf_lookup.setdefault(v.casefold(), ph)
     n = 0
 
     def repl(m):
         nonlocal n
-        ph = emap.v2p.get(m.group())
+        ph = cf_lookup.get(m.group().casefold())
         if ph is None:
             return m.group()
         n += 1
@@ -317,19 +335,18 @@ async def redact_body(body, ctx, extract=extract_text_fields):
     OpenAI route). NEVER logs/returns PII or secret VALUES (except replay, gated behind dryrun+EXPOSE_MAP)."""
     fields = extract(body)
     per_field = []
-    any_candidate = False
-    any_prose = False
+    any_scannable = False     # any extracted field carries non-trivial text (stripped len >= the pass-1 floor)
     sys_text = ''
     for f in fields:
         t = f.text
         if f.kind == 'system' and not sys_text:
             sys_text = t
         t0 = cheap_gate(t)
-        prose = f.kind in ('message', 'tool_result') and _looks_like_prose(t)
-        if t0:
-            any_candidate = True
-        if prose:
-            any_prose = True
+        # 'system' is prose-eligible too: `instructions` and system/developer input content are natural-language
+        # prose. (prose is no longer the neural-scan trigger -- see pass 1 -- but kept as metadata for clarity.)
+        prose = f.kind in ('message', 'tool_result', 'system') and _looks_like_prose(t)
+        if len(t.strip()) >= 2:
+            any_scannable = True
         per_field.append((f, t, t0, prose))
 
     session = derive_session(ctx.get('session', ''), sys_text)
@@ -337,8 +354,10 @@ async def redact_body(body, ctx, extract=extract_text_fields):
     emap = EntityMap(session, ctx.get('project', 'default'))   # load is cheap; needed for the known-entity sweep
     has_known = bool(emap.v2p)
 
-    # truly-nothing path: no PII signal AND no prior session entities to backstop -> forward unchanged
-    if not any_candidate and not any_prose and not has_known:
+    # truly-nothing path: ONLY skip when there are literally zero non-empty extracted text fields AND no prior
+    # session entities to backstop. A request with ANY scannable field is neural-scanned below (FIX 2): an NER-only
+    # name (no Tier-0 hit, below the prose-length bar -- e.g. a 2-word name in a short field) must NOT skip the scan.
+    if not any_scannable and not has_known:
         return {'n_fields': len(fields), 'redaction': 'skip', 'n_spans': 0}, {}
 
     by_label = {}
@@ -349,9 +368,19 @@ async def redact_body(body, ctx, extract=extract_text_fields):
     async with httpx.AsyncClient(timeout=60) as aclient:
         for fi, (f, t, t0, prose) in enumerate(per_field):
             spans = list(t0)
-            if t0 or prose:
+            # NER-only PII (a NAME with no Tier-0 regex fallback) leaks if a SHORT non-prose field (e.g. a 2-word
+            # name "Jane Roy" in a short tool description or a short arg value) is never neural-scanned. The
+            # EXTRACTOR already decided every surfaced field is redactable free text; that decision -- not a
+            # prose-length heuristic -- drives scanning. So neural-scan EVERY field carrying non-trivial text
+            # (stripped length above a tiny floor), regardless of Tier-0/prose. (Tier-0 hits still scan too.)
+            if len(t.strip()) >= 2:
                 neural = await _detect_neural(aclient, t)
                 if neural is None:
+                    # gate unreachable: keep Tier-0 spans for this field and FLAG degraded. Tier-0 still redacts
+                    # what it can (so this stays rehydratable), but an NER-only name with no Tier-0 fallback is NOT
+                    # masked here -- the route FAILS CLOSED on meta['degraded'] (see _degraded_block) rather than
+                    # forwarding the unredacted body upstream (FIX-ROUND-3 HIGH). Default-on; GATEWAY_FAIL_OPEN=1
+                    # opts back into Tier-0-only egress when availability must win over the NER-only-PII risk.
                     ctx['_degraded'] = True
                 elif neural:
                     spans += neural
@@ -450,7 +479,10 @@ def rehydrate_json_string(acc, replay):
 # delta or block stop. tool_use args stream as input_json_delta fragments -> we
 # accumulate per block index and rehydrate the assembled JSON at block stop.
 # ----------------------------------------------------------------------------
-_PH_PREFIX_RE = re.compile(r'[A-Z0-9]*_?\d*')
+# A placeholder label may carry INTERNAL underscores (gate-form labels such as PHONE_NUMBER / SENSITIVE_ACCOUNT_ID
+# -> <PHONE_NUMBER_001> / <SENSITIVE_ACCOUNT_ID_001>), so a partial split like "<PHONE_NUM" must be held back. The
+# old [A-Z0-9]*_?\d* allowed at most ONE underscore and dropped multi-underscore partials (FIX-ROUND-2 MEDIUM).
+_PH_PREFIX_RE = re.compile(r'[A-Z0-9_]*')
 
 
 def split_safe(carry):
@@ -569,6 +601,19 @@ def fwd_headers(req):
     return {k: v for k, v in req.headers.items() if k.lower() in FWD_HEADERS}
 
 
+def _degraded_block(meta):
+    """FAIL CLOSED (FIX-ROUND-3 HIGH): if the neural gate was unreachable while scanning this request (degraded),
+    forwarding the body would leak any NER-only PII that has no Tier-0 fallback. Return a 503 JSONResponse to
+    refuse the forward, or None to proceed. No-op when GATEWAY_FAIL_OPEN=1. Carries NO PII -- only the flag."""
+    if FAIL_CLOSED and meta.get('degraded'):
+        return JSONResponse(
+            {'error': 'pii_gate_unavailable',
+             'message': 'PII detection gate unreachable; refusing to forward to avoid leaking unredacted data. '
+                        'Retry once the gate is healthy (or set GATEWAY_FAIL_OPEN=1 to allow Tier-0-only egress).'},
+            status_code=503)
+    return None
+
+
 @app.post('/v1/messages')
 async def messages(req: Request):
     raw = await req.body()
@@ -577,7 +622,7 @@ async def messages(req: Request):
     except Exception:
         return JSONResponse({'error': 'invalid json body'}, status_code=400)
     ctx = {'session': req.headers.get('x-claude-code-session-id', ''),
-           'project': req.headers.get('x-ossredact-project', 'default')}
+           'project': req.headers.get('x-qc-pii-project', 'default')}
     meta, replay = await redact_body(body, ctx)
     stream = bool(body.get('stream'))
 
@@ -591,6 +636,10 @@ async def messages(req: Request):
         if EXPOSE_MAP:
             resp['_replay'] = replay
         return JSONResponse(resp)
+
+    blocked = _degraded_block(meta)
+    if blocked is not None:
+        return blocked
 
     headers = fwd_headers(req)
     url = ANTHROPIC_UPSTREAM + '/v1/messages'
@@ -630,7 +679,7 @@ async def chat_completions(req: Request):
     except Exception:
         return JSONResponse({'error': 'invalid json body'}, status_code=400)
     ctx = {'session': req.headers.get('x-session-id') or req.headers.get('x-claude-code-session-id', ''),
-           'project': req.headers.get('x-ossredact-project', 'default')}
+           'project': req.headers.get('x-qc-pii-project', 'default')}
     meta, replay = await redact_body(body, ctx, extract=openai_adapter.extract_text_fields_openai)
     stream = bool(body.get('stream'))
 
@@ -644,6 +693,10 @@ async def chat_completions(req: Request):
         if EXPOSE_MAP:
             resp['_replay'] = replay
         return JSONResponse(resp)
+
+    blocked = _degraded_block(meta)
+    if blocked is not None:
+        return blocked
 
     headers = openai_adapter.fwd_headers_openai(req)
     url = OPENAI_UPSTREAM + '/v1/chat/completions'
@@ -672,9 +725,73 @@ async def chat_completions(req: Request):
     return StreamingResponse(gen(), media_type='text/event-stream')
 
 
+@app.post('/v1/responses')
+async def responses(req: Request):
+    """OpenAI Responses-API route -- Codex CLI speaks /v1/responses ONLY. Same redact-on-egress /
+    rehydrate-on-response contract as /v1/chat/completions, using the shared redact_body() with the Responses
+    field extractor (string/array `input` + `instructions`) and the Responses response/stream rehydrators."""
+    raw = await req.body()
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return JSONResponse({'error': 'invalid json body'}, status_code=400)
+    ctx = {'session': req.headers.get('x-session-id') or req.headers.get('x-claude-code-session-id', ''),
+           'project': req.headers.get('x-qc-pii-project', 'default')}
+    meta, replay = await redact_body(body, ctx, extract=responses_adapter.extract_text_fields_responses)
+    # File bytes that were NOT scanned (binary/undetermined inline file_data) are a DOCUMENTED+LOGGED limitation,
+    # never a silent pass. pop_file_passthrough_notes() also strips the private marker so it never reaches upstream.
+    file_notes = responses_adapter.pop_file_passthrough_notes(body)
+    stream = bool(body.get('stream'))
+
+    if LOG_REQUESTS and meta.get('redaction') not in ('skip', None):
+        wire_phs = sorted(set(_PH_TOKEN_RE.findall(json.dumps(body, ensure_ascii=False))))
+        print(f"[egress:responses] redaction={meta['redaction']} spans={meta['n_spans']} labels={meta.get('by_label', {})} "
+              f"rules={meta.get('by_rule', {})} wire_placeholders={wire_phs} stream={stream} degraded={meta.get('degraded')}", flush=True)
+    if LOG_REQUESTS and file_notes:
+        for fn in file_notes:
+            print(f"[egress:responses] file bytes not scanned: mime={fn.get('mime')} "
+                  f"filename={fn.get('filename')} reason={fn.get('reason')}", flush=True)
+
+    if DRYRUN:
+        resp = {'_dryrun': True, 'meta': meta, 'stream': stream, 'upstream_body': body}
+        if EXPOSE_MAP:
+            resp['_replay'] = replay
+        return JSONResponse(resp)
+
+    blocked = _degraded_block(meta)
+    if blocked is not None:
+        return blocked
+
+    headers = responses_adapter.fwd_headers_responses(req)
+    url = OPENAI_UPSTREAM + '/v1/responses'
+    payload = json.dumps(body)
+    if not stream:
+        async with httpx.AsyncClient(timeout=600) as client:
+            r = await client.post(url, content=payload, headers=headers)
+        ct = r.headers.get('content-type', 'application/json')
+        if replay and 'json' in ct:
+            try:
+                obj = responses_adapter.rehydrate_responses_response(r.json(), replay)
+                return JSONResponse(obj, status_code=r.status_code)
+            except Exception:
+                pass
+        return Response(content=r.content, status_code=r.status_code, media_type=ct)
+
+    async def gen():
+        async with httpx.AsyncClient(timeout=600) as client:
+            async with client.stream('POST', url, content=payload, headers=headers) as r:
+                if not replay:
+                    async for chunk in r.aiter_raw():
+                        yield chunk
+                else:
+                    async for out in responses_adapter.stream_rehydrate_responses(r.aiter_raw(), replay):
+                        yield out
+    return StreamingResponse(gen(), media_type='text/event-stream')
+
+
 @app.get('/healthz')
 def healthz():
-    return {'status': 'ok', 'service': 'ossredact-egress', 'dryrun': DRYRUN,
+    return {'status': 'ok', 'service': 'qc-pii-egress', 'dryrun': DRYRUN,
             'gate': GATE_URL, 'uptime_s': round(time.time() - START, 1)}
 
 

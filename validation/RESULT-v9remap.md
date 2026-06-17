@@ -1,9 +1,9 @@
-# ossredact v9remap — Phase 1 Validate-Gate Result
+# qc-pii v9remap -- Phase 1 Validate-Gate Result
 
-> Measured 2026-06-14 on gpu-host (GPU xlm-r-large **v9remap**, the GPU) against
+> Measured 2026-06-14 on P620 (GPU xlm-r-large **v9remap**, card 4) against
 > `pii-merged-v9-remap/val.jsonl` (n=2942, **20-label scheme**). Harness:
 > `validation/eval_labelaware.py` (modes tier0 / model / full; prod line-boundary chunking).
-> Raw: `/tmp/eval_v9remap.json` on gpu-host. 100% synthetic; counts only, no values printed.
+> Raw: `/tmp/eval_v9remap.json` on P620. 100% synthetic; counts only, no values printed.
 > Compared against the v7 baseline (`BASELINE-v7-labelaware.md`, 23-label scheme).
 
 ## Gate decision: PASS

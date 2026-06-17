@@ -1,6 +1,6 @@
 # @ossredact/core
 
-Tier-0 deterministic PII detector and span/redaction core for ossredact.
+Tier-0 deterministic PII detector and span/redaction core for OSSRedact.
 
 Pure TypeScript, browser-safe, zero runtime dependencies.
 

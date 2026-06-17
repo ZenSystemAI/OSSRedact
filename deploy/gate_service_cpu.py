@@ -11,7 +11,7 @@ CPUExecutionProvider -- the GPU-free portable tier. Same labels + BIO decoding +
 the GPU gate; Tier-0 floor + union merge are shared from privacy_gate.py. This INT8 was gated
 before deploy by validation/parity_check.py (cosine 0.998, PII-argmax 0.981 vs fp32) and an
 end-task recall check (-0.56pp vs fp32, ~40% faster on CPU). Runs CPU-only; never touches the
-GPU gate on the GPU / :8001.
+GPU gate on card 4 / :8001.
 """
 import os, sys, time, uuid
 from collections import defaultdict
@@ -23,12 +23,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 
-MODEL_DIR = os.environ.get('CPU_GATE_MODEL', '/opt/ossredact/models/privacy-filters/pii-gpu-xlmr-base-v11r5')
+MODEL_DIR = os.environ.get('CPU_GATE_MODEL', '/home/steven/Sparx/models/privacy-filters/pii-gpu-xlmr-base-v11r5')
 PORT = int(os.environ.get('CPU_GATE_PORT', '8011'))
-HOST = os.environ.get('CPU_GATE_HOST', '0.0.0.0')  # tailnet-gated by the gpu-host firewall (parity with the GPU gate)
+HOST = os.environ.get('CPU_GATE_HOST', '0.0.0.0')  # tailnet-gated by the P620 firewall (parity with the GPU gate)
 CHUNK_CHARS = 600  # stay under the 256-token window even on dense tabular text (matches the egress proxy)
 CHUNK_OVERLAP = 80  # window overlap so a value straddling a boundary is caught in one window + union-merged
-MODEL_NAME = f'ossredact/{os.path.basename(MODEL_DIR)} (int8, CPU)'
+MODEL_NAME = f'qc-pii/{os.path.basename(MODEL_DIR)} (int8, CPU)'
 START = time.time()
 
 print(f'loading CPU gate ({MODEL_DIR}) onnxruntime CPUExecutionProvider ...', flush=True)
@@ -37,7 +37,7 @@ gate.npu = NPUTier(MODEL_DIR)  # duck-typed neural tier: xlm-r-base v11r5 int8 o
 _warm = gate.detect('warmup Jean Tremblay NAS 046 454 286 compte 006-02761-1234567 courriel a@b.ca')
 print(f'CPU gate ready ({len(_warm)} warmup spans)', flush=True)
 
-app = FastAPI(title='ossredact CPU gate')
+app = FastAPI(title='qc-pii CPU gate')
 
 
 def _windows(s, base, size=CHUNK_CHARS, overlap=CHUNK_OVERLAP):

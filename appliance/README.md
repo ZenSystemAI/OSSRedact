@@ -1,25 +1,25 @@
-# Appliance: the always-on gate-host egress privacy proxy
+# Appliance: the always-on Beelink egress privacy proxy
 
 This directory is the version-controlled snapshot of the **always-on egress privacy
-proxy** that runs on the gate-host host (`~/ossredact-npu/`). It is the layer that redacts
+proxy** that runs on the Beelink host (`~/sparx-npu/`). It is the layer that redacts
 PII and secrets in front of every cloud LLM call made by Claude Code, Codex, omp, and
 opencode. Before this commit (F6) the appliance lived ONLY on one disk; this snapshot
 makes it reconstructable from git.
 
 The files here are **rsynced verbatim from the live host** (byte-identical, md5-verified)
 so the running enforcement layer can be rebuilt from the repo alone. The live service on
-gate-host is untouched by this snapshot -- it is read/copy only.
+Beelink is untouched by this snapshot -- it is read/copy only.
 
 ## File map: host + port + service
 
 | File | Role | Host | Port / service |
 |---|---|---|---|
-| `egress_proxy.py` | The egress proxy: redacts PII + secrets on the outbound request, rehydrates placeholders on the response. Serves `/v1/messages` (Anthropic) + `/v1/chat/completions` (OpenAI, via `openai_adapter.py`). | gate-host `~/ossredact-npu/` | binds `:8011`; systemd service `ossredact-egress` (the always-on layer) |
-| `openai_adapter.py` | OpenAI chat-completions schema translation (request fields, response, SSE stream) for Codex / omp / any OpenAI-compatible client. Pure stdlib (`json`, `re` only). | gate-host `~/ossredact-npu/` | imported by `egress_proxy.py` (no own port) |
-| `entity_map.py` | AES-GCM 256-bit session entity map at rest (value <-> placeholder), TTL'd + size-capped. | gate-host `~/ossredact-npu/` | imported by `egress_proxy.py` (no own port) |
-| `secrets_scan.py` | Always-on deterministic (regex) secrets detector; a HARD import of the proxy (`egress_proxy.py:27`). No model. | gate-host `~/ossredact-npu/` | imported by `egress_proxy.py` (no own port) |
-| `privacy_gate.py` | The DEPLOYED detector snapshot the proxy imports (`tier0_spans`, `context_cued_id_spans`, `merge_spans`, `post_merge_address`, `explain`). See "Two privacy_gate.py copies" below. | gate-host `~/ossredact-npu/` | imported by `egress_proxy.py:25` and `gate_service.py:17` (no own port) |
-| `gate_service.py` | The OpenVINO / Intel-NPU neural gate (`DEVICE='NPU'`, OpenVINO FP16 IR). This is the **rollback path**, NOT the current live tier. | gate-host `~/ossredact-npu/` | binds `:8001`; exposes `/detect` + `/redact` |
+| `egress_proxy.py` | The egress proxy: redacts PII + secrets on the outbound request, rehydrates placeholders on the response. Serves `/v1/messages` (Anthropic) + `/v1/chat/completions` (OpenAI, via `openai_adapter.py`). | Beelink `~/sparx-npu/` | binds `:8011`; systemd service `qc-pii-egress` (the always-on layer) |
+| `openai_adapter.py` | OpenAI chat-completions schema translation (request fields, response, SSE stream) for Codex / omp / any OpenAI-compatible client. Pure stdlib (`json`, `re` only). | Beelink `~/sparx-npu/` | imported by `egress_proxy.py` (no own port) |
+| `entity_map.py` | AES-GCM 256-bit session entity map at rest (value <-> placeholder), TTL'd + size-capped. | Beelink `~/sparx-npu/` | imported by `egress_proxy.py` (no own port) |
+| `secrets_scan.py` | Always-on deterministic (regex) secrets detector; a HARD import of the proxy (`egress_proxy.py:27`). No model. | Beelink `~/sparx-npu/` | imported by `egress_proxy.py` (no own port) |
+| `privacy_gate.py` | The DEPLOYED detector snapshot the proxy imports (`tier0_spans`, `context_cued_id_spans`, `merge_spans`, `post_merge_address`, `explain`). See "Two privacy_gate.py copies" below. | Beelink `~/sparx-npu/` | imported by `egress_proxy.py:25` and `gate_service.py:17` (no own port) |
+| `gate_service.py` | The OpenVINO / Intel-NPU neural gate (`DEVICE='NPU'`, OpenVINO FP16 IR). This is the **rollback path**, NOT the current live tier. | Beelink `~/sparx-npu/` | binds `:8001`; exposes `/detect` + `/redact` |
 | `gateway-config.example.yaml` | Policy schema (public upstream URLs, TTLs, category toggles). Example only; the live `gateway-config.yaml` is gitignored. | -- | mtime-watched live on the host (no restart needed on policy edits) |
 
 ### Current live tier vs rollback
@@ -41,7 +41,7 @@ The repo deliberately holds TWO `privacy_gate.py` copies:
   but does NOT have `validated_floor` / `_iban_ok`.
 
 `egress_proxy.py:25` imports `tier0_spans`, so the live proxy depends on the OLDER
-snapshot. The proxy reaches it via `sys.path.insert(0, '/opt/ossredact-npu')`
+snapshot. The proxy reaches it via `sys.path.insert(0, '/home/steven/sparx-npu')`
 (`egress_proxy.py:24`) -- in a repo checkout, put `appliance/` on `PYTHONPATH`.
 
 **Do NOT** overwrite `gate/privacy_gate.py` with this older copy -- that would revert
@@ -55,7 +55,7 @@ single-source goal as D1 / plan 016).
 The proxy never stores client credentials. It forwards the client's `authorization` and
 `x-api-key` headers verbatim to the upstream (`egress_proxy.py:562-565`, comment
 "Never store auth"). There is therefore NO credential file in this repo and none on the
-host (`~/ossredact-npu/.env` does not exist). Upstreams are env-overridable with public
+host (`~/sparx-npu/.env` does not exist). Upstreams are env-overridable with public
 defaults (`api.anthropic.com` / `api.openai.com`).
 
 ## Environment knobs (`GATEWAY_*`, with defaults)
@@ -68,8 +68,8 @@ All config is env-vars-with-defaults read at process start; no secrets in any of
 | `GATEWAY_OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream |
 | `GATEWAY_GATE_URL` | `http://127.0.0.1:8001` | the neural gate (`/detect`) |
 | `GATEWAY_PORT` | `8011` | proxy listen port |
-| `GATEWAY_CONFIG` | `~/ossredact-npu/gateway-config.yaml` | live policy file (mtime-watched) |
-| `GATEWAY_MAPS_DIR` | `~/ossredact-npu/maps` | session entity maps dir (gitignored) |
+| `GATEWAY_CONFIG` | `~/sparx-npu/gateway-config.yaml` | live policy file (mtime-watched) |
+| `GATEWAY_MAPS_DIR` | `~/sparx-npu/maps` | session entity maps dir (gitignored) |
 | `GATEWAY_MAP_KEY` | `<MAPS_DIR>/.mapkey` | AES key file (`0600`, gitignored; auto-generated if absent) |
 | `GATEWAY_MAP_TTL_H` | `24` | entity-map TTL (hours) |
 | `GATEWAY_MAP_MAX` | `5000` | max entities per map |
@@ -86,9 +86,9 @@ grammar or the JSON-safe rehydration in `egress_proxy.py`, you MUST mirror it he
 
 ## Keeping the snapshot in lockstep with the host
 
-The proxy is currently edited live on gate-host -- that is how the deployed
+The proxy is currently edited live on Beelink -- that is how the deployed
 `privacy_gate.py` diverged into a different generation from `gate/privacy_gate.py`. Add a
-periodic md5 drift-check (`ssh gate-host md5sum ~/ossredact-npu/*.py` vs `appliance/`) to catch
+periodic md5 drift-check (`ssh beelink md5sum ~/sparx-npu/*.py` vs `appliance/`) to catch
 silent host edits. The committed `gateway-config.example.yaml` must track schema changes
 to the live (gitignored) `gateway-config.yaml`.
 

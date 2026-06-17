@@ -1,4 +1,4 @@
-# ossredact: Measured Results (real, for Track D benchmarks)
+# qc-pii: Measured Results (real, for Track D benchmarks)
 
 > All numbers MEASURED 2026-06-14 on-box, not estimated. Recall = leak-prevention (label-agnostic substring
 > match); clean_fp = over-redactions on negative rows. Source of truth for the launch benchmark tables/graphs.
@@ -27,7 +27,7 @@
   intra-catastrophic mislabels. Ship criterion = full-stack catastrophic DETECTION + clean_fp, both met.
 
 ## Tier eval (v6/v7 generation, HISTORICAL -- synthetic held-out sets; eval_suite.py)
-Latency p95 below is on the EVAL hardware (a dedicated GPUTi for npu/gpu tiers, CPU for distilbert), NOT deployment NPU.
+Latency p95 below is on the EVAL hardware (3090Ti for npu/gpu tiers, CPU for distilbert), NOT deployment NPU.
 
 | set | metric | CPU distilbert-v6 | NPU xlm-r-base-v6 | GPU xlm-r-large-v6 |
 |---|---|---|---|---|

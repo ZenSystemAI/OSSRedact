@@ -1,4 +1,4 @@
-# AGENTS.md -- ossredact-privacy-gateway
+# AGENTS.md -- sparx-privacy-gateway
 
 This repo holds **two domains**. Scope your context to the one you are working in.
 
@@ -12,7 +12,7 @@ This repo holds **two domains**. Scope your context to the one you are working i
 2. **workbench** (the client-side redaction app) -- `workbench/`.
    - TS / React 19 / Vite. Has its **own `workbench/AGENTS.md`** -- read that when working there.
 
-> The web/marketing surface (landing page + promo) was split out to `~/dev/ossredact-web` on 2026-06-16.
+> The web/marketing surface (landing page + promo) was split out to `~/dev/sparx-web` on 2026-06-16.
 
 ## Why scoped
 The two domains are coupled only by a **detection contract** (the 20-label set, the
@@ -22,13 +22,13 @@ contract is codegen'd from a single source (tracked as direction **D1** in `plan
 treat changes that touch the label set or Tier-0 as cross-domain and mirror them on both sides.
 
 ## Hard constraints (all agents, both domains)
-- **Synthetic data only.** Never read `<external-parser>/private/data/`. Never put real PII in code,
+- **Synthetic data only.** Never read `ci-pdf-parser/private/data/`. Never put real PII in code,
   tests, fixtures, docs, or commits.
 - **ONNX-INT8 CPU export and any deploy are STOP-and-ask gates.** Do not run them autonomously.
-- **gpu-host training/gate runs on the GPU ONLY**: `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0`.
+- **P620 training/gate runs on card 4 ONLY**: `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4`.
 - **No em dashes** anywhere; use `--`. `grep -rlP "\x{2014}"` over edited files must be empty.
 - Never reproduce secret values; reference `file:line` + type only.
-- Never commit or push without the maintainer's explicit approval.
+- Never commit or push without Steven's explicit approval.
 
 ## Plans
 `plans/` holds advisory implementation plans from `/improve` (executor-ready, zero-context).

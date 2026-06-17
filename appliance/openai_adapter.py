@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""OpenAI chat-completions adapter for the ossredact egress proxy.
+"""OpenAI chat-completions adapter for the qc-pii egress proxy.
 
 Same privacy contract as the Anthropic /v1/messages path: redact PII + secrets in the OUTBOUND request's
-free-text fields to stable placeholders, and rehydrate the placeholders back to real values on the response —
+free-text fields to stable placeholders, and rehydrate the placeholders back to real values on the response --
 so an OpenAI-compatible client (Codex, omp, any /v1/chat/completions caller) sees real data while the upstream
 model only ever reasons over placeholders.
 
@@ -46,7 +46,7 @@ def extract_text_fields_openai(body):
     never touch). Roles are mapped to the SAME kind vocabulary redact_body expects so the prose heuristic +
     session derivation behave exactly as on the Anthropic path: system->'system', tool->'tool_result',
     everything else->'message'. Tool/function SCHEMAS (body['tools']) and prior-turn tool_call arguments are
-    left untouched — parity with the Anthropic path, which never redacts tool_use input/schemas (the
+    left untouched -- parity with the Anthropic path, which never redacts tool_use input/schemas (the
     known-entity backstop in redact_body re-catches any known value that reappears in a text field)."""
     fields = []
     for msg in (body.get('messages') or []):
@@ -149,7 +149,7 @@ def rehydrate_openai_response(obj, replay):
 # placeholder split across deltas is never half-emitted. tool_call argument fragments
 # (choices[].delta.tool_calls[].function.arguments) are buffered per (choice, tool) index and flushed as one
 # rehydrated chunk at finish_reason (a placeholder can straddle fragments, and a tool call is only acted on
-# once complete) — the structural first fragment (id/name) passes through with empty args so the client still
+# once complete) -- the structural first fragment (id/name) passes through with empty args so the client still
 # learns the call early.
 # ---------------------------------------------------------------------------
 def _chunk_bytes(template, choice_index, delta):

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Workbench: TypeScript build + vitest unit + round-trip tests
+  # -----------------------------------------------------------------------
+  workbench:
+    name: Workbench (Node 22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workbench
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: workbench/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Unit + round-trip tests
+        run: npm test
+
+  # -----------------------------------------------------------------------
+  # Redaction core package: build + unit tests (56 tests)
+  # -----------------------------------------------------------------------
+  redaction-core:
+    name: redaction-core (Node 22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/redaction-core
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: packages/redaction-core/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+  # -----------------------------------------------------------------------
+  # Gate: torch-free floor tests only (Tier-0 re + merge + regression).
+  # Excluded: gate/tests/test_maxlen.py and training/tests/test_compute_metrics.py
+  # (both require torch/onnxruntime on the gpu-host GPU box).
+  # Full Python torch-free suite will be added when plan 015 lands
+  # a requirements.txt with pinned deps.
+  # -----------------------------------------------------------------------
+  gate-floor:
+    name: Gate floor tests (Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test deps
+        run: pip install -r requirements-test.txt
+
+      - name: Run torch-free floor + parity-metric tests
+        run: |
+          python -m pytest \
+            gate/tests/test_validated_floor.py \
+            gate/tests/test_merge.py \
+            gate/tests/test_gate_regression.py \
+            validation/test_parity_check.py \
+            -v

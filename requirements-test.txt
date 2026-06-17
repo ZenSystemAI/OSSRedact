@@ -1,0 +1,16 @@
+# Torch-free test dependencies (finding F7: reproducible Python env for the test path).
+# This pins ONLY what the CI gate-floor job and the pure-Python unit tests need; it is the
+# verified content of the local .venv-test. The full GPU inference stack (torch,
+# onnxruntime, transformers) is environment-specific to the gpu-host box and the deployed
+# appliance, and is intentionally NOT pinned here -- pin it where the model actually runs.
+#
+# Reproduce the test env:
+#   python3.12 -m venv .venv-test && .venv-test/bin/pip install -r requirements-test.txt
+#
+# Runs:
+#   .venv-test/bin/python -m pytest gate/tests/test_validated_floor.py gate/tests/test_merge.py gate/tests/test_gate_regression.py -v
+#   .venv-test/bin/python -m pytest validation/test_parity_check.py -v
+
+pytest==9.1.0
+numpy==2.4.6
+scipy==1.17.1

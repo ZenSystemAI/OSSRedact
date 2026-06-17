@@ -1,0 +1,842 @@
+{
+  "model": "pii-gpu-xlmr-large-v7",
+  "n_rows": 2942,
+  "min_score": 0.5,
+  "find_fail_pct": 0.148,
+  "modes": {
+    "tier0": {
+      "labeled_recall": 0.2998,
+      "detect_recall": 0.4672,
+      "precision": 0.3969,
+      "f1": 0.3415,
+      "clean_fp": 56,
+      "neg_rows": 201,
+      "per_label": {
+        "access_token": {
+          "gold": 343,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "address": {
+          "gold": 2160,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0421,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "api_key": {
+          "gold": 343,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "bank_account": {
+          "gold": 904,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.9325,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "card_cvv": {
+          "gold": 286,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0175,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "card_expiry": {
+          "gold": 277,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0144,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "date_of_birth": {
+          "gold": 1306,
+          "recall_labeled": 0.0,
+          "recall_detect": 1.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "email": {
+          "gold": 631,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 625
+        },
+        "file_path": {
+          "gold": 343,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "government_id": {
+          "gold": 1036,
+          "recall_labeled": 0.6969,
+          "recall_detect": 0.8253,
+          "precision": 0.7436,
+          "f1": 0.7195,
+          "fp": 16,
+          "wrong_label": 233,
+          "pred": 971
+        },
+        "iban": {
+          "gold": 239,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.7113,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "ip_address": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.8305,
+          "f1": 0.9074,
+          "fp": 17,
+          "wrong_label": 53,
+          "pred": 413
+        },
+        "organization": {
+          "gold": 133,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "password": {
+          "gold": 343,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "payment_card": {
+          "gold": 277,
+          "recall_labeled": 0.9025,
+          "recall_detect": 0.935,
+          "precision": 0.7463,
+          "f1": 0.817,
+          "fp": 80,
+          "wrong_label": 5,
+          "pred": 335
+        },
+        "person": {
+          "gold": 3863,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0145,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "phone_number": {
+          "gold": 620,
+          "recall_labeled": 0.7484,
+          "recall_detect": 0.9403,
+          "precision": 0.6212,
+          "f1": 0.6789,
+          "fp": 32,
+          "wrong_label": 251,
+          "pred": 747
+        },
+        "postal_code": {
+          "gold": 1023,
+          "recall_labeled": 0.8798,
+          "recall_detect": 0.8798,
+          "precision": 1.0,
+          "f1": 0.936,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 900
+        },
+        "routing_number": {
+          "gold": 790,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.3177,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "sensitive_account_id": {
+          "gold": 947,
+          "recall_labeled": 0.5491,
+          "recall_detect": 0.5533,
+          "precision": 0.2041,
+          "f1": 0.2976,
+          "fp": 827,
+          "wrong_label": 1201,
+          "pred": 2548
+        },
+        "sensitive_date": {
+          "gold": 1895,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.2389,
+          "f1": 0.3857,
+          "fp": 4616,
+          "wrong_label": 1306,
+          "pred": 7781
+        },
+        "tax_id": {
+          "gold": 379,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.5435,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        },
+        "username": {
+          "gold": 617,
+          "recall_labeled": 0.0,
+          "recall_detect": 0.0,
+          "precision": 0.0,
+          "f1": 0.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 0
+        }
+      }
+    },
+    "model": {
+      "labeled_recall": 0.8987,
+      "detect_recall": 0.9979,
+      "precision": 0.7117,
+      "f1": 0.7943,
+      "clean_fp": 0,
+      "neg_rows": 201,
+      "per_label": {
+        "access_token": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.5831,
+          "f1": 0.7366,
+          "fp": 0,
+          "wrong_label": 246,
+          "pred": 590
+        },
+        "address": {
+          "gold": 2160,
+          "recall_labeled": 0.9949,
+          "recall_detect": 0.9949,
+          "precision": 1.0,
+          "f1": 0.9974,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 1108
+        },
+        "api_key": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.5745,
+          "f1": 0.7298,
+          "fp": 0,
+          "wrong_label": 254,
+          "pred": 597
+        },
+        "bank_account": {
+          "gold": 904,
+          "recall_labeled": 0.7334,
+          "recall_detect": 0.9989,
+          "precision": 0.67,
+          "f1": 0.7003,
+          "fp": 324,
+          "wrong_label": 3,
+          "pred": 991
+        },
+        "card_cvv": {
+          "gold": 286,
+          "recall_labeled": 0.9685,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 0.984,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 277
+        },
+        "card_expiry": {
+          "gold": 277,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 277
+        },
+        "date_of_birth": {
+          "gold": 1306,
+          "recall_labeled": 0.8308,
+          "recall_detect": 1.0,
+          "precision": 0.9954,
+          "f1": 0.9057,
+          "fp": 0,
+          "wrong_label": 5,
+          "pred": 1090
+        },
+        "email": {
+          "gold": 631,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 625
+        },
+        "file_path": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9971,
+          "f1": 0.9985,
+          "fp": 0,
+          "wrong_label": 1,
+          "pred": 344
+        },
+        "government_id": {
+          "gold": 1036,
+          "recall_labeled": 0.9981,
+          "recall_detect": 1.0,
+          "precision": 0.804,
+          "f1": 0.8906,
+          "fp": 4,
+          "wrong_label": 248,
+          "pred": 1286
+        },
+        "iban": {
+          "gold": 239,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.7836,
+          "f1": 0.8787,
+          "fp": 0,
+          "wrong_label": 66,
+          "pred": 305
+        },
+        "ip_address": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 343
+        },
+        "organization": {
+          "gold": 133,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 133
+        },
+        "password": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 343
+        },
+        "payment_card": {
+          "gold": 277,
+          "recall_labeled": 0.9892,
+          "recall_detect": 1.0,
+          "precision": 0.8726,
+          "f1": 0.9272,
+          "fp": 37,
+          "wrong_label": 3,
+          "pred": 314
+        },
+        "person": {
+          "gold": 3863,
+          "recall_labeled": 0.9837,
+          "recall_detect": 0.9984,
+          "precision": 0.9689,
+          "f1": 0.9763,
+          "fp": 116,
+          "wrong_label": 0,
+          "pred": 3734
+        },
+        "phone_number": {
+          "gold": 620,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9968,
+          "f1": 0.9984,
+          "fp": 0,
+          "wrong_label": 2,
+          "pred": 622
+        },
+        "postal_code": {
+          "gold": 1023,
+          "recall_labeled": 0.3822,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 0.553,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 391
+        },
+        "routing_number": {
+          "gold": 790,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.6749,
+          "f1": 0.8059,
+          "fp": 380,
+          "wrong_label": 1,
+          "pred": 1172
+        },
+        "sensitive_account_id": {
+          "gold": 947,
+          "recall_labeled": 0.4498,
+          "recall_detect": 0.9799,
+          "precision": 1.0,
+          "f1": 0.6205,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 426
+        },
+        "sensitive_date": {
+          "gold": 1895,
+          "recall_labeled": 0.9984,
+          "recall_detect": 0.9984,
+          "precision": 0.2927,
+          "f1": 0.4527,
+          "fp": 4572,
+          "wrong_label": 224,
+          "pred": 6781
+        },
+        "tax_id": {
+          "gold": 379,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9974,
+          "f1": 0.9987,
+          "fp": 1,
+          "wrong_label": 0,
+          "pred": 380
+        },
+        "username": {
+          "gold": 617,
+          "recall_labeled": 0.6288,
+          "recall_detect": 1.0,
+          "precision": 0.9798,
+          "f1": 0.766,
+          "fp": 8,
+          "wrong_label": 0,
+          "pred": 396
+        }
+      }
+    },
+    "full": {
+      "labeled_recall": 0.9221,
+      "detect_recall": 0.9991,
+      "precision": 0.7074,
+      "f1": 0.8006,
+      "clean_fp": 56,
+      "neg_rows": 201,
+      "per_label": {
+        "access_token": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9425,
+          "f1": 0.9704,
+          "fp": 0,
+          "wrong_label": 21,
+          "pred": 365
+        },
+        "address": {
+          "gold": 2160,
+          "recall_labeled": 0.9949,
+          "recall_detect": 0.9949,
+          "precision": 1.0,
+          "f1": 0.9974,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 1108
+        },
+        "api_key": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9321,
+          "f1": 0.9648,
+          "fp": 0,
+          "wrong_label": 25,
+          "pred": 368
+        },
+        "bank_account": {
+          "gold": 904,
+          "recall_labeled": 0.7246,
+          "recall_detect": 1.0,
+          "precision": 0.6677,
+          "f1": 0.695,
+          "fp": 325,
+          "wrong_label": 1,
+          "pred": 981
+        },
+        "card_cvv": {
+          "gold": 286,
+          "recall_labeled": 0.9685,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 0.984,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 277
+        },
+        "card_expiry": {
+          "gold": 277,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 277
+        },
+        "date_of_birth": {
+          "gold": 1306,
+          "recall_labeled": 0.827,
+          "recall_detect": 1.0,
+          "precision": 0.9982,
+          "f1": 0.9045,
+          "fp": 0,
+          "wrong_label": 2,
+          "pred": 1082
+        },
+        "email": {
+          "gold": 631,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 625
+        },
+        "file_path": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9971,
+          "f1": 0.9985,
+          "fp": 0,
+          "wrong_label": 1,
+          "pred": 344
+        },
+        "government_id": {
+          "gold": 1036,
+          "recall_labeled": 0.999,
+          "recall_detect": 1.0,
+          "precision": 0.8029,
+          "f1": 0.8903,
+          "fp": 20,
+          "wrong_label": 234,
+          "pred": 1289
+        },
+        "iban": {
+          "gold": 239,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 239
+        },
+        "ip_address": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9528,
+          "f1": 0.9758,
+          "fp": 17,
+          "wrong_label": 0,
+          "pred": 360
+        },
+        "organization": {
+          "gold": 133,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 133
+        },
+        "password": {
+          "gold": 343,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 343
+        },
+        "payment_card": {
+          "gold": 277,
+          "recall_labeled": 0.9964,
+          "recall_detect": 1.0,
+          "precision": 0.7005,
+          "f1": 0.8227,
+          "fp": 118,
+          "wrong_label": 0,
+          "pred": 394
+        },
+        "person": {
+          "gold": 3863,
+          "recall_labeled": 0.9837,
+          "recall_detect": 0.9984,
+          "precision": 0.9589,
+          "f1": 0.9711,
+          "fp": 155,
+          "wrong_label": 0,
+          "pred": 3773
+        },
+        "phone_number": {
+          "gold": 620,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.9841,
+          "f1": 0.992,
+          "fp": 0,
+          "wrong_label": 10,
+          "pred": 630
+        },
+        "postal_code": {
+          "gold": 1023,
+          "recall_labeled": 0.3822,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 0.553,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 391
+        },
+        "routing_number": {
+          "gold": 790,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.6407,
+          "f1": 0.781,
+          "fp": 442,
+          "wrong_label": 1,
+          "pred": 1233
+        },
+        "sensitive_account_id": {
+          "gold": 947,
+          "recall_labeled": 0.9303,
+          "recall_detect": 1.0,
+          "precision": 0.5826,
+          "f1": 0.7165,
+          "fp": 544,
+          "wrong_label": 4,
+          "pred": 1313
+        },
+        "sensitive_date": {
+          "gold": 1895,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 0.2928,
+          "f1": 0.453,
+          "fp": 4616,
+          "wrong_label": 226,
+          "pred": 6847
+        },
+        "tax_id": {
+          "gold": 379,
+          "recall_labeled": 1.0,
+          "recall_detect": 1.0,
+          "precision": 1.0,
+          "f1": 1.0,
+          "fp": 0,
+          "wrong_label": 0,
+          "pred": 379
+        },
+        "username": {
+          "gold": 617,
+          "recall_labeled": 0.6288,
+          "recall_detect": 1.0,
+          "precision": 0.9724,
+          "f1": 0.7638,
+          "fp": 11,
+          "wrong_label": 0,
+          "pred": 399
+        }
+      }
+    }
+  },
+  "confusion_full_offdiag": [
+    {
+      "gold": "postal_code",
+      "pred": "address",
+      "n": 632
+    },
+    {
+      "gold": "bank_account",
+      "pred": "government_id",
+      "n": 234
+    },
+    {
+      "gold": "username",
+      "pred": "file_path",
+      "n": 229
+    },
+    {
+      "gold": "date_of_birth",
+      "pred": "sensitive_date",
+      "n": 226
+    },
+    {
+      "gold": "person",
+      "pred": "email",
+      "n": 56
+    },
+    {
+      "gold": "sensitive_account_id",
+      "pred": "api_key",
+      "n": 34
+    },
+    {
+      "gold": "sensitive_account_id",
+      "pred": "access_token",
+      "n": 31
+    },
+    {
+      "gold": "address",
+      "pred": "MISS",
+      "n": 11
+    },
+    {
+      "gold": "bank_account",
+      "pred": "phone_number",
+      "n": 9
+    },
+    {
+      "gold": "person",
+      "pred": "MISS",
+      "n": 6
+    },
+    {
+      "gold": "card_cvv",
+      "pred": "routing_number",
+      "n": 4
+    },
+    {
+      "gold": "bank_account",
+      "pred": "sensitive_account_id",
+      "n": 4
+    },
+    {
+      "gold": "card_cvv",
+      "pred": "iban",
+      "n": 3
+    },
+    {
+      "gold": "card_cvv",
+      "pred": "payment_card",
+      "n": 2
+    },
+    {
+      "gold": "bank_account",
+      "pred": "date_of_birth",
+      "n": 2
+    },
+    {
+      "gold": "person",
+      "pred": "address",
+      "n": 1
+    },
+    {
+      "gold": "sensitive_account_id",
+      "pred": "routing_number",
+      "n": 1
+    },
+    {
+      "gold": "payment_card",
+      "pred": "bank_account",
+      "n": 1
+    },
+    {
+      "gold": "government_id",
+      "pred": "phone_number",
+      "n": 1
+    }
+  ],
+  "lang_full": {
+    "en": {
+      "gold": 8526,
+      "labeled_recall": 0.932,
+      "fp": 1984
+    },
+    "fr": {
+      "gold": 10527,
+      "labeled_recall": 0.9138,
+      "fp": 4208
+    },
+    "other": {
+      "gold": 45,
+      "labeled_recall": 1.0,
+      "fp": 56
+    }
+  }
+}

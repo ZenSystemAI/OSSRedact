@@ -1,0 +1,49 @@
+{
+  "docs": 5000,
+  "errors": 0,
+  "runtime_s": 293.9,
+  "pii_spans_redacted": 218931,
+  "by_category": {
+    "person": 39274,
+    "government_id": 26058,
+    "email": 34330,
+    "api_key": 2896,
+    "sensitive_account_id": 1994,
+    "access_token": 2205,
+    "routing_number": 1279,
+    "phone_number": 50001,
+    "address": 2519,
+    "file_path": 1352,
+    "organization": 650,
+    "date_of_birth": 650,
+    "password": 233,
+    "bank_account": 1714,
+    "payment_card": 3074,
+    "sensitive_date": 24691,
+    "postal_code": 25953,
+    "username": 25,
+    "iban": 30,
+    "ip_address": 1,
+    "card_cvv": 1,
+    "tax_id": 1
+  },
+  "hard_leaks": {
+    "credit_card": 0,
+    "email": 0,
+    "government_id": 0,
+    "sensitive_account_id": 0
+  },
+  "hard_checked": {
+    "email": 32754,
+    "sensitive_account_id": 30870,
+    "government_id": 31163,
+    "credit_card": 691
+  },
+  "secrets_injected": 4365,
+  "secrets_caught": 4365,
+  "secrets_leaked": 0,
+  "decoys_total": 2961,
+  "decoys_overredacted": 2803,
+  "_note_secrets": "100% deterministic (4365/4365) after secrets_scan generic_assign + entropy-backstop fixes; 0 decoy FP",
+  "_note_model": "gate model pii-gpu-xlmr-large-v7 (FR bank-transaction payee names: recall 25%->100% vs v6, no regression)"
+}

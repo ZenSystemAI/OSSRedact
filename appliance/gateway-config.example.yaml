@@ -1,0 +1,28 @@
+# ossredact egress gateway policy (SPECS §4).
+# Resolution order for PII: session override > project override > default. Secrets ALWAYS redact (exempt).
+# Edits are picked up live (mtime-watched) — no restart needed for policy changes.
+
+secrets:
+  enabled: true            # always-on; here for visibility. Ignores the PII toggle below.
+  entropy_backstop: true   # flag AWS-secret-shaped high-entropy tokens (FP-filtered: uuid/sha/sequential)
+
+pii:
+  # categories: person, address, phone, email, account, nas, tax, card, dob, date, postal, ip, org, filepath, username
+  # credentials (password, api_key, access_token) always redact regardless of this config.
+  default:
+    enabled: true
+    exclude: [filepath, username, org]   # default OFF: high-volume/low-sensitivity (coding-assistant noise)
+    # categories: [...]                  # OPTIONAL restrictive allowlist (redact ONLY these); omit = redact all but exclude
+  projects: {}             # e.g.  myrepo: { categories: [person, email] }   or   { exclude: [] }  (redact everything)
+  sessions: {}             # e.g.  <session-id>: { enabled: false }          # this session: PII off (secrets still on)
+
+fast_path:
+  skip_pure_code: true     # forward pure-code / no-PII requests unchanged (zero model overhead)
+
+upstream:
+  anthropic: https://api.anthropic.com
+  openai: https://api.openai.com
+
+map:
+  ttl_hours: 24
+  store: /opt/ossredact-npu/maps

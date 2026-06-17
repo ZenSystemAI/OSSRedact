@@ -1,0 +1,204 @@
+@import 'tailwindcss';
+
+/* ===== ZenSystem tokens (mirrors ~/dev/ossredact-web/landing/index.html :root -- canonical source) ===== */
+@theme {
+  --color-bg: #0f0f0f;
+  --color-black: #050505;
+  --color-surface: #191919;
+  --color-card: #1a1a1a;
+  --color-teal: #4ecdb8;
+  --color-teal-light: #6fd9c7;
+  --color-teal-dim: #3aa89a;
+  --color-text: #e8e8e8;
+  --color-muted: #9ca3af;
+  --color-light: #6b7280;
+  --color-success: #10b981;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+
+  --font-head: 'Inter Tight', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+:root {
+  --border: rgba(255, 255, 255, 0.08);
+  --border-mid: rgba(255, 255, 255, 0.12);
+  --glass: rgba(255, 255, 255, 0.045);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-weight: 400;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-head);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: #fff;
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-teal);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ===== components ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14px;
+  border-radius: 9px;
+  padding: 9px 16px;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--color-teal);
+  color: #04201b;
+}
+.btn-primary:not(:disabled):hover {
+  background: var(--color-teal-light);
+  transform: translateY(-1px);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--color-text);
+  border-color: var(--border-mid);
+}
+.btn-ghost:not(:disabled):hover {
+  border-color: var(--color-teal-dim);
+  color: #fff;
+}
+
+.panel {
+  background: var(--color-surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-teal);
+  font-weight: 500;
+}
+
+/* redaction spans rendered in the document canvas */
+.tok {
+  border-radius: 5px;
+  padding: 0 3px;
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, filter 0.12s ease;
+  position: relative;
+}
+.tok:hover {
+  filter: brightness(1.12);
+}
+.tok-active {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: #04201b;
+  font-weight: 600;
+}
+.tok-inactive {
+  background: transparent !important;
+  color: var(--color-text);
+  box-shadow: inset 0 -2px 0 0 var(--tok-color, var(--color-teal));
+  border-radius: 0;
+}
+.tok-selected {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--tok-color, var(--color-teal));
+}
+
+/* thin scrollbars to match the dark UI */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* the print region exists in the DOM but sits off-screen until printing */
+#print-region {
+  position: fixed;
+  left: -100000px;
+  top: 0;
+  width: 760px;
+}
+
+/* ===== print: only the redacted document, black boxes, nothing else ===== */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #print-region,
+  #print-region * {
+    visibility: visible;
+  }
+  #print-region {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    color: #000;
+    padding: 24px;
+    font-family: var(--font-mono);
+    white-space: pre-wrap;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .print-mask {
+    background: #000;
+    color: #000;
+    border-radius: 2px;
+  }
+}

@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Session+project entity map for the egress proxy (SPECS §2.2).
+
+Gives cross-turn placeholder stability: the same value -> the same placeholder this turn and next, keyed on
+(session, project). Persisted encrypted at rest (AES-GCM, 256-bit key in a local 0600 file). Bidirectional
+(value<->placeholder). TTL'd + size-capped. NEVER logs values or the key.
+"""
+import os, re, json, time, base64, hashlib, threading
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+MAPS_DIR = os.environ.get('GATEWAY_MAPS_DIR', '/opt/ossredact-npu/maps')
+KEY_FILE = os.environ.get('GATEWAY_MAP_KEY', os.path.join(MAPS_DIR, '.mapkey'))
+TTL_S = int(os.environ.get('GATEWAY_MAP_TTL_H', '24')) * 3600
+MAX_ENTITIES = int(os.environ.get('GATEWAY_MAP_MAX', '5000'))
+
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _key_lock(path):
+    with _LOCKS_GUARD:
+        lk = _LOCKS.get(path)
+        if lk is None:
+            lk = _LOCKS[path] = threading.Lock()
+        return lk
+
+
+def _load_key():
+    os.makedirs(MAPS_DIR, exist_ok=True)
+    if os.path.exists(KEY_FILE):
+        return base64.b64decode(open(KEY_FILE, 'rb').read())
+    k = AESGCM.generate_key(bit_length=256)
+    fd = os.open(KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, base64.b64encode(k))
+    finally:
+        os.close(fd)
+    return k
+
+
+_AES = AESGCM(_load_key())
+
+
+def _safe_name(session, project):
+    return hashlib.sha256(f"{project}\x00{session}".encode()).hexdigest()[:32]
+
+
+def derive_session(header_session, system_text=''):
+    """Stable session key: the client-provided session id, else a hash of the system prompt (SPECS §2.2)."""
+    if header_session:
+        return header_session
+    if system_text:
+        return 'sys-' + hashlib.sha256(system_text.encode('utf-8', 'ignore')).hexdigest()[:16]
+    return 'nosession'
+
+
+class EntityMap:
+    def __init__(self, session, project='default'):
+        self.session = session or 'nosession'
+        self.project = project or 'default'
+        self.path = os.path.join(MAPS_DIR, _safe_name(self.session, self.project) + '.json.enc')
+        self.v2p = {}
+        self.p2v = {}
+        self.counters = {}
+        self.created = time.time()
+        self.new_this_load = 0
+        self._lock = _key_lock(self.path)
+        self._load()
+
+    def _load(self):
+        try:
+            if not os.path.exists(self.path):
+                return
+            blob = open(self.path, 'rb').read()
+            if len(blob) < 13:
+                return
+            nonce, ct = blob[:12], blob[12:]
+            data = json.loads(_AES.decrypt(nonce, ct, None))
+            if time.time() - data.get('created', 0) > TTL_S:
+                try:
+                    os.remove(self.path)
+                except OSError:
+                    pass
+                return
+            self.v2p = data.get('v2p', {})
+            self.p2v = data.get('p2v', {})
+            self.counters = data.get('counters', {})
+            self.created = data.get('created', time.time())
+        except Exception as e:
+            print(f"[entity_map load err] {type(e).__name__}", flush=True)  # never log values
+
+    def save(self):
+        try:
+            os.makedirs(MAPS_DIR, exist_ok=True)
+            data = json.dumps({'v2p': self.v2p, 'p2v': self.p2v,
+                               'counters': self.counters, 'created': self.created}).encode()
+            nonce = os.urandom(12)
+            ct = _AES.encrypt(nonce, data, None)
+            tmp = self.path + '.tmp'
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, nonce + ct)
+            finally:
+                os.close(fd)
+            os.replace(tmp, self.path)  # atomic
+        except Exception as e:
+            print(f"[entity_map save err] {type(e).__name__}", flush=True)
+
+    def placeholder_for(self, value, label):
+        """Return (placeholder, is_new). Stable across turns for the same value+session+project."""
+        ph = self.v2p.get(value)
+        if ph is not None:
+            return ph, False
+        lab = re.sub(r'[^A-Z0-9]', '', label.upper()) or 'PII'
+        self.counters[lab] = self.counters.get(lab, 0) + 1
+        ph = f"<{lab}_{self.counters[lab]:03d}>"
+        if len(self.v2p) < MAX_ENTITIES:
+            self.v2p[value] = ph
+            self.p2v[ph] = value
+        self.new_this_load += 1
+        return ph, True
+
+    def replay(self):
+        """placeholder->value for response rehydration (full session map: the model may reference any
+        entity present in the conversation history, all of which were redacted to these placeholders)."""
+        return dict(self.p2v)

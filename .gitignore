@@ -1,0 +1,51 @@
+# Internal planning docs (specs/plans) — never commit to a public repo
+docs/superpowers/
+# Internal research references (public facts, but kept local until an OSS release pass)
+docs/research/
+PRIOR-ART.md
+
+# Synthetic corpora + trained models (large, regenerable; never ship data)
+datasets/
+models/
+*.jsonl
+
+# Media / screenshots (promo + landing assets, not model/code IP)
+*.mp4
+*.png
+
+# Python / venv / node
+__pycache__/
+.venv*/
+.pytest_cache/
+node_modules/
+
+# Backups + scratch
+*.bak*
+*.ok-*
+*.tmp
+/tmp/
+
+# Appliance runtime data + artifacts (gate-host egress proxy -- never commit)
+# SENSITIVE: encrypted session entity maps + .mapkey AES key
+maps/
+# model weights (singular dir on the host)
+model/
+# int8 model weights
+model-v11r5-base-int8/
+# same-disk model backups
+model.bak-*/
+# OpenVINO compile cache
+.ovcache/
+# runtime/private dir
+private/
+# live host-specific config (commit gateway-config.example.yaml instead)
+gateway-config.yaml
+
+# Internal planning docs -- keep local, never publish
+plans/
+
+# Local Claude Code tooling / agent worktrees / local settings
+.claude/
+
+# keep the README chart figures (override the *.png ignore above)
+!charts/*.png

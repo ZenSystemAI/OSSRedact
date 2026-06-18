@@ -1,20 +1,20 @@
-# qc-pii Architecture
+# OSSRedact Architecture
 
-A technical deep-dive of the qc-pii local privacy gateway, written for a reader who wants to
+A technical deep-dive of the OSSRedact local privacy gateway, written for a reader who wants to
 understand or audit the design.
 
-## What qc-pii is
+## What OSSRedact is
 
-qc-pii is a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs. On
+OSSRedact is a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs. On
 egress it redacts PII and secrets in the request's free-text fields to stable placeholders; on
-the response it rehydrates those placeholders back to the real values. The local client (Claude
-Code, Codex, Hermes) sees real data; the cloud model only ever sees placeholders.
+the response it rehydrates those placeholders back to the real values. The local client sees
+real data; the cloud model only ever sees placeholders.
 
 The wire formats supported today are Anthropic `/v1/messages`, OpenAI-compatible
-`/v1/chat/completions` (routing Codex, omp, and other OpenAI-compatible clients via openai_adapter.py),
-and OpenAI `/v1/responses` (the API Codex CLI speaks, via responses_adapter.py) -- all through the same
+`/v1/chat/completions` (routing Codex, Hermes, Pi, omp, opencode, and other OpenAI-compatible clients via openai_adapter.py),
+and OpenAI `/v1/responses` (the API the current Codex CLI speaks, via responses_adapter.py) -- all through the same
 redact/rehydrate contract. The egress-proxy code now lives in this repo under `appliance/`; the GPU NER
-gate service it calls remains host-only (finding F6). Hermes is still planned. Point any tool at the gateway with:
+gate service it calls is version-controlled under `gate/` and deployed on the GPU host (F6 closed; drift-guarded by `deploy/check-gate-drift.sh`). Tool-specific wiring is documented in `docs/ADAPTERS.md`. Point any tool at the gateway with:
 
 ```
 ANTHROPIC_BASE_URL=http://<host>:8011
@@ -31,7 +31,7 @@ rather than another cloud DLP hop.
 ### Why the proxy approach
 
 Going fully local for data sovereignty is too expensive (256GB+ VRAM to run a SOTA model at
-home). qc-pii takes the other route: filter private data out, use cloud SOTA, redact on egress
+home). OSSRedact takes the other route: filter private data out, use cloud SOTA, redact on egress
 and rehydrate transparently. Two users motivate the design:
 
 1. The hobbyist who wants data sovereignty but cannot afford GPUs.
@@ -40,7 +40,7 @@ and rehydrate transparently. Two users motivate the design:
 ### Honest positioning
 
 The redaction-proxy concept already exists. og-local/OutGate (BSL license) and rehydra-sdk (MIT)
-both proxy these wire formats with round-trip streaming rehydration. qc-pii does **not** claim to
+both proxy these wire formats with round-trip streaming rehydration. OSSRedact does **not** claim to
 be first or only. Its distinct contribution is:
 
 - A trained French-Quebec + English PII NER model (competitors use generic Presidio/regex).
@@ -55,8 +55,8 @@ be first or only. Its distinct contribution is:
 ```
                           host (tailnet-bound, on-device)
    local tool                +-------------------------------------------------+
-   (Claude Code,             |                                                 |
-    Codex, Hermes)           |   :8011  egress proxy                           |
+   (Claude Code, Codex,      |                                                 |
+    Hermes, Pi, opencode)    |   :8011  egress proxy                           |
        |                     |          - extract / gate / merge / rehydrate   |
        |  ANTHROPIC_BASE_URL |          - holds session+project entity map     |
        |  = http://host:8011 |                |                                |
@@ -93,9 +93,9 @@ be first or only. Its distinct contribution is:
     |
  [2] cheap deterministic gate  (ALWAYS, microseconds)
     |
- [3] fast path: clean?  --yes--> forward unchanged (zero model cost)
+ [3] empty path: no scannable text and no known entity?  --yes--> forward unchanged
     |  no
- [4] targeted on-device NER pass  (only flagged / natural-language fields)
+ [4] on-device NER pass over extracted non-trivial fields
     |
  [5] union merge (connected-component) + session+project entity map
     |
@@ -128,18 +128,19 @@ This runs in microseconds, so it is cheap enough to be unconditional. It is also
 floor: because NER recall is below 100%, the deterministic layer is what anchors coverage of the
 catastrophic categories (secrets, cards, SIN), independent of the model.
 
-### 3. Fast path
+### 3. Empty path
 
-If the deterministic gate finds nothing and the field has no natural-language content that needs
-NER, the request is forwarded **unchanged**, with **zero model cost**. This is the common case for
-pure-code and clean requests and is why the median latency for clean traffic is so low (see
-Latency below).
+If a request has no scannable extracted text and no prior session entity to backstop, it is
+forwarded unchanged. Normal non-empty text fields proceed to the local NER pass even when Tier-0
+finds nothing, because person names have no deterministic floor and short structural values can
+carry them.
 
-### 4. Targeted on-device NER pass
+### 4. On-device NER pass
 
-The on-device NER model runs **only** on fields that were flagged by the gate or that are
-natural-language. Pure code with no Tier-0 hit is **skipped**: there is no value in spending an
-inference window on a code blob that the deterministic floor already cleared.
+The on-device NER model runs on every extracted non-trivial text field. Repeated system prompts and
+prior turns are cached, but code-like fields and short structural values are not skipped solely
+because Tier-0 is clean. That trade keeps the privacy posture fail-safer for NER-only labels such
+as person names.
 
 The model processes text in **256-token windows** at about 34ms per window.
 
@@ -201,7 +202,7 @@ dynamic-INT8 ONNX model on CPU via onnxruntime (the Intel NPU / OpenVINO FP16 ti
 a drop-in alternate).
 
 ```
-flagged / natural-language field
+extracted non-trivial text field
         |
    chunk into 256-token windows
         |
@@ -212,8 +213,8 @@ flagged / natural-language field
    per-window NER spans --> union merge (step 5)
 ```
 
-- **Targeting**: only flagged or natural-language fields enter this pass. Pure code with no Tier-0
-  hit is skipped entirely.
+- **Targeting**: every extracted non-trivial text field enters this pass. Repeated system prompts
+  and prior turns are cached; empty/non-text requests can still forward unchanged.
 - **Chunking**: text is processed in 256-token windows, at about 34ms per window.
 - **Why the base tier is the right always-on tier**: the base model matches the GPU large model on
   recall at far lower latency, so the always-on tier runs the base model on-device (CPU INT8, ~42ms;
@@ -401,7 +402,7 @@ Underneath the NER suite sit two deterministic layers (in the deployed appliance
 - **Deterministic secrets layer** (gitleaks-style patterns + Shannon-entropy backstop with
   UUID/git-SHA/sequential FP filters).
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The deployed GPU NER gate service (`gate_service_gpu.py`) remains host-only (tracked as finding F6). The pipeline described in this document is that of the deployed appliance.
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift (F6 closed). The pipeline described in this document is that of the deployed appliance.
 
 ### 20 labels
 
@@ -451,13 +452,13 @@ why the base model is the always-on tier (deployed as CPU INT8).
 
 Presidio configured with English + French large spaCy, union, same sets, same metric:
 
-| Test          | qc-pii recall | Presidio recall | qc-pii clean_fp | Presidio clean_fp |
+| Test          | OSSRedact recall | Presidio recall | OSSRedact clean_fp | Presidio clean_fp |
 |---------------|---------------|-----------------|-----------------|-------------------|
 | ALL-CAPS gate | 0.955         | 0.779           | 0               | (n/a)             |
 | v6 val        | 0.990         | 0.759           | 0               | 343               |
 | canonical     | 0.986         | 0.798           | 0               | 508               |
 
-qc-pii wins recall by **17 to 23 points** and has **far fewer false positives**.
+OSSRedact wins recall by **17 to 23 points** and has **far fewer false positives**.
 
 ### Synthetic Québec corpus
 
@@ -508,4 +509,4 @@ Charts: `./charts/fig1..fig5` (png).
 - **Track A appliance is built**, running as a **systemd service**, and **verified end-to-end**: a
   real Claude Code session through the proxy redacts and rehydrates transparently.
 - **Not yet published.**
-- The workbench UI is **built**. The OpenAI/Codex adapters (`/v1/chat/completions` and `/v1/responses`) are live; the Hermes adapter is still planned. (The egress-proxy code now lives in this repo under `appliance/`; the GPU NER gate service remains host-only -- finding F6.)
+- The workbench UI is **built**. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`. (Both the egress-proxy code under `appliance/` and the GPU NER gate service under `gate/` are now version-controlled -- F6 closed; `deploy/check-gate-drift.sh` guards host vs repo drift.)

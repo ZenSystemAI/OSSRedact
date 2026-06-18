@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenAI chat-completions adapter for the qc-pii egress proxy.
+"""OpenAI chat-completions adapter for the OSSRedact egress proxy.
 
 Same privacy contract as the Anthropic /v1/messages path: redact PII + secrets in the OUTBOUND request's
 free-text fields to stable placeholders, and rehydrate the placeholders back to real values on the response --
@@ -17,8 +17,10 @@ change the placeholder grammar or the JSON-safe rehydration in egress_proxy.py, 
 """
 import json, re
 
-# matches the tail of a partial placeholder still being streamed (e.g. "<EMAIL_00" before its ">" arrives)
-_PH_PREFIX_RE = re.compile(r'[A-Z0-9]*_?\d*')
+# matches the tail of a partial placeholder still being streamed (e.g. "<EMAIL_00" before its ">" arrives).
+# A label may carry INTERNAL underscores (gate-form labels such as PHONE_NUMBER / SENSITIVE_ACCOUNT_ID ->
+# <PHONE_NUMBER_001> / <SENSITIVE_ACCOUNT_ID_001>), so any run of label chars must be held until completion.
+_PH_PREFIX_RE = re.compile(r'[A-Z0-9_]*')
 
 
 class Field:
@@ -70,10 +72,11 @@ def extract_text_fields_openai(body):
 def rehydrate_text(s, replay):
     if not replay or not isinstance(s, str):
         return s
-    for ph, v in replay.items():
-        if ph in s:
-            s = s.replace(ph, v)
-    return s
+    tokens = [ph for ph in replay if isinstance(ph, str) and ph in s]
+    if not tokens:
+        return s
+    pat = re.compile('|'.join(re.escape(ph) for ph in sorted(tokens, key=len, reverse=True)))
+    return pat.sub(lambda m: replay[m.group()], s)
 
 
 def _rehydrate_json(v, replay):
@@ -82,21 +85,80 @@ def _rehydrate_json(v, replay):
     if isinstance(v, list):
         return [_rehydrate_json(x, replay) for x in v]
     if isinstance(v, dict):
-        return {k: _rehydrate_json(x, replay) for k, x in v.items()}
+        rebuilt = {}
+        for k, x in v.items():
+            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            if nk in rebuilt and nk != k:
+                nk = _disambiguate_key(nk if isinstance(nk, str) else k, rebuilt, k)
+            rebuilt[nk] = _rehydrate_json(x, replay)
+        return rebuilt
     return v
 
 
+def _disambiguate_key(new_key, node, old_key):
+    if new_key not in node or new_key == old_key:
+        return new_key
+    n = 1
+    candidate = '{}.dup{}'.format(new_key, n)
+    while candidate in node and candidate != old_key:
+        n += 1
+        candidate = '{}.dup{}'.format(new_key, n)
+    return candidate
+
+
+class _DupObj:
+    __slots__ = ('pairs',)
+
+    def __init__(self, pairs):
+        self.pairs = [list(p) for p in pairs]
+
+
+def _dup_preserving_pairs(pairs):
+    seen = set()
+    has_dup = False
+    for k, _ in pairs:
+        if k in seen:
+            has_dup = True
+            break
+        seen.add(k)
+    if has_dup:
+        return _DupObj(list(pairs))
+    return dict(pairs)
+
+
+def _dump_rehydrated_dup_safe(v, replay):
+    if isinstance(v, _DupObj):
+        parts = []
+        for k, x in v.pairs:
+            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            parts.append(json.dumps(nk, ensure_ascii=False) + ': ' + _dump_rehydrated_dup_safe(x, replay))
+        return '{' + ', '.join(parts) + '}'
+    if isinstance(v, dict):
+        seen_keys = set()
+        parts = []
+        for k, x in v.items():
+            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            if nk in seen_keys:
+                nk = _disambiguate_key(nk if isinstance(nk, str) else k, {kk: None for kk in seen_keys}, k)
+            seen_keys.add(nk)
+            parts.append(json.dumps(nk, ensure_ascii=False) + ': ' + _dump_rehydrated_dup_safe(x, replay))
+        return '{' + ', '.join(parts) + '}'
+    if isinstance(v, list):
+        return '[' + ', '.join(_dump_rehydrated_dup_safe(x, replay) for x in v) + ']'
+    if isinstance(v, str):
+        return json.dumps(rehydrate_text(v, replay), ensure_ascii=False)
+    return json.dumps(v, ensure_ascii=False)
+
+
 def rehydrate_json_string(acc, replay):
-    """Rehydrate placeholders inside a tool-call arguments JSON string at the VALUE level (parse -> walk ->
-    replace -> re-serialize) so a real value with quotes/backslashes can't break the JSON. Falls back to plain
-    text rehydrate if the accumulator isn't valid JSON."""
+    """Rehydrate placeholders inside a tool-call arguments JSON string, including object keys."""
     if not acc or not acc.strip():
         return acc
     try:
-        obj = json.loads(acc)
+        obj = json.loads(acc, object_pairs_hook=_dup_preserving_pairs)
     except Exception:
         return rehydrate_text(acc, replay)
-    return json.dumps(_rehydrate_json(obj, replay), ensure_ascii=False)
+    return _dump_rehydrated_dup_safe(obj, replay)
 
 
 def split_safe(carry):

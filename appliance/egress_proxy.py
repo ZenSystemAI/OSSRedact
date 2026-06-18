@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
-"""qc-pii egress privacy proxy -- the appliance (SPECS.md §2).
+"""OSSRedact egress privacy proxy -- the appliance.
 
 Sits in front of cloud LLM APIs. On egress it redacts PII + secrets in the request's free-text/data
 fields to stable placeholders; on the response it rehydrates the placeholders back to the real values, so
 the LOCAL client (Claude Code) sees real data while the upstream model only ever reasons over placeholders.
 
-Co-located with the NPU NER gate (:8001) on the Beelink; binds :8011. Built up across RUNBOOK steps:
+Co-located with the NER gate (:8001) on the same host; binds :8011. Built up across RUNBOOK steps:
   S2 : /v1/messages field extraction + passthrough + DRYRUN echo.
   S3 : cheap deterministic gate (Tier-0) inline + forward-unchanged-if-clean fast path.
   S4 : targeted NPU pass (gate /detect, chunked, cached) + union merge + span substitution + non-stream rehydrate.
-  S5 : session+project entity map (AES-GCM) for cross-turn placeholder stability  [pending].
-  S6 : streaming (SSE) rehydration with placeholder reassembly across deltas       [pending].
-  S7 : secrets layer wired into the cheap gate (always-on, ignores PII policy)      [pending].
-  S8 : gateway-config.yaml policy resolution (session > project > default)          [pending].
+  S5 : session+project entity map (AES-GCM) for cross-turn placeholder stability.
+  S6 : streaming (SSE) rehydration with placeholder reassembly across deltas.
+  S7 : secrets layer wired into the cheap gate (always-on, ignores PII policy).
+  S8 : gateway-config.yaml policy resolution (session > project > default).
 """
-import os, sys, json, time, re
+import os, sys, json, time, re, hashlib
 import yaml
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
-sys.path.insert(0, '/home/steven/sparx-npu')
+APPLIANCE_DIR = os.environ.get('GATEWAY_APPLIANCE_DIR') or os.path.dirname(os.path.abspath(__file__))
+if APPLIANCE_DIR not in sys.path:
+    sys.path.insert(0, APPLIANCE_DIR)
 from privacy_gate import tier0_spans, merge_spans, post_merge_address, explain   # cheap Tier-0 (no model load)
-from entity_map import EntityMap, derive_session
+from entity_map import EntityMap, derive_session, _case_sensitive_placeholder
 from secrets_scan import secret_spans                                   # deterministic secrets (always-on)
 import openai_adapter   # OpenAI /v1/chat/completions schema translation (Codex / omp / OpenAI-compatible)
 import responses_adapter   # OpenAI /v1/responses schema translation (Codex CLI speaks /v1/responses ONLY)
+from name_carrier import name_shaped, carrier_person_spans   # plan 026: rare-name carrier-wrap booster (NER recall)
 
 ANTHROPIC_UPSTREAM = os.environ.get('GATEWAY_ANTHROPIC_UPSTREAM', 'https://api.anthropic.com')
 OPENAI_UPSTREAM = os.environ.get('GATEWAY_OPENAI_UPSTREAM', 'https://api.openai.com')
@@ -52,7 +55,7 @@ _PH_TOKEN_RE = re.compile(r'<[A-Z0-9_]+_\d{3,}>')
 ALWAYS_REDACT = {'secret', 'password', 'api_key', 'access_token'}
 PROSE_MIN_WORDS = 8               # a field with >= this many word tokens of natural language → neural-scan it
 
-app = FastAPI(title='qc-pii egress proxy')
+app = FastAPI(title='OSSRedact egress proxy')
 
 
 # ----------------------------------------------------------------------------
@@ -165,11 +168,16 @@ _DETECT_CACHE = {}
 _CACHE_MAX = 4096
 
 
+def _detect_cache_key(text, min_score):
+    digest = hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()
+    return digest, len(text), float(min_score)
+
+
 async def _detect_neural(aclient, text, min_score=0.5):
-    """Call the NPU gate /detect (chunked); offset spans back to field coords. Cache by text+score so the
-    repeating system prompt / prior turns aren't re-scanned each request. Returns spans, or None if the gate
-    is unreachable (caller then keeps Tier-0 only and flags degraded)."""
-    key = (text, min_score)
+    """Call the NPU gate /detect (chunked); offset spans back to field coords. Cache by a digest of text+score so
+    repeating prompts / prior turns aren't re-scanned while raw text is not retained as a cache key. Returns spans,
+    or None if the gate is unreachable (caller then keeps Tier-0 only and flags degraded)."""
+    key = _detect_cache_key(text, min_score)
     cached = _DETECT_CACHE.get(key)
     if cached is not None:
         return cached
@@ -197,7 +205,7 @@ async def _detect_neural(aclient, text, min_score=0.5):
 # Policy (SPECS §4): per-project + per-session PII config, secrets always on.
 # Resolution: session override > project override > default. Config is mtime-watched (live edits).
 # ----------------------------------------------------------------------------
-CONFIG_PATH = os.environ.get('GATEWAY_CONFIG', '/home/steven/sparx-npu/gateway-config.yaml')
+CONFIG_PATH = os.environ.get('GATEWAY_CONFIG', os.path.expanduser('~/.ossredact/gateway-config.yaml'))
 # operational labels excluded by DEFAULT (high-volume, low-sensitivity; redacting them adds noise + can
 # degrade the coding assistant). Toggle per-project if a DLP setup needs them.
 DEFAULT_EXCLUDE = ['filepath', 'username', 'org']
@@ -287,13 +295,8 @@ def substitute(text, spans, emap, ctx):
     return ''.join(out), n
 
 
-def build_known_re(emap):
-    """Regex over already-known session entity VALUES (len>=4, word-boundary-guarded, longest-first).
-    The known-entity backstop: a once-identified entity must never leak later in the session even if the
-    model misses it in a new context. Pure deterministic, no model.
-    Compiled IGNORECASE (Codex HIGH-1): a known value must be masked regardless of case, else "John" detected
-    once leaks as "JOHN"/"john" elsewhere. sweep_known resolves the placeholder via a casefolded lookup."""
-    vals = [v for v in emap.v2p.keys() if len(v) >= 4]
+def _compile_known_re(vals, ignore_case=True):
+    vals = [v for v in vals if v and len(v) >= 4]
     if not vals:
         return None
     vals.sort(key=len, reverse=True)
@@ -305,28 +308,67 @@ def build_known_re(emap):
         if v[-1].isalnum():
             esc = esc + r'(?!\w)'
         parts.append(esc)
-    return re.compile('|'.join(parts), re.IGNORECASE)
+    return re.compile('|'.join(parts), re.IGNORECASE if ignore_case else 0)
+
+
+def build_known_re(emap):
+    """Regexes over already-known session entity VALUES (len>=4, word-boundary-guarded, longest-first).
+    The known-entity backstop: a once-identified entity must never leak later in the session even if the
+    model misses it in a new context. Pure deterministic, no model.
+    Ordinary PII is matched case-insensitively. Case-significant credentials/paths are matched exact-case so
+    case-only-different values in the session map rehydrate losslessly."""
+    exact_vals = []
+    ci_vals = []
+    for value, ph in emap.v2p.items():
+        if _case_sensitive_placeholder(ph):
+            exact_vals.append(value)
+        else:
+            ci_vals.append(value)
+    exact_re = _compile_known_re(exact_vals, ignore_case=False)
+    ci_re = _compile_known_re(ci_vals, ignore_case=True)
+    if exact_re is None and ci_re is None:
+        return None
+    return exact_re, ci_re
 
 
 def sweep_known(text, known_re, emap):
     """Replace any literal occurrence of a known value with its existing placeholder. Cannot mint a wrong
     placeholder (uses the exact value->placeholder already in the map). Returns (text, n_swept)."""
-    # Case-insensitive resolution (Codex HIGH-1): known_re matches any case, so look up the placeholder by the
-    # casefolded match against emap.v2p. If two differently-cased values collide on casefold, first-wins is
-    # fine -- it still masks, and rehydrate restores a same-PII value.
+    if known_re is None:
+        return text, 0
+    if isinstance(known_re, tuple):
+        exact_re, ci_re = known_re
+    else:  # compatibility for any direct caller with a legacy single regex
+        exact_re, ci_re = None, known_re
+    exact_lookup = {}
     cf_lookup = {}
     for v, ph in emap.v2p.items():
-        cf_lookup.setdefault(v.casefold(), ph)
+        if _case_sensitive_placeholder(ph):
+            exact_lookup.setdefault(v, ph)
+        else:
+            cf_lookup.setdefault(v.casefold(), ph)
     n = 0
 
-    def repl(m):
+    def repl_exact(m):
+        nonlocal n
+        ph = exact_lookup.get(m.group())
+        if ph is None:
+            return m.group()
+        n += 1
+        return ph
+
+    def repl_ci(m):
         nonlocal n
         ph = cf_lookup.get(m.group().casefold())
         if ph is None:
             return m.group()
         n += 1
         return ph
-    return known_re.sub(repl, text), n
+    if exact_re is not None:
+        text = exact_re.sub(repl_exact, text)
+    if ci_re is not None:
+        text = ci_re.sub(repl_ci, text)
+    return text, n
 
 
 async def redact_body(body, ctx, extract=extract_text_fields):
@@ -382,8 +424,21 @@ async def redact_body(body, ctx, extract=extract_text_fields):
                     # forwarding the unredacted body upstream (FIX-ROUND-3 HIGH). Default-on; GATEWAY_FAIL_OPEN=1
                     # opts back into Tier-0-only egress when availability must win over the NER-only-PII risk.
                     ctx['_degraded'] = True
-                elif neural:
-                    spans += neural
+                else:
+                    if neural:
+                        spans += neural
+                    # carrier-wrap booster (plan 026 option A): the model returns ZERO person spans for a RARE
+                    # name in a BARE structural value (a JSON value / short tool-arg) -- no surrounding prose to
+                    # cue it, and there is NO Tier-0 name floor, so it would leak. When a short name-shaped value
+                    # drew no person from the bare scan, re-scan it inside a prose carrier and map the verdict
+                    # back to the value's own offsets. Detection-only (redaction still targets the real value).
+                    stripped = t.strip()
+                    if name_shaped(stripped) and not any(s.get('label') == 'person' for s in neural):
+                        lead = len(t) - len(t.lstrip())
+                        for s in await carrier_person_spans(lambda x: _detect_neural(aclient, x), stripped):
+                            s['start'] += lead
+                            s['end'] += lead
+                            spans.append(s)
             if not spans:
                 continue
             spans = post_merge_address(merge_spans(spans), t)
@@ -432,10 +487,11 @@ async def redact_body(body, ctx, extract=extract_text_fields):
 def rehydrate_text(s, replay):
     if not replay or not isinstance(s, str):
         return s
-    for ph, v in replay.items():
-        if ph in s:
-            s = s.replace(ph, v)
-    return s
+    tokens = [ph for ph in replay if isinstance(ph, str) and ph in s]
+    if not tokens:
+        return s
+    pat = re.compile('|'.join(re.escape(ph) for ph in sorted(tokens, key=len, reverse=True)))
+    return pat.sub(lambda m: replay[m.group()], s)
 
 
 def _rehydrate_json(v, replay):
@@ -444,8 +500,69 @@ def _rehydrate_json(v, replay):
     if isinstance(v, list):
         return [_rehydrate_json(x, replay) for x in v]
     if isinstance(v, dict):
-        return {k: _rehydrate_json(x, replay) for k, x in v.items()}
+        rebuilt = {}
+        for k, x in v.items():
+            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            if nk in rebuilt and nk != k:
+                nk = _disambiguate_key(nk if isinstance(nk, str) else k, rebuilt, k)
+            rebuilt[nk] = _rehydrate_json(x, replay)
+        return rebuilt
     return v
+
+
+def _disambiguate_key(new_key, node, old_key):
+    if new_key not in node or new_key == old_key:
+        return new_key
+    n = 1
+    candidate = '{}.dup{}'.format(new_key, n)
+    while candidate in node and candidate != old_key:
+        n += 1
+        candidate = '{}.dup{}'.format(new_key, n)
+    return candidate
+
+
+class _DupObj:
+    __slots__ = ('pairs',)
+
+    def __init__(self, pairs):
+        self.pairs = [list(p) for p in pairs]
+
+
+def _dup_preserving_pairs(pairs):
+    seen = set()
+    has_dup = False
+    for k, _ in pairs:
+        if k in seen:
+            has_dup = True
+            break
+        seen.add(k)
+    if has_dup:
+        return _DupObj(list(pairs))
+    return dict(pairs)
+
+
+def _dump_rehydrated_dup_safe(v, replay):
+    if isinstance(v, _DupObj):
+        parts = []
+        for k, x in v.pairs:
+            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            parts.append(json.dumps(nk, ensure_ascii=False) + ': ' + _dump_rehydrated_dup_safe(x, replay))
+        return '{' + ', '.join(parts) + '}'
+    if isinstance(v, dict):
+        seen_keys = set()
+        parts = []
+        for k, x in v.items():
+            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            if nk in seen_keys:
+                nk = _disambiguate_key(nk if isinstance(nk, str) else k, {kk: None for kk in seen_keys}, k)
+            seen_keys.add(nk)
+            parts.append(json.dumps(nk, ensure_ascii=False) + ': ' + _dump_rehydrated_dup_safe(x, replay))
+        return '{' + ', '.join(parts) + '}'
+    if isinstance(v, list):
+        return '[' + ', '.join(_dump_rehydrated_dup_safe(x, replay) for x in v) + ']'
+    if isinstance(v, str):
+        return json.dumps(rehydrate_text(v, replay), ensure_ascii=False)
+    return json.dumps(v, ensure_ascii=False)
 
 
 def rehydrate_anthropic_response(obj, replay):
@@ -460,16 +577,14 @@ def rehydrate_anthropic_response(obj, replay):
 
 
 def rehydrate_json_string(acc, replay):
-    """Rehydrate placeholders inside an assembled tool_use arguments JSON string. Done at the VALUE level
-    (parse -> walk -> replace -> re-serialize) so a real value containing quotes/backslashes can't break
-    the JSON. Falls back to text rehydrate only if the accumulator isn't valid JSON yet."""
+    """Rehydrate placeholders inside assembled tool_use arguments JSON, including object keys."""
     if not acc or not acc.strip():
         return acc
     try:
-        obj = json.loads(acc)
+        obj = json.loads(acc, object_pairs_hook=_dup_preserving_pairs)
     except Exception:
         return rehydrate_text(acc, replay)
-    return json.dumps(_rehydrate_json(obj, replay), ensure_ascii=False)
+    return _dump_rehydrated_dup_safe(obj, replay)
 
 
 # ----------------------------------------------------------------------------
@@ -601,6 +716,92 @@ def fwd_headers(req):
     return {k: v for k, v in req.headers.items() if k.lower() in FWD_HEADERS}
 
 
+_DROP_UPSTREAM_RESPONSE_HEADERS = {
+    'connection', 'content-encoding', 'content-length', 'content-type', 'keep-alive',
+    'proxy-authenticate', 'proxy-authorization', 'set-cookie', 'te', 'trailer',
+    'transfer-encoding', 'upgrade',
+}
+_SAFE_UPSTREAM_RESPONSE_HEADERS = {
+    'anthropic-organization-id', 'anthropic-version', 'openai-organization',
+    'openai-processing-ms', 'openai-version', 'request-id', 'retry-after', 'x-request-id',
+}
+_SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES = (
+    'anthropic-ratelimit-', 'openai-', 'ratelimit-', 'x-ratelimit-',
+)
+
+
+def _upstream_response_headers(headers):
+    """Forward operational upstream response headers only. Never forward cookies or hop-by-hop headers."""
+    out = {}
+    for k, v in headers.items():
+        lk = k.lower()
+        if lk in _DROP_UPSTREAM_RESPONSE_HEADERS:
+            continue
+        if lk in _SAFE_UPSTREAM_RESPONSE_HEADERS or lk.startswith(_SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES):
+            out[k] = v
+    return out
+
+
+def _finalize_upstream_response(r, replay, json_rehydrate):
+    ct = r.headers.get('content-type', 'application/json')
+    resp_headers = _upstream_response_headers(r.headers)
+    if replay and 'json' in ct.lower():
+        try:
+            obj = _rehydrate_json(json_rehydrate(json.loads(r.content), replay), replay)
+            return JSONResponse(obj, status_code=r.status_code, headers=resp_headers)
+        except Exception:
+            pass
+    return Response(content=r.content, status_code=r.status_code, media_type=ct, headers=resp_headers)
+
+
+async def _open_stream(url, payload, headers):
+    """Open an upstream stream before returning the client response, so status/content-type are known."""
+    client = httpx.AsyncClient(timeout=600)
+    try:
+        req = client.build_request('POST', url, content=payload, headers=headers)
+        r = await client.send(req, stream=True)
+    except Exception:
+        await client.aclose()
+        raise
+    return client, r
+
+
+async def _stream_or_error_response(url, payload, headers, replay, stream_transform, json_rehydrate):
+    client, r = await _open_stream(url, payload, headers)
+    ct = r.headers.get('content-type', '')
+    resp_headers = _upstream_response_headers(r.headers)
+
+    if 'text/event-stream' not in ct.lower():
+        try:
+            content = await r.aread()
+        finally:
+            await r.aclose()
+            await client.aclose()
+        if replay and 'json' in ct.lower():
+            try:
+                obj = _rehydrate_json(json_rehydrate(json.loads(content), replay), replay)
+                return JSONResponse(obj, status_code=r.status_code, headers=resp_headers)
+            except Exception:
+                pass
+        return Response(content=content, status_code=r.status_code,
+                        media_type=ct or 'application/octet-stream', headers=resp_headers)
+
+    async def gen():
+        try:
+            if not replay:
+                async for chunk in r.aiter_raw():
+                    yield chunk
+            else:
+                async for out in stream_transform(r.aiter_raw(), replay):
+                    yield out
+        finally:
+            await r.aclose()
+            await client.aclose()
+
+    return StreamingResponse(gen(), status_code=r.status_code,
+                             media_type=ct or 'text/event-stream', headers=resp_headers)
+
+
 def _degraded_block(meta):
     """FAIL CLOSED (FIX-ROUND-3 HIGH): if the neural gate was unreachable while scanning this request (degraded),
     forwarding the body would leak any NER-only PII that has no Tier-0 fallback. Return a 503 JSONResponse to
@@ -622,7 +823,7 @@ async def messages(req: Request):
     except Exception:
         return JSONResponse({'error': 'invalid json body'}, status_code=400)
     ctx = {'session': req.headers.get('x-claude-code-session-id', ''),
-           'project': req.headers.get('x-qc-pii-project', 'default')}
+           'project': req.headers.get('x-ossredact-project', 'default')}
     meta, replay = await redact_body(body, ctx)
     stream = bool(body.get('stream'))
 
@@ -647,26 +848,11 @@ async def messages(req: Request):
     if not stream:
         async with httpx.AsyncClient(timeout=600) as client:
             r = await client.post(url, content=payload, headers=headers)
-        ct = r.headers.get('content-type', 'application/json')
-        if replay and 'json' in ct:
-            try:
-                obj = rehydrate_anthropic_response(r.json(), replay)
-                return JSONResponse(obj, status_code=r.status_code)
-            except Exception:
-                pass
-        return Response(content=r.content, status_code=r.status_code, media_type=ct)
+        return _finalize_upstream_response(r, replay, rehydrate_anthropic_response)
 
-    # streaming: rehydrate the SSE response (placeholders -> real values) for the local client.
-    async def gen():
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream('POST', url, content=payload, headers=headers) as r:
-                if not replay:
-                    async for chunk in r.aiter_raw():   # nothing redacted -> zero-overhead passthrough
-                        yield chunk
-                else:
-                    async for out in stream_rehydrate(r.aiter_raw(), replay):
-                        yield out
-    return StreamingResponse(gen(), media_type='text/event-stream')
+    # streaming: open upstream first so upstream auth/rate-limit/error statuses are not masked as local 200s.
+    return await _stream_or_error_response(url, payload, headers, replay, stream_rehydrate,
+                                           rehydrate_anthropic_response)
 
 
 @app.post('/v1/chat/completions')
@@ -679,7 +865,7 @@ async def chat_completions(req: Request):
     except Exception:
         return JSONResponse({'error': 'invalid json body'}, status_code=400)
     ctx = {'session': req.headers.get('x-session-id') or req.headers.get('x-claude-code-session-id', ''),
-           'project': req.headers.get('x-qc-pii-project', 'default')}
+           'project': req.headers.get('x-ossredact-project', 'default')}
     meta, replay = await redact_body(body, ctx, extract=openai_adapter.extract_text_fields_openai)
     stream = bool(body.get('stream'))
 
@@ -704,25 +890,11 @@ async def chat_completions(req: Request):
     if not stream:
         async with httpx.AsyncClient(timeout=600) as client:
             r = await client.post(url, content=payload, headers=headers)
-        ct = r.headers.get('content-type', 'application/json')
-        if replay and 'json' in ct:
-            try:
-                obj = openai_adapter.rehydrate_openai_response(r.json(), replay)
-                return JSONResponse(obj, status_code=r.status_code)
-            except Exception:
-                pass
-        return Response(content=r.content, status_code=r.status_code, media_type=ct)
+        return _finalize_upstream_response(r, replay, openai_adapter.rehydrate_openai_response)
 
-    async def gen():
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream('POST', url, content=payload, headers=headers) as r:
-                if not replay:
-                    async for chunk in r.aiter_raw():
-                        yield chunk
-                else:
-                    async for out in openai_adapter.stream_rehydrate_openai(r.aiter_raw(), replay):
-                        yield out
-    return StreamingResponse(gen(), media_type='text/event-stream')
+    return await _stream_or_error_response(url, payload, headers, replay,
+                                           openai_adapter.stream_rehydrate_openai,
+                                           openai_adapter.rehydrate_openai_response)
 
 
 @app.post('/v1/responses')
@@ -736,7 +908,7 @@ async def responses(req: Request):
     except Exception:
         return JSONResponse({'error': 'invalid json body'}, status_code=400)
     ctx = {'session': req.headers.get('x-session-id') or req.headers.get('x-claude-code-session-id', ''),
-           'project': req.headers.get('x-qc-pii-project', 'default')}
+           'project': req.headers.get('x-ossredact-project', 'default')}
     meta, replay = await redact_body(body, ctx, extract=responses_adapter.extract_text_fields_responses)
     # File bytes that were NOT scanned (binary/undetermined inline file_data) are a DOCUMENTED+LOGGED limitation,
     # never a silent pass. pop_file_passthrough_notes() also strips the private marker so it never reaches upstream.
@@ -768,30 +940,16 @@ async def responses(req: Request):
     if not stream:
         async with httpx.AsyncClient(timeout=600) as client:
             r = await client.post(url, content=payload, headers=headers)
-        ct = r.headers.get('content-type', 'application/json')
-        if replay and 'json' in ct:
-            try:
-                obj = responses_adapter.rehydrate_responses_response(r.json(), replay)
-                return JSONResponse(obj, status_code=r.status_code)
-            except Exception:
-                pass
-        return Response(content=r.content, status_code=r.status_code, media_type=ct)
+        return _finalize_upstream_response(r, replay, responses_adapter.rehydrate_responses_response)
 
-    async def gen():
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream('POST', url, content=payload, headers=headers) as r:
-                if not replay:
-                    async for chunk in r.aiter_raw():
-                        yield chunk
-                else:
-                    async for out in responses_adapter.stream_rehydrate_responses(r.aiter_raw(), replay):
-                        yield out
-    return StreamingResponse(gen(), media_type='text/event-stream')
+    return await _stream_or_error_response(url, payload, headers, replay,
+                                           responses_adapter.stream_rehydrate_responses,
+                                           responses_adapter.rehydrate_responses_response)
 
 
 @app.get('/healthz')
 def healthz():
-    return {'status': 'ok', 'service': 'qc-pii-egress', 'dryrun': DRYRUN,
+    return {'status': 'ok', 'service': 'ossredact-egress', 'dryrun': DRYRUN,
             'gate': GATE_URL, 'uptime_s': round(time.time() - START, 1)}
 
 

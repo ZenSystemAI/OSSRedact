@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Neural-tier real-document validation -- run the FULL P620 GPU gate (deterministic floor + neural NER,
-qc-pii/pii-gpu-xlmr-large-v11r5) over the real expense corpus and report PII-FREE aggregate metrics.
+"""Neural-tier real-document validation -- run the FULL GPU gate (deterministic floor + neural NER,
+ossredact/pii-gpu-xlmr-large-v11r5) over the real expense corpus and report PII-FREE aggregate metrics.
 
 This is the headline "does it protect real documents" pass: unlike the deterministic-only harness
 (realworld_expenses.py), it exercises the model-owned categories (person, address, organization, tax_id,

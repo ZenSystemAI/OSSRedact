@@ -1,39 +1,27 @@
 # gate/ -- canonical PII detection gate
 
 `privacy_gate.py` here is the **single source of truth** for the deterministic + neural
-detection gate. Edit it here, then deploy.
+detection gate (tier-0 validated floor + NER tiers + merge + redact/rehydrate). Edit it here,
+then deploy.
 
-## Provenance
+## Files
+- `privacy_gate.py` -- the detection + redaction library (NBSP `_normspace` / `_normseps`
+  normalization, `context_cued_id_spans`, `explain`).
+- `gate_service_gpu.py` / `gate_service_cpu.py` -- FastAPI services exposing `/detect`
+  `/redact` `/healthz` on the GPU and CPU tiers (same contract).
 
-Adopted 2026-06-14 from the deployed copy `p620:/home/steven/sparx-gpu-gate/privacy_gate.py`
-(371 lines, the newest: it carries the NBSP `_normspace`/`_normseps` fix, `context_cued_id_spans`,
-and `explain` that the other copy lacked).
-
-Copies that existed before this consolidation:
-- `p620:/home/steven/Sparx/privacy_gate.py` (303 lines) -- a stale subset of the deployed copy. RETIRED;
-  delete after Phase 2 lands (see plan Task 2.2 Step 6).
-- `p620:/home/steven/Sparx/qc_pii/redact.py` (496 lines) -- **NOT** a copy of this gate. It is a
-  separate module (`RedactionMap` / `Redactor`, the typed-token replacement + rehydration layer). It
-  does not define `tier0_spans`/`merge_spans`. Out of scope for this overhaul; leave it in place.
-
-## Deploy (OPERATOR-GATED -- do not run without explicit approval)
-
-This gate runs in production. Deploying restarts prod appliances, so it is operator-gated:
-
-```
-# GPU reference appliance on P620 (qc-pii-gate-gpu.service)
-rsync -a gate/privacy_gate.py p620:/home/steven/sparx-gpu-gate/privacy_gate.py
-# NPU appliance on Beelink
-rsync -a gate/privacy_gate.py beelink:/home/steven/sparx-npu/privacy_gate.py
-```
+## Deploy (stop-and-ask in production)
+This gate runs in production; deploying restarts the proxy in front of live traffic, so treat it
+as a gated action. Deploy is an rsync of `privacy_gate.py` (plus the service file + model dir) to
+the gate host, followed by a service restart. `deploy/check-gate-drift.sh` (set `GATE_HOST` /
+`GATE_REMOTE_DIR`) md5-compares the host copy against the repo to catch silent drift.
 
 ## Tests
-
 Torch-free (tier0 only), run from the repo root with the project test venv:
 
 ```
 .venv-test/bin/python -m pytest gate/tests/ -v
 ```
 
-`test_gate_regression.py` characterizes CURRENT tier0 behavior (the Phase 2 safety net).
-`test_validated_floor.py` (added in Phase 2) specifies the thin-floor behavior.
+`test_gate_regression.py` characterizes current tier0 behavior; `test_validated_floor.py`
+specifies the thin-floor behavior.

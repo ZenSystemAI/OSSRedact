@@ -1,10 +1,10 @@
-# Sparx Workbench
+# OSSRedact Workbench
 
 A local-first redaction workbench: load a document, review the suggested redactions (with the reason each
 was flagged), redact anything else by hand, toggle individual redactions off, and export a redacted copy or
 save a redacted PDF. **The document never leaves the machine** -- auto-detect runs in the browser.
 
-This is the manual-review companion to the Sparx egress gateway. It shares the same detection logic and the
+This is the manual-review companion to the OSSRedact egress gateway. It shares the same detection logic and the
 same `<LABEL_NNN>` placeholder + entity-map format, so a document redacted here round-trips through the
 appliance's entity map.
 
@@ -25,7 +25,7 @@ Node 20.19+ / 22.12+.
 - **Load**: `.txt`, `.md`, `.csv`, `.json`, `.log`, `.xml`, `.html`, plus `.docx`, `.xlsx`, and `.pdf` --
   drag-drop, file picker, or paste. Word (`.docx`) and Excel (`.xlsx`) redaction is format-preserving
   (formatting, styles, tables, images survive); PDF export is a true image-only redaction (each page
-  rasterized, black boxes painted, no recoverable text layer). (`.pptx` is the next format.)
+  rasterized, black boxes painted, no recoverable text layer).
 - **Auto-detect (local, offline)**: a faithful TypeScript port of the appliance's Tier-0 deterministic
   detector -- email, phone, postal code, IP, UUID, dates, payment cards (Luhn), SIN, account/reference IDs,
   and Presidio-style context-cued IDs. Runs entirely in the browser; nothing is uploaded.
@@ -46,7 +46,7 @@ Node 20.19+ / 22.12+.
 ## On-device map store (no separate map upload)
 
 To restore originals without hand-managing a separate `entity-map.json`, the workbench remembers the entity
-map LOCALLY in the browser (IndexedDB, DB `sparx-maps`), keyed by a content fingerprint of the **redacted
+map LOCALLY in the browser (IndexedDB, DB `ossredact-maps`), keyed by a content fingerprint of the **redacted
 (placeholder-bearing) body** -- never the original text and never the upload filename. When a redacted file
 comes back, the app hashes/scans it and auto-matches the stored map.
 
@@ -54,14 +54,15 @@ comes back, the app hashes/scans it and auto-matches the stored map.
   IndexedDB on THIS device. It is NEVER embedded in the exported `.docx` / `.xlsx` / `.txt` / `.pdf`, and
   the fingerprint hashes the redacted body, never the original. Maps stay on this device only -- never share
   them or store them alongside the redacted copy.
-- **Match priority**: exact fingerprint (your own untouched copy) -> else best placeholder-subset overlap
-  where every surviving placeholder is resolvable in one stored map -> else the manual upload fallback.
+- **Match priority**: exact redacted-body fingerprint only (your own untouched copy) -> else the manual upload
+  fallback. Placeholder-subset matching is deliberately disabled because placeholder tokens are scoped per
+  redaction and can collide across unrelated documents.
 - **Opt-in + clear**: the Restore tab has a "Remember redaction maps on this device" toggle (default ON) and
   a "Clear stored maps" button. With the toggle OFF, nothing is persisted.
 - **Fallback (kept forever)**: a different machine, cleared storage, or private browsing has no stored map,
   so the Restore tab reveals the manual `entity-map.json` picker and the original two-file flow still works.
 
-## Roadmap (see `memory/project_sparx-workbench-and-integrations.md`)
+## Roadmap
 
 - `.pptx` (PowerPoint) format-preserving redaction.
 - In-browser neural detection (run the model in the tab via onnxruntime-web, zero install).

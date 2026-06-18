@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the synthetic corpus through the P620 GPU gate (/redact) for PII, and the deterministic
+"""Run the synthetic corpus through the GPU gate (/redact) for PII, and the deterministic
 secret_spans locally for secrets. Aggregate honest numbers + leak-check against ground truth.
 
 PII headline (comparable to the original 'PII spans redacted'): GPU gate tier0+neural.

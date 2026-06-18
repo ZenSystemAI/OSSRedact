@@ -1,6 +1,6 @@
-# qc-pii v7 -- Label-Aware Baseline (plan A)
+# OSSRedact v7 -- Label-Aware Baseline (plan A)
 
-> Measured 2026-06-14 on P620 (GPU xlm-r-large **v7**, card 4) against `pii-merged-v8/val.jsonl`
+> Measured 2026-06-14 on the GPU host (GPU xlm-r-large **v7**, card 4) against `pii-merged-v8/val.jsonl`
 > (n=2942, 23-label scheme). Harness: `validation/eval_labelaware.py`. Raw: `baseline_v7_labelaware.json`.
 > Prod line-boundary chunking replicated. **First eval that is label-aware** (existing evals are leak-only).
 > Caveat: v7 was selected on v7-val; the **flinks rows in v8-val are unseen** by v7, so flinks-specific

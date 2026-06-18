@@ -13,8 +13,9 @@
 //     which routinely CONTAINS the very PII just redacted (App.tsx exportName rationale).
 
 import JSZip from 'jszip'
-import type { Span, RegionBox } from './types'
+import type { Span, RegionBox, EntityMap } from './types'
 import type { LoadedDoc } from './formats'
+import { sweepKnownValues } from './redaction'
 
 export type BatchStatus = 'pending' | 'detecting' | 'detected' | 'error'
 
@@ -65,6 +66,7 @@ export function neutralName(index: number, total: number, ext: string): string {
 
 // One redacted artifact destined for the zip: a blob + the neutral name it gets inside the archive.
 export type ZipFile = { name: string; blob: Blob }
+export type TextReplacement = { start: number; end: number; text: string }
 
 // Assemble the shareable .zip. Takes ONLY redacted blobs (+ an optional values-free audit JSON). The
 // shared entity map is intentionally NOT a parameter: it must never enter the shareable archive.
@@ -73,4 +75,108 @@ export async function assembleZip(files: ZipFile[], auditJson?: string): Promise
   for (const f of files) zip.file(f.name, f.blob)
   if (auditJson) zip.file('audit-trail.json', auditJson) // explain() per file -- offsets/metadata only, no values
   return zip.generateAsync({ type: 'blob', mimeType: 'application/zip' })
+}
+
+export function entityMapForSpans(text: string, spans: Span[], placeholderOf: Map<string, string>): EntityMap {
+  const entryMap: EntityMap = {}
+  for (const s of spans) {
+    if (!s.active) continue
+    const ph = placeholderOf.get(s.id)
+    if (ph) entryMap[ph] = text.slice(s.start, s.end)
+  }
+  return entryMap
+}
+
+export function redactTextWithPlaceholders(text: string, spans: Span[], placeholderOf: Map<string, string>): string {
+  const active = spans.filter((s) => s.active).sort((a, b) => a.start - b.start)
+  let out = ''
+  let last = 0
+  for (const s of active) {
+    out += text.slice(last, s.start) + (placeholderOf.get(s.id) ?? '')
+    last = s.end
+  }
+  return out + text.slice(last)
+}
+
+const MIN_SWEEP_LEN = 4
+const RE_SPECIAL = /[.*+?^${}()|[\]\\]/g
+const TOK = '[\\p{L}\\p{N}\\p{M}_]'
+const CASE_SENSITIVE_LABEL_KEYS = new Set(['password', 'secret', 'username', 'accesstoken', 'apikey', 'filepath'])
+
+function labelKey(label: string): string {
+  return label.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+function labelFromPlaceholder(ph: string): string {
+  return /^<([A-Z][A-Z0-9_]*)_\d{3,}>$/.exec(ph)?.[1] ?? ''
+}
+
+function isCaseSensitivePlaceholder(ph: string): boolean {
+  return CASE_SENSITIVE_LABEL_KEYS.has(labelKey(labelFromPlaceholder(ph)))
+}
+
+function overlapsAny(ranges: TextReplacement[], start: number, end: number): boolean {
+  return ranges.some((r) => r.start < end && r.end > start)
+}
+
+function sweepReplacements(text: string, map: EntityMap, occupied: TextReplacement[]): TextReplacement[] {
+  const entries = Object.entries(map)
+    .filter(([, value]) => value && value.trim().length >= MIN_SWEEP_LEN)
+    .sort((a, b) => b[1].length - a[1].length)
+  const out: TextReplacement[] = []
+
+  const addPass = (passEntries: [string, string][], caseSensitive: boolean) => {
+    if (!passEntries.length) return
+    const valueToPh = new Map<string, string>()
+    for (const [ph, value] of passEntries) {
+      const key = caseSensitive ? value : value.toLowerCase()
+      if (!valueToPh.has(key)) valueToPh.set(key, ph)
+    }
+    const alt = passEntries
+      .map(([, value]) => value)
+      .filter((value, i, values) => values.indexOf(value) === i)
+      .map((value) => value.replace(RE_SPECIAL, '\\$&'))
+      .join('|')
+    if (!alt) return
+    const re = new RegExp(`(?<!${TOK})(?:${alt})(?!${TOK})`, caseSensitive ? 'gu' : 'giu')
+    for (const match of text.matchAll(re)) {
+      const start = match.index ?? -1
+      if (start < 0) continue
+      const end = start + match[0].length
+      if (overlapsAny(occupied, start, end)) continue
+      const ph = valueToPh.get(caseSensitive ? match[0] : match[0].toLowerCase())
+      if (!ph) continue
+      const repl = { start, end, text: ph }
+      out.push(repl)
+      occupied.push(repl)
+    }
+  }
+
+  addPass(entries.filter(([ph]) => isCaseSensitivePlaceholder(ph)), true)
+  addPass(entries.filter(([ph]) => !isCaseSensitivePlaceholder(ph)), false)
+  return out
+}
+
+export function replacementsForText(
+  text: string,
+  spans: Span[],
+  placeholderOf: Map<string, string>,
+  sharedMap?: EntityMap,
+): TextReplacement[] {
+  const active = spans.filter((s) => s.active).sort((a, b) => a.start - b.start)
+  const positional = active.map((s) => ({ start: s.start, end: s.end, text: placeholderOf.get(s.id) ?? '' }))
+  const occupied = [...positional]
+  const map = sharedMap ?? entityMapForSpans(text, spans, placeholderOf)
+  return [...positional, ...sweepReplacements(text, map, occupied)].sort((a, b) => a.start - b.start)
+}
+
+export function redactedBatchText(
+  text: string,
+  spans: Span[],
+  placeholderOf: Map<string, string>,
+  sharedMap?: EntityMap,
+): string {
+  const positional = redactTextWithPlaceholders(text, spans, placeholderOf)
+  const map = sharedMap ?? entityMapForSpans(text, spans, placeholderOf)
+  return sweepKnownValues(positional, map, new Set(placeholderOf.values()))
 }

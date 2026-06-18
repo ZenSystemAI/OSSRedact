@@ -5,7 +5,7 @@
 export type LabelMeta = { en: string; fr: string; color: string }
 export type Tier = 'catastrophic' | 'operational'
 
-const REGISTRY: Record<string, LabelMeta> = {
+export const LABEL_REGISTRY: Record<string, LabelMeta> = {
   // --- catastrophic tier (irreversible-harm PII; redact-by-default, recall-first) ---
   government_id: { en: 'Gov ID / SIN', fr: 'NAS / pièce', color: '#ef4444' },
   payment_card: { en: 'Card number', fr: 'No de carte', color: '#f59e0b' },
@@ -45,7 +45,7 @@ const CATASTROPHIC = new Set<string>([
 ])
 
 export function labelMeta(label: string): LabelMeta {
-  return REGISTRY[label] ?? { ...FALLBACK, en: prettify(label), fr: prettify(label) }
+  return LABEL_REGISTRY[label] ?? { ...FALLBACK, en: prettify(label), fr: prettify(label) }
 }
 
 export function labelTier(label: string): Tier {

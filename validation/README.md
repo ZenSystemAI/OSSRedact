@@ -1,6 +1,6 @@
 # Synthetic-corpus validation
 
-Reproducible, 100% synthetic validation of the qc-pii gate. No real client data is read or stored:
+Reproducible, 100% synthetic validation of the OSSRedact gate. No real client data is read or stored:
 every name, SIN, account, email, and secret is fabricated from curated Québec pools + a fixed seed
 (`SEED=20260614`), so the corpus can be regenerated and re-run on any machine with zero real-data exposure.
 
@@ -54,7 +54,7 @@ The pure metrics are numpy-only and unit-tested:
 .venv-test/bin/python validation/parity_check.py --self-test         # smoke test, no model
 .venv-test/bin/python -m pytest validation/test_parity_check.py -v   # 11 tests
 ```
-The real comparison needs torch+onnxruntime+the weights and runs on P620 (card 4) AFTER an
+The real comparison needs torch+onnxruntime+the weights and runs on the GPU host AFTER an
 export exists (the export/quantization step itself stays a STOP-and-ask gate):
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 \

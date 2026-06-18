@@ -173,7 +173,7 @@ _ensure_crypto_stub()
 # ---------------------------------------------------------------------------
 # Step 2: route the appliance copies of the NPU stack onto sys.path and isolate
 # the encrypted entity map under a throwaway tmp dir (so no run pollutes another
-# and we never touch the real /home/steven/sparx-npu/maps). Then import the real
+# and we never touch the real ~/.ossredact/maps). Then import the real
 # egress_proxy + openai_adapter against the stubs above.
 # ---------------------------------------------------------------------------
 _APPLIANCE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -251,6 +251,17 @@ _NEEDS_PROXY = pytest.mark.skipif(
     reason=f'egress_proxy could not be imported even with stdlib stubs: {_IMPORT_ERR!r}')
 
 
+@_NEEDS_PROXY
+def test_neural_detect_cache_key_does_not_retain_raw_text():
+    raw = 'Client Priya McCallum uses priya.mccallum@example.test'
+    key = egress_proxy._detect_cache_key(raw, 0.5)
+
+    assert raw not in repr(key), 'raw request text must not be retained in the neural-cache key'
+    assert key == egress_proxy._detect_cache_key(raw, 0.5), 'same text and score should reuse the cache entry'
+    assert key != egress_proxy._detect_cache_key(raw + ' extra', 0.5)
+    assert key != egress_proxy._detect_cache_key(raw, 0.6)
+
+
 # ---------------------------------------------------------------------------
 # Test doubles + helpers.
 # ---------------------------------------------------------------------------
@@ -288,12 +299,270 @@ def _run_redact(monkeypatch, body, neural, ctx=None, extract=None):
     return asyncio.run(egress_proxy.redact_body(body, ctx, extract=extract))
 
 
-_PH_RE = re.compile(r'<[A-Z0-9]+_\d{3,}>')
+_PH_RE = re.compile(r'<[A-Z0-9_]+_\d{3,}>')
 
 
 def _wire_text(body):
     """The exact bytes that would go upstream: serialize the (mutated) body to one string for raw-leak asserts."""
     return json.dumps(body, ensure_ascii=False)
+
+
+class _FakeRequest:
+    def __init__(self, body, headers=None):
+        self._body = json.dumps(body).encode('utf-8')
+        self.headers = headers or {}
+
+    async def body(self):
+        return self._body
+
+
+def _json_response_payload(resp):
+    """Support both the lightweight test stub and a real FastAPI JSONResponse if the dependency is installed."""
+    if isinstance(resp, tuple):
+        args, _kwargs = resp
+        assert args, 'stubbed JSONResponse must be called with a payload'
+        return args[0]
+    if hasattr(resp, 'body'):
+        raw = resp.body
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8')
+        return json.loads(raw)
+    raise AssertionError(f'unexpected route response shape: {type(resp)!r}')
+
+
+def _response_status(resp):
+    if isinstance(resp, tuple):
+        _args, kwargs = resp
+        return kwargs.get('status_code', 200)
+    return getattr(resp, 'status_code', None)
+
+
+def _response_header(resp, name):
+    lname = name.lower()
+    if isinstance(resp, tuple):
+        _args, kwargs = resp
+        headers = kwargs.get('headers') or {}
+        for k, v in headers.items():
+            if k.lower() == lname:
+                return v
+        return None
+    headers = getattr(resp, 'headers', {}) or {}
+    return headers.get(name) or headers.get(lname)
+
+
+def _run_route(route_fn, body, headers=None):
+    return _json_response_payload(asyncio.run(route_fn(_FakeRequest(body, headers=headers))))
+
+
+# ---------------------------------------------------------------------------
+# 0. DRYRUN DIAGNOSTICS: the would-be upstream body is safe to return because
+#    it is already redacted, but the replay map contains originals and must stay
+#    behind the explicit GATEWAY_TEST_EXPOSE_MAP test flag.
+# ---------------------------------------------------------------------------
+@_NEEDS_PROXY
+def test_dryrun_routes_hide_replay_map_unless_test_flag(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', True)
+    monkeypatch.setattr(egress_proxy, 'EXPOSE_MAP', False)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({}))
+
+    cases = [
+        ('messages',
+         'dryrun.anthropic@example.test',
+         {'model': 'claude-test',
+          'messages': [{'role': 'user', 'content': 'Email dryrun.anthropic@example.test.'}]},
+         {'x-claude-code-session-id': 'dryrun-anthropic-' + os.urandom(4).hex()}),
+        ('chat_completions',
+         'dryrun.chat@example.test',
+         {'model': 'gpt-test',
+          'messages': [{'role': 'user', 'content': 'Email dryrun.chat@example.test.'}]},
+         {'x-session-id': 'dryrun-chat-' + os.urandom(4).hex()}),
+        ('responses',
+         'dryrun.responses@example.test',
+         {'model': 'gpt-test',
+          'input': 'Email dryrun.responses@example.test.'},
+         {'x-session-id': 'dryrun-responses-' + os.urandom(4).hex()}),
+    ]
+
+    for route_name, email, body, headers in cases:
+        payload = _run_route(getattr(egress_proxy, route_name), body, headers=headers)
+        assert payload['_dryrun'] is True
+        assert '_replay' not in payload, 'dryrun must not expose originals without the explicit test flag'
+        wire = json.dumps(payload['upstream_body'], ensure_ascii=False)
+        assert email not in wire, f'raw value leaked in dryrun upstream_body for {route_name}'
+        assert _PH_RE.search(wire), f'expected a placeholder in dryrun upstream_body for {route_name}'
+
+
+@_NEEDS_PROXY
+def test_dryrun_replay_map_is_explicit_test_opt_in(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', True)
+    monkeypatch.setattr(egress_proxy, 'EXPOSE_MAP', True)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({}))
+
+    email = 'dryrun.exposed@example.test'
+    body = {
+        'model': 'claude-test',
+        'messages': [{'role': 'user', 'content': f'Email {email}.'}],
+    }
+    payload = _run_route(
+        egress_proxy.messages,
+        body,
+        headers={'x-claude-code-session-id': 'dryrun-exposed-' + os.urandom(4).hex()},
+    )
+
+    assert '_replay' in payload, 'GATEWAY_TEST_EXPOSE_MAP must expose replay for diagnostics in dryrun'
+    assert email in payload['_replay'].values()
+
+
+class _FakeUpstreamResponse:
+    def __init__(self, status_code, headers, content):
+        self.status_code = status_code
+        self.headers = headers
+        self._content = content
+        self.closed = False
+
+    async def aread(self):
+        return self._content
+
+    @property
+    def content(self):
+        return self._content
+
+    def json(self):
+        return json.loads(self._content)
+
+    async def aclose(self):
+        self.closed = True
+
+    async def aiter_raw(self):  # pragma: no cover -- this regression takes the non-SSE branch
+        yield self._content
+
+
+class _RouteAsyncClient:
+    next_response = None
+    instances = []
+
+    def __init__(self, *a, **k):
+        self.closed = False
+        self.request = None
+        type(self).instances.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        await self.aclose()
+        return False
+
+    async def aclose(self):
+        self.closed = True
+
+    async def post(self, url, content=None, headers=None):
+        self.request = {'method': 'POST', 'url': url, 'content': content, 'headers': headers or {}}
+        assert self.next_response is not None, 'test did not install a fake upstream response'
+        return self.next_response
+
+    def build_request(self, method, url, content=None, headers=None):
+        self.request = {'method': method, 'url': url, 'content': content, 'headers': headers or {}}
+        return self.request
+
+    async def send(self, req, stream=False):
+        assert stream is True, 'streaming route must open upstream in stream mode'
+        assert req is self.request, 'expected route to send the built request'
+        assert self.next_response is not None, 'test did not install a fake upstream response'
+        return self.next_response
+
+
+@_NEEDS_PROXY
+def test_streaming_routes_preserve_upstream_json_error_status(monkeypatch):
+    """A streaming upstream JSON error must not be masked as a local 200 text/event-stream response."""
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', False)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({}))
+    monkeypatch.setattr(egress_proxy.httpx, 'AsyncClient', _RouteAsyncClient)
+    _RouteAsyncClient.instances = []
+
+    cases = [
+        ('messages', egress_proxy.messages,
+         {'model': 'claude-test', 'stream': True,
+          'messages': [{'role': 'user', 'content': 'Email stream.messages@example.test.'}]},
+         {'x-claude-code-session-id': 'stream-messages-' + os.urandom(4).hex()},
+         'stream.messages@example.test'),
+        ('chat', egress_proxy.chat_completions,
+         {'model': 'gpt-test', 'stream': True,
+          'messages': [{'role': 'user', 'content': 'Email stream.chat@example.test.'}]},
+         {'x-session-id': 'stream-chat-' + os.urandom(4).hex()},
+         'stream.chat@example.test'),
+        ('responses', egress_proxy.responses,
+         {'model': 'gpt-test', 'stream': True, 'input': 'Email stream.responses@example.test.'},
+         {'x-session-id': 'stream-responses-' + os.urandom(4).hex()},
+         'stream.responses@example.test'),
+    ]
+
+    for route_name, route_fn, body, headers, email in cases:
+        upstream = _FakeUpstreamResponse(
+            429,
+            {'content-type': 'application/json', 'retry-after': '7',
+             'x-request-id': f'req_synthetic_stream_status_{route_name}',
+             'set-cookie': 'must-not-forward=1'},
+            json.dumps({'error': {'message': 'rate limited while handling <EMAIL_001>'}}).encode('utf-8'),
+        )
+        _RouteAsyncClient.next_response = upstream
+
+        resp = asyncio.run(route_fn(_FakeRequest(body, headers=headers)))
+
+        payload = _json_response_payload(resp)
+        assert _response_status(resp) == 429, f'{route_name} must preserve upstream error status'
+        assert payload['error']['message'] == f'rate limited while handling {email}'
+        assert _response_header(resp, 'retry-after') == '7', 'retry guidance should survive proxying'
+        assert _response_header(resp, 'x-request-id') == f'req_synthetic_stream_status_{route_name}'
+        assert _response_header(resp, 'set-cookie') is None, 'upstream cookies must never be forwarded'
+        assert upstream.closed, 'non-SSE upstream response must be closed after buffering the error body'
+        assert _RouteAsyncClient.instances[-1].closed, 'streaming client must close after non-SSE fallback'
+
+
+@_NEEDS_PROXY
+def test_nonstreaming_routes_preserve_headers_and_rehydrate_json_error(monkeypatch):
+    """Non-streaming JSON errors need the same status/header/replay behavior as normal model responses."""
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', False)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({}))
+    monkeypatch.setattr(egress_proxy.httpx, 'AsyncClient', _RouteAsyncClient)
+    _RouteAsyncClient.instances = []
+
+    cases = [
+        ('messages', egress_proxy.messages,
+         {'model': 'claude-test',
+          'messages': [{'role': 'user', 'content': 'Email nonstream.messages@example.test.'}]},
+         {'x-claude-code-session-id': 'nonstream-messages-' + os.urandom(4).hex()},
+         'nonstream.messages@example.test'),
+        ('chat', egress_proxy.chat_completions,
+         {'model': 'gpt-test',
+          'messages': [{'role': 'user', 'content': 'Email nonstream.chat@example.test.'}]},
+         {'x-session-id': 'nonstream-chat-' + os.urandom(4).hex()},
+         'nonstream.chat@example.test'),
+        ('responses', egress_proxy.responses,
+         {'model': 'gpt-test', 'input': 'Email nonstream.responses@example.test.'},
+         {'x-session-id': 'nonstream-responses-' + os.urandom(4).hex()},
+         'nonstream.responses@example.test'),
+    ]
+
+    for route_name, route_fn, body, headers, email in cases:
+        upstream = _FakeUpstreamResponse(
+            429,
+            {'content-type': 'application/json', 'retry-after': '11',
+             'x-request-id': f'req_synthetic_nonstream_status_{route_name}',
+             'set-cookie': 'must-not-forward=1'},
+            json.dumps({'error': {'message': 'rate limited while handling <EMAIL_001>'}}).encode('utf-8'),
+        )
+        _RouteAsyncClient.next_response = upstream
+
+        resp = asyncio.run(route_fn(_FakeRequest(body, headers=headers)))
+
+        payload = _json_response_payload(resp)
+        assert _response_status(resp) == 429, f'{route_name} must preserve upstream error status'
+        assert payload['error']['message'] == f'rate limited while handling {email}'
+        assert _response_header(resp, 'retry-after') == '11', 'retry guidance should survive proxying'
+        assert _response_header(resp, 'x-request-id') == f'req_synthetic_nonstream_status_{route_name}'
+        assert _response_header(resp, 'set-cookie') is None, 'upstream cookies must never be forwarded'
+        assert _RouteAsyncClient.instances[-1].closed, 'non-streaming route client must close'
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +635,56 @@ def test_repeated_value_fully_swept_even_if_detected_once(monkeypatch):
     # round-trip still holds for the fully-swept value
     sample = f'Echo: {body["messages"][0]["content"]}'
     assert val in egress_proxy.rehydrate_text(sample, replay)
+
+
+@_NEEDS_PROXY
+def test_response_rehydrate_is_single_pass_for_placeholder_shaped_values():
+    replay = {
+        '<SECRET_001>': 'tok_<EMAIL_001>_x',
+        '<EMAIL_001>': 'alice@example.test',
+    }
+    sample = 'secret=<SECRET_001> email=<EMAIL_001>'
+    expected = 'secret=tok_<EMAIL_001>_x email=alice@example.test'
+
+    for helper in (egress_proxy.rehydrate_text, openai_adapter.rehydrate_text):
+        assert helper(sample, replay) == expected
+
+    args = json.dumps({'secret': '<SECRET_001>', 'email': '<EMAIL_001>'})
+    for helper in (egress_proxy.rehydrate_json_string, openai_adapter.rehydrate_json_string):
+        assert json.loads(helper(args, replay)) == {
+            'secret': 'tok_<EMAIL_001>_x',
+            'email': 'alice@example.test',
+        }
+
+
+@_NEEDS_PROXY
+def test_entity_map_keeps_case_sensitive_credentials_distinct():
+    emap = egress_proxy.EntityMap('sess-map-' + os.urandom(6).hex(), 'e2e-map')
+    ph1, new1 = emap.placeholder_for('AbC123xy', 'secret')
+    ph2, new2 = emap.placeholder_for('abc123xy', 'secret')
+    assert new1 and new2
+    assert ph1 != ph2
+    assert emap.replay()[ph1] == 'AbC123xy'
+    assert emap.replay()[ph2] == 'abc123xy'
+
+    email_ph1, _ = emap.placeholder_for('Bob@Example.test', 'email')
+    email_ph2, _ = emap.placeholder_for('bob@example.test', 'email')
+    assert email_ph1 == email_ph2, 'ordinary PII should keep case-insensitive session stability'
+
+
+@_NEEDS_PROXY
+def test_proxy_known_sweep_uses_exact_case_for_credentials():
+    class FakeMap:
+        v2p = {
+            'AbC123xy': '<SECRET_001>',
+            'abc123xy': '<SECRET_002>',
+            'Jane Roy': '<PERSON_001>',
+        }
+
+    known_re = egress_proxy.build_known_re(FakeMap)
+    out, n = egress_proxy.sweep_known('again abc123xy and Jane Roy and JANE ROY', known_re, FakeMap)
+    assert out == 'again <SECRET_002> and <PERSON_001> and <PERSON_001>'
+    assert n == 3
 
 
 # ---------------------------------------------------------------------------
@@ -535,3 +854,103 @@ def test_openai_adapter_extract_rehydrate_lossless():
     out = openai_adapter.rehydrate_json_string(args_json, {placeholder: tricky})
     parsed = json.loads(out)   # must still be valid JSON after substitution
     assert parsed['raw'] == tricky and parsed['note'] == f'see {tricky}'
+
+
+@_NEEDS_PROXY
+def test_anthropic_and_openai_json_rehydrate_restore_keys_and_duplicates():
+    key_ph = '<EMAIL_001>'
+    val_ph1 = '<PERSON_001>'
+    val_ph2 = '<PERSON_002>'
+    email = 'sophie.tremblay@example.com'
+    replay = {key_ph: email, val_ph1: 'Alice Tremblay', val_ph2: 'Bob Roy'}
+
+    keyed = json.dumps({key_ph: val_ph1})
+    for helper in (egress_proxy.rehydrate_json_string, openai_adapter.rehydrate_json_string):
+        out = helper(keyed, replay)
+        parsed = json.loads(out)
+        assert parsed[email] == 'Alice Tremblay', 'placeholder object keys must rehydrate'
+
+    dup = '{"assignee":"<PERSON_001>","assignee":"<PERSON_002>"}'
+    for helper in (egress_proxy.rehydrate_json_string, openai_adapter.rehydrate_json_string):
+        out = helper(dup, replay)
+        assert 'Alice Tremblay' in out and 'Bob Roy' in out, 'duplicate-key JSON must not drop a value'
+        json.loads(out)
+
+
+@_NEEDS_PROXY
+def test_openai_stream_split_multi_underscore_placeholder_rehydrates():
+    """OpenAI chat streams can split a gate-form placeholder with internal underscores across deltas."""
+    value = 'Dossier-QX77182'
+    placeholder = '<SENSITIVE_ACCOUNT_ID_001>'
+    replay = {placeholder: value}
+    carry, tool_acc = {}, {}
+
+    e1 = b'data: ' + json.dumps({
+        'choices': [{'index': 0, 'delta': {'content': 'Case <SENSITIVE_ACCOUNT'}}],
+    }).encode('utf-8')
+    e2 = b'data: ' + json.dumps({
+        'choices': [{'index': 0, 'delta': {'content': '_ID_001> ready.'}}],
+    }).encode('utf-8')
+
+    r1 = openai_adapter.transform_openai_event(e1, replay, carry, tool_acc).decode('utf-8')
+    r2 = openai_adapter.transform_openai_event(e2, replay, carry, tool_acc).decode('utf-8')
+    combined = r1 + r2
+
+    assert '<SENSITIVE_ACCOUNT' not in r1, 'partial multi-underscore placeholder must be buffered'
+    assert value in combined, 'split multi-underscore placeholder must rehydrate once complete'
+    assert not _PH_RE.search(combined), 'no full placeholder may survive OpenAI stream rehydration'
+
+
+# ---------------------------------------------------------------------------
+# Carrier-wrap booster (plan 026 option A): a RARE name in a bare structural value scores zero
+# from the model (no prose to cue it) and has NO Tier-0 floor -> it would leak. The booster
+# re-scans the value inside a prose carrier and maps the verdict back. These drive redact_body
+# end to end with the model mocked, so they assert the WIRING, not a real model's recall.
+# ---------------------------------------------------------------------------
+def _name_only_in_carrier(names):
+    """Model double matching the MEASURED behaviour: a rare name scores ZERO as a bare value but
+    fires once wrapped in the prose carrier. Emits a person span only when the name appears inside
+    a longer carrier text (text.strip() != the bare name)."""
+    async def _stub(aclient, text, min_score=0.5):
+        spans = []
+        for nm in names:
+            i = text.find(nm)
+            if i != -1 and text.strip() != nm:   # bare value -> miss; carrier-wrapped -> hit
+                spans.append({'start': i, 'end': i + len(nm), 'label': 'person',
+                              'tier': 1, 'conf': 0.99, 'rule': 'npu-stub'})
+        return spans
+    return _stub
+
+
+@_NEEDS_PROXY
+def test_carrier_booster_recovers_bare_structural_name(monkeypatch):
+    name = 'Priya McCallum'   # synthetic rare name; NO Tier-0 floor for person names
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': name}]}
+    meta, replay = _run_redact(monkeypatch, body, _name_only_in_carrier([name]))
+    wire = _wire_text(body)
+    assert name not in wire, 'bare rare name leaked -- carrier booster did not fire'
+    assert _PH_RE.search(wire), 'expected a placeholder for the recovered name'
+    assert meta['redaction'] == 'redacted'
+    assert meta.get('by_rule', {}).get('gpu:carrier', 0) >= 1, 'recovered span should be tagged gpu:carrier'
+
+
+@_NEEDS_PROXY
+def test_bare_name_leaks_when_model_misses_even_the_carrier(monkeypatch):
+    # CONTROL: a model that finds the name in NEITHER bare nor carrier form -> the name leaks
+    # (Tier-0 has no name floor). Proves (a) the test name is truly NER-only, and (b) the booster
+    # only ever helps; it never invents a redaction the model didn't make. This residual is the
+    # retrain-augment track (plan 026 option B), not closable client-side.
+    name = 'Priya McCallum'
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': name}]}
+    _run_redact(monkeypatch, body, _make_neural({}))   # finds nothing, ever
+    assert name in _wire_text(body), 'expected the NER-only name to remain when the model never finds it'
+
+
+@_NEEDS_PROXY
+def test_carrier_booster_does_not_fire_on_non_name_short_value(monkeypatch):
+    # a short non-name value that is name-shaped lexically ("active") must not be mangled: the model
+    # returns no person for it even carrier-wrapped (measured 0 FP), so it passes through untouched.
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'active'}]}
+    meta, replay = _run_redact(monkeypatch, body, _name_only_in_carrier(['Priya McCallum']))
+    assert 'active' in _wire_text(body), 'a non-name short value must not be redacted by the booster'
+    assert meta['redaction'] in ('scanned-clean', 'skip')

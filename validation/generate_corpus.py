@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a BIG synthetic Québec PII corpus for validating the Sparx gate.
+"""Generate a BIG synthetic Québec PII corpus for validating the OSSRedact gate.
 
 100% SYNTHETIC. Every name/SIN/email/account/secret is fabricated from curated pools + random.
 No real client data is ever read. Secrets are format-valid but fake (random bodies), never real keys.

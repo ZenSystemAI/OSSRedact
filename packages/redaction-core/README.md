@@ -11,7 +11,7 @@ Pure TypeScript, browser-safe, zero runtime dependencies.
 - **Span management** (`mergeSpans`, `toSpans`, `insertSpan`, `combineWithManual`) -- overlap resolution
   and manual annotation support.
 - **Redaction primitives** (`redactedText`, `rehydrate`, `explain`, `buildEntityMap`) -- placeholder
-  substitution, round-trip rehydration, and entity-map construction.
+  substitution, repeated-value sweep, round-trip rehydration, and entity-map construction.
 - **Label metadata** (`labelMeta`, `labelTier`, `MANUAL_LABELS`) -- tier classification and display
   names for all entity types.
 
@@ -24,13 +24,16 @@ npm install @ossredact/core
 ## Usage
 
 ```ts
-import { tier0Spans, redactedText, buildEntityMap } from '@ossredact/core'
+import { tier0Spans, toSpans, redactedText, buildEntityMap, rehydrate } from '@ossredact/core'
 
-const text = 'Call John at 514-555-0199 or john@example.com'
-const spans = tier0Spans(text)
-const map = buildEntityMap(spans)
-const redacted = redactedText(text, spans, map)
-// "Call John at [PHONE-1] or [EMAIL-1]"
+const text = 'Call 514-555-0199 or john@example.com'
+const spans = toSpans(tier0Spans(text), 'auto')
+const { map } = buildEntityMap(text, spans)
+const redacted = redactedText(text, spans)
+// "Call <PHONE_NUMBER_001> or <EMAIL_001>"
+
+const restored = rehydrate(redacted, map)
+// "Call 514-555-0199 or john@example.com"
 ```
 
 ## Build
@@ -42,7 +45,7 @@ npm run build   # emits dist/ via tsup (ESM + .d.ts)
 ## Test
 
 ```
-npm test        # vitest run (56 unit tests)
+npm test        # vitest run (83 unit tests)
 ```
 
 ## License

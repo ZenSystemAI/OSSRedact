@@ -23,11 +23,24 @@ const WORD_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 </Relationships>`
 
+function escapeXmlAttr(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function escapeXmlText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 function buildDocumentXml(paragraphs: string[]): string {
   const paras = paragraphs
     .map(
       (text) =>
-        `<w:p><w:r><w:t xml:space="preserve">${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</w:t></w:r></w:p>`,
+        `<w:p><w:r><w:t xml:space="preserve">${escapeXmlText(text)}</w:t></w:r></w:p>`,
     )
     .join('\n')
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -44,8 +57,8 @@ function buildCoreXml(creator: string, lastModifiedBy: string): string {
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
                    xmlns:dc="http://purl.org/dc/elements/1.1/"
                    xmlns:dcterms="http://purl.org/dc/terms/">
-  <dc:creator>${creator.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</dc:creator>
-  <cp:lastModifiedBy>${lastModifiedBy.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</cp:lastModifiedBy>
+  <dc:creator>${escapeXmlText(creator)}</dc:creator>
+  <cp:lastModifiedBy>${escapeXmlText(lastModifiedBy)}</cp:lastModifiedBy>
   <dcterms:created>2026-01-01T00:00:00Z</dcterms:created>
   <dcterms:modified>2026-01-02T00:00:00Z</dcterms:modified>
 </cp:coreProperties>`
@@ -55,7 +68,7 @@ function buildCustomXml(properties: Record<string, string>): string {
   const props = Object.entries(properties)
     .map(
       ([name, value], i) =>
-        `  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="${i + 2}" name="${name.replace(/&/g, '&amp;').replace(/</g, '&lt;')}"><vt:lpwstr xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">${value.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</vt:lpwstr></property>`,
+        `  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="${i + 2}" name="${escapeXmlAttr(name)}"><vt:lpwstr xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">${escapeXmlText(value)}</vt:lpwstr></property>`,
     )
     .join('\n')
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

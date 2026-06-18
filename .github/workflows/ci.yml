@@ -8,6 +8,25 @@ on:
 
 jobs:
   # -----------------------------------------------------------------------
+  # Repo hygiene: enforce text invariants that should fail before tests run.
+  # -----------------------------------------------------------------------
+  repo-hygiene:
+    name: Repo hygiene
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No em dash
+        run: |
+          matches="$(git grep -n $'\u2014' -- . ':!ci-pdf-parser/private' || true)"
+          if [ -n "$matches" ]; then
+            printf '%s\n' "$matches"
+            echo "Em dash found; use -- instead." >&2
+            exit 1
+          fi
+
+  # -----------------------------------------------------------------------
   # Workbench: TypeScript build + vitest unit + round-trip tests
   # -----------------------------------------------------------------------
   workbench:
@@ -29,6 +48,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: High-severity dependency audit
+        run: npm audit --audit-level=high
 
       - name: TypeScript build
         run: npm run build
@@ -59,6 +81,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: High-severity dependency audit
+        run: npm audit --audit-level=high
+
       - name: Build
         run: npm run build
 
@@ -66,14 +91,12 @@ jobs:
         run: npm test
 
   # -----------------------------------------------------------------------
-  # Gate: torch-free floor tests only (Tier-0 re + merge + regression).
+  # Gate + appliance + training: torch-free tests (Tier-0 re + merge + gateway wiring).
   # Excluded: gate/tests/test_maxlen.py and training/tests/test_compute_metrics.py
-  # (both require torch/onnxruntime on the P620 GPU box).
-  # Full Python torch-free suite will be added when plan 015 lands
-  # a requirements.txt with pinned deps.
+  # (both require torch/onnxruntime on the GPU box).
   # -----------------------------------------------------------------------
   gate-floor:
-    name: Gate floor tests (Python 3.12)
+    name: Gate + appliance torch-free tests (Python 3.12)
     runs-on: ubuntu-latest
 
     steps:
@@ -87,14 +110,22 @@ jobs:
       - name: Install test deps
         run: pip install -r requirements-test.txt
 
-      - name: Run torch-free floor + parity-metric tests
+      - name: Run torch-free gate + appliance tests
         run: |
           python -m pytest \
             gate/tests/test_validated_floor.py \
             gate/tests/test_merge.py \
             gate/tests/test_gate_regression.py \
             gate/tests/test_gate_parity_vectors.py \
+            gate/tests/test_deploy_gate_service_sync.py \
+            gate/tests/test_redact_sweep.py \
             appliance/tests/test_appliance_floor.py \
             appliance/tests/test_appliance_parity_vectors.py \
+            appliance/tests/test_egress_e2e.py \
+            appliance/tests/test_entity_map.py \
+            appliance/tests/test_name_carrier.py \
+            appliance/tests/test_responses_adapter.py \
+            training/tests/test_labeling.py \
+            training/tests/test_remap_scheme.py \
             validation/test_parity_check.py \
             -v

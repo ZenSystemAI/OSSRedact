@@ -1,0 +1,19 @@
+[Unit]
+Description=OSSRedact CPU PII gate (xlm-r-base INT8 on CPU) -- redaction sidecar :8011
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ossredact
+WorkingDirectory=/opt/ossredact/gate
+# CPU-only: explicitly hide all GPUs so this never contends with a GPU gate
+Environment=CUDA_VISIBLE_DEVICES=
+Environment=CPU_GATE_PORT=8011
+Environment=CPU_GATE_MODEL=/opt/ossredact/models/pii-xlmr-base-int8
+ExecStart=/opt/ossredact/.venv/bin/python /opt/ossredact/gate/gate_service_cpu.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

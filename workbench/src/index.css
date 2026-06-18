@@ -1,6 +1,6 @@
 @import 'tailwindcss';
 
-/* ===== ZenSystem tokens (mirrors ~/dev/sparx-web/landing/index.html :root -- canonical source) ===== */
+/* ===== Design tokens ===== */
 @theme {
   --color-bg: #0f0f0f;
   --color-black: #050505;

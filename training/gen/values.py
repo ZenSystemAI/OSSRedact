@@ -7,7 +7,7 @@ excluded-letter set, phones use real Quebec NPAs, bank accounts use the institut
 canonical parser expects. NO real person's data is ever produced. Uses module `random`; callers seed it
 (build_dataset and build_heldout seed DIFFERENTLY so the held-out set never overlaps train).
 
-Facts source: docs/research/2026-06-14-qc-pii-data-formats.md. Only SIN/card (Luhn) and IBAN (mod-97) have
+Facts source: internal data-formats research notes. Only SIN/card (Luhn) and IBAN (mod-97) have
 verifiable checksums; RAMQ/SAAQ are structural-only (no public check digit).
 """
 from __future__ import annotations

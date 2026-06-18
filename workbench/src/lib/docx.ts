@@ -57,6 +57,19 @@ function stripTrackedDeletions(xmlDoc: Document) {
   }
 }
 
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+function searchableXml(xml: string): string {
+  return decodeXmlEntities(xml) + '\n' + decodeXmlEntities(xml.replace(/<[^>]+>/g, ''))
+}
+
 function applyRepls(tmap: TNode[], repls: Replacement[]) {
   const sorted = [...repls].sort((a, b) => a.start - b.start)
   for (const { node, start: ns, end: ne } of tmap) {
@@ -109,8 +122,10 @@ async function scrubDocProps(zip: JSZip) {
     if (!/^docProps\/.*\.xml$/.test(name)) continue
     const xml = await zip.file(name)!.async('string')
     const doc = new DOMParser().parseFromString(xml, 'application/xml')
+    let customPropN = 0
     for (const el of Array.from(doc.getElementsByTagName('*'))) {
       const local = el.localName
+      if (local === 'property') el.setAttribute('name', `property-${++customPropN}`)
       // Blank named PII tags (core.xml + app.xml)
       if (DOCPROPS_PII_TAGS.has(local)) {
         el.textContent = ''
@@ -120,6 +135,23 @@ async function scrubDocProps(zip: JSZip) {
       // The value is a single child element like <vt:lpwstr>, <vt:i4>, etc.
       if (el.parentElement && el.parentElement.localName === 'property') {
         el.textContent = ''
+      }
+    }
+    zip.file(name, new XMLSerializer().serializeToString(doc))
+  }
+}
+
+async function scrubCommentMetadata(zip: JSZip) {
+  for (const name of Object.keys(zip.files)) {
+    if (zip.files[name].dir) continue
+    if (!/^word\/comments.*\.xml$/i.test(name)) continue
+    const xml = await zip.file(name)!.async('string')
+    const doc = new DOMParser().parseFromString(xml, 'application/xml')
+    for (const el of Array.from(doc.getElementsByTagName('*'))) {
+      for (const attr of Array.from(el.attributes)) {
+        if (attr.localName === 'author' || attr.localName === 'initials') {
+          el.setAttributeNS(attr.namespaceURI, attr.name, '')
+        }
       }
     }
     zip.file(name, new XMLSerializer().serializeToString(doc))
@@ -161,6 +193,7 @@ export async function loadDocx(file: File): Promise<LoadedDocx> {
       off += text.length + 2
     }
     await scrubDocProps(zip)
+    await scrubCommentMetadata(zip)
     return zip.generateAsync({ type: 'blob', mimeType: DOCX_MIME })
   }
 
@@ -175,13 +208,7 @@ export async function verifyDocx(blob: Blob, values: string[]): Promise<string[]
   for (const n of Object.keys(zip.files)) {
     if (!/^(word|docProps)\/.*\.xml$/.test(n) || zip.files[n].dir) continue
     const xml = await zip.file(n)!.async('string')
-    all += xml.replace(/<[^>]+>/g, '') // strip tags -> reconstructs run-split values, no inserted gaps
+    all += searchableXml(xml)
   }
-  all = all
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&')
   return values.filter((v) => v && all.includes(v))
 }

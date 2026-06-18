@@ -12,15 +12,33 @@
     "expect": [{ "label": "iban", "value": "GB82WEST12345698765432" }]
   },
   {
+    "id": "iban_mod97_valid_spaced",
+    "note": "Same canonical GB82 IBAN with internal spaces, matching common PDF/OCR grouping. All surfaces must still emit one iban span over the spaced form.",
+    "text": "Solde sur IBAN GB82 WEST 1234 5698 7654 32 confirme.",
+    "expect": [{ "label": "iban", "value": "GB82 WEST 1234 5698 7654 32" }]
+  },
+  {
     "id": "card_luhn_valid_16",
     "note": "Luhn-VALID 16-digit Visa test number -- floor:card. A drift in _luhn_ok / luhnOk or the 15/16-digit gate drops this. Public Luhn test vector, not a real card.",
     "text": "Paiement par carte 4539148803436467 approuve.",
     "expect": [{ "label": "payment_card", "value": "4539148803436467" }]
   },
   {
+    "id": "card_luhn_valid_en_dash",
+    "note": "Same Luhn-valid card with U+2013 en-dash separators, as seen in PDF extraction. Normalization is length-preserving; all surfaces must emit payment_card at original offsets.",
+    "text": "Paiement par carte 4539\u20131488\u20130343\u20136467 approuve.",
+    "expect": [{ "label": "payment_card", "value": "4539148803436467", "digits_only": true }]
+  },
+  {
     "id": "sin_luhn_valid_with_cue",
     "note": "Luhn-VALID 9-digit value (public SIN test vector 046454286) with a preceding NAS cue and OQLF 3-3-3 spacing. Must emit government_id on all three. The cue forces emission even past BN suppression (never-leak SIN-cue override). value is the digit-normalized form so the assert is separator-agnostic.",
     "text": "NAS du client: 046 454 286 au dossier.",
+    "expect": [{ "label": "government_id", "value": "046454286", "digits_only": true }]
+  },
+  {
+    "id": "sin_luhn_valid_nbsp_with_cue",
+    "note": "Same Luhn-valid SIN with NBSP group separators, the historical PDF/CSV extraction miss. All surfaces must normalize spaces length-preservingly and emit government_id.",
+    "text": "NAS du client: 046\u00a0454\u00a0286 au dossier.",
     "expect": [{ "label": "government_id", "value": "046454286", "digits_only": true }]
   },
   {

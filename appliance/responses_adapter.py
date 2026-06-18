@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenAI Responses-API adapter for the qc-pii egress proxy.
+"""OpenAI Responses-API adapter for the OSSRedact egress proxy.
 
 Same privacy contract as /v1/messages and /v1/chat/completions: redact PII + secrets in the OUTBOUND request's
 free-text fields to stable placeholders, and rehydrate the placeholders back to real values on the response --
@@ -334,8 +334,10 @@ _DENY_KEYS = frozenset({
     # MODEL-VISIBLE free text that can carry PII in its path/query -- deny-listing it skipped it entirely and the
     # value bypassed the neural gate. It is now SURFACED for span-based redaction (only a detected PII substring is
     # masked; an ordinary 'https://example.test/x.png' has no PII span and passes through unchanged). The ROUTING
-    # url keys stay protected: 'image_url'/'file_url'/'server_url' are listed explicitly below and the '*_url' family
-    # is denied in _is_denied_key, so redacting one can never corrupt a request that selects a server/image/file.
+    # url keys stay protected: 'image_url'/'file_url'/'server_url' are listed explicitly here (and in
+    # _ROUTING_URL_KEYS), so redacting one can never corrupt a request that selects a server/image/file. Other *_url
+    # keys (a citation source_url, an echoed profile_url) are NOT routing and ARE surfaced -- see _is_denied_key
+    # (FIX-ROUND-5-R6 removed the blanket '*_url' deny that was leaking non-routing url content).
     'type', 'role', 'id', 'object', 'status', 'model', 'name', 'image_url', 'file_url', 'mime_type',
     'mimetype', 'encoding', 'format', 'detail', 'tool_choice', 'service_tier', 'output_index', 'content_index',
     'index', 'file_data', 'version',
@@ -358,16 +360,22 @@ _DENY_KEYS = frozenset({
 
 def _is_denied_key(k):
     """A key is structural (its string value is never redacted) if it is in the deny-list OR is an identifier
-    key matching the *_id family (call_id, item_id, file_id, response_id, previous_response_id, ...) OR a ROUTING
-    *_url key (server_url, image_url, file_url, ... -- these select a server/image/file and redacting one corrupts
-    the request). The BARE key 'url' deliberately does NOT match '*_url', so a citation/annotation url string is
-    still surfaced for span-based redaction (FIX-ROUND-3 HIGH); only the suffixed routing url keys are protected.
-    This STRUCTURAL-scope rule is the sole protector of the genuine routing URLs (_ROUTING_URL_KEYS) after FIX B
-    moved them out of the both-scopes _is_request_breaking_key check, so a *_url in USER-DATA scope is scanned."""
+    key matching the *_id family (call_id, item_id, file_id, response_id, previous_response_id, ...) OR one of the
+    ENUMERATED genuine routing *_url keys (_ROUTING_URL_KEYS: image_url / file_url / server_url -- these select a
+    server/image/file and redacting one corrupts the request).
+
+    FIX-ROUND-5-R6 (residual :370): the BLANKET `k.endswith('_url')` deny was REMOVED. It protected the WHOLE *_url
+    family as if every one were routing, but the only genuine REQUEST-routing url keys are the three enumerated above.
+    A non-routing *_url on an unenumerated agentic item walked in structural scope (a web_search/citation source_url,
+    a profile_url echoed in a tool result) is MODEL-VISIBLE content that can carry PII in its path/query -- denying
+    the whole family skipped it entirely and the value bypassed the neural gate. It is now SURFACED for span-based
+    redaction, exactly like the bare `url` key (FIX-ROUND-3 HIGH): a clean routing/asset URL has no PII span and
+    passes through unchanged, while a PII-bearing url is masked + round-trips. The three genuine routing url keys
+    stay protected via _DENY_KEYS / _ROUTING_URL_KEYS membership, so a server/image/file selector is never rewritten."""
     if not isinstance(k, str):
         return False
     return (k in _DENY_KEYS or k in _ROUTING_URL_KEYS
-            or k == 'id' or k.endswith('_id') or k.endswith('_url'))
+            or k == 'id' or k.endswith('_id'))
 
 
 # GENUINE ROUTING URL KEYS: image_url on an input_image part, server_url / file_url for mcp/tool routing. These
@@ -396,12 +404,14 @@ def _is_request_breaking_key(k):
       - known PROTOCOL ROUTING IDs (_ROUTING_ID_KEYS): file_id/container_id/call_id/... reference a real upstream
         resource; a redacted span inside one breaks resolution. (A bare `id`/`customer_id`/`order_id` is NOT here --
         those are user-data PII, LEAK 1.)
-    FIX-ROUND-4-R3 FIX B: routing URLs (*_url / image_url / server_url / file_url) are NO LONGER protected here. A
-    *_url is request-breaking ONLY at its genuine routing POSITION (image_url on an input_image part, server_url/
-    file_url for mcp/tool routing) -- and those live in STRUCTURAL scope, where _is_denied_key already protects them.
-    A *_url INSIDE a USER-DATA payload (metadata.profile_url, function_call_output.output.profile_url) is USER CONTENT
-    whose value can carry PII, so it MUST be SCANNED: span-based redaction leaves a clean URL unchanged (no PII span
-    matches) and redacts + round-trips a PII-bearing one. Protecting it here wrongly bypassed the gate for user data.
+    FIX-ROUND-4-R3 FIX B (corrected FIX-ROUND-5-R6): the GENERIC `*_url` family is NOT protected here -- a *_url such
+    as metadata.profile_url / function_call_output.output.profile_url is USER CONTENT whose value can carry PII, so it
+    MUST be SCANNED (span-based redaction leaves a clean URL unchanged and redacts a PII-bearing one). But the THREE
+    ENUMERATED genuine routing url keys (_ROUTING_URL_KEYS: image_url / file_url / server_url) ARE protected in BOTH
+    scopes: FIX B assumed they only ever appear in STRUCTURAL scope (where _is_denied_key protects them), but a
+    `type:input_image` / `input_file` content PART can be nested INSIDE a user-data container (a prompt.variables value,
+    a function_call_output.output content array), and there _is_denied_key is NOT consulted -- so without protecting them
+    here, span-redaction would corrupt the routing URL that selects the image/file/server (Codex 2026-06-17 F1/F2).
     FIX-ROUND-4-R3-R2 ITEM 1: `file_data` is NO LONGER protected here either. A GENUINE inline base64 upload lives
     on an input_file / file PART (node.type in input_file/file), reached in STRUCTURAL scope where it is protected
     two ways: it is in _DENY_KEYS (the structural sweep never surfaces the raw base64 blob as "free text"), AND the
@@ -412,7 +422,7 @@ def _is_request_breaking_key(k):
     key-name in BOTH scopes wrongly skipped that user-data field (metadata is explicitly walked as user data)."""
     if not isinstance(k, str):
         return False
-    return k in _ROUTING_ID_KEYS
+    return k in _ROUTING_ID_KEYS or k in _ROUTING_URL_KEYS
 
 # text-like file extensions whose inline base64 file_data we DECODE -> redact -> re-encode.
 _TEXT_EXTS = (
@@ -518,7 +528,12 @@ def _split_data_uri(s):
     through to an undecodable-text passthrough and its inline payload is left unscanned (HIGH leak)."""
     if not isinstance(s, str):
         return None, None
-    m = re.match(r'^(data:[^,]*?;base64,)', s)
+    # Case-INSENSITIVE on the `;base64,` token: RFC 2397 specifies lowercase, but an adversarial/non-conformant
+    # producer can send `;BASE64,` to evade the split -- the whole 'data:...;BASE64,<payload>' would then be treated
+    # as a bare (undecodable) base64 string and its inline text payload passed through UNSCANNED (a leak). group(1)
+    # preserves the ORIGINAL case, so the prefix re-prepended on write stays byte-identical; only the decoded payload
+    # is scanned. Permissive here is the safe direction: we decode + redact MORE, never less.
+    m = re.match(r'^(data:[^,]*?;base64,)', s, re.IGNORECASE)
     if m:
         return m.group(1), s[m.end():]
     return '', s
@@ -831,6 +846,63 @@ def _reject_dup_keys(pairs):
     return dict(pairs)
 
 
+def _emit_dup(node):
+    """Serialize a faithful dup-preserving tree (with _DupObj nodes -- the request-side REUSE of the response-side
+    _DupObj defined below, whose pairs are now mutable [key,value] lists) back to a JSON string, preserving duplicate
+    keys verbatim and re-escaping every string via json.dumps(ensure_ascii=False) -- so a redacted key/value with
+    quotes or backslashes stays valid JSON. Mirrors json.dumps for every non-_DupObj node. (Distinct from the
+    response-side _dump_rehydrated_dup_safe, which serializes WHILE rehydrating placeholders.)"""
+    if isinstance(node, _DupObj):
+        return '{' + ','.join(json.dumps(k, ensure_ascii=False) + ':' + _emit_dup(v) for k, v in node.pairs) + '}'
+    if isinstance(node, list):
+        return '[' + ','.join(_emit_dup(x) for x in node) + ']'
+    return json.dumps(node, ensure_ascii=False)
+
+
+class _DupSlot:
+    """A (container,key)-style proxy onto ONE slot of the faithful dup-preserving tree (a [key,value] pair-list of a
+    _DupObj, or a native JSON array). `target` is the mutable list, `idx` the position (0=key / 1=value of a pair, or
+    an array index). Reads return the slot; every write re-emits the WHOLE faithful root into the arguments-string slot
+    via _emit_dup, so duplicates are preserved + each redacted value lands inside valid JSON. Positional slots mean a
+    KEY rename never collides with a sibling (unlike the dict path), so no disambiguation dance is needed here."""
+    __slots__ = ('_target', '_idx', '_root', '_slot_container', '_slot_key')
+
+    def __init__(self, target, idx, root, slot_container, slot_key):
+        self._target = target
+        self._idx = idx
+        self._root = root
+        self._slot_container = slot_container
+        self._slot_key = slot_key
+
+    def __getitem__(self, key):
+        return self._target[self._idx]
+
+    def __setitem__(self, key, value):
+        self._target[self._idx] = value
+        self._slot_container[self._slot_key] = _emit_dup(self._root)
+
+
+def _collect_dup_args(node, root, slot_container, slot_key, kind, fields):
+    """Walk a faithful dup-preserving tree, surfacing EVERY string KEY and string VALUE as its own Field -- same
+    contract as _collect_json_args_values, but over _DupObj pairs so duplicate keys survive and the EARLIER value of a
+    duplicate (invisible to a plain dict) is scanned + round-tripped. Each Field's write re-emits the root via _emit_dup."""
+    if isinstance(node, _DupObj):
+        for pair in node.pairs:
+            k, v = pair[0], pair[1]
+            if isinstance(k, str):
+                fields.append(Field(_DupSlot(pair, 0, root, slot_container, slot_key), 0, kind))
+            if isinstance(v, str):
+                fields.append(Field(_DupSlot(pair, 1, root, slot_container, slot_key), 1, kind))
+            else:
+                _collect_dup_args(v, root, slot_container, slot_key, kind, fields)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str):
+                fields.append(Field(_DupSlot(node, i, root, slot_container, slot_key), i, kind))
+            else:
+                _collect_dup_args(v, root, slot_container, slot_key, kind, fields)
+
+
 def _surface_json_args(container, key, kind, fields, claimed):
     """Surface a tool-argument JSON STRING held at container[key] (function_call.arguments / mcp_call.arguments /
     custom_tool_call.input / any '*arguments'/'*input' JSON string). PARSE it and surface each inner string value
@@ -842,21 +914,38 @@ def _surface_json_args(container, key, kind, fields, claimed):
         return False
     raw = container[key]
     parsed = None
+    has_dup = False
     if isinstance(raw, str) and raw.strip():
         try:
             # object_pairs_hook detects DUPLICATE object keys (FIX-ROUND-3 MEDIUM): a plain json.loads collapses
             # {"assignee":"Jane Roe","assignee":"ok"} to the LAST value, so the first ("Jane Roe") is invisible to
-            # the value collector AND would be silently dropped on re-dump. _reject_dup_keys raises on any duplicate
-            # so we fall back to WHOLE-STRING redaction below -- which scans the entire arguments string (the first
-            # value's PII still reaches the neural gate) and writes back the original bytes unchanged except for
-            # masked spans, never dropping a key.
+            # the value collector AND would be silently dropped on re-dump. _reject_dup_keys raises on any duplicate.
             parsed = json.loads(raw, object_pairs_hook=_reject_dup_keys)
+        except ValueError as e:
+            # _reject_dup_keys raises ValueError('duplicate object key...') at ANY nesting depth. A malformed-JSON
+            # JSONDecodeError is ALSO a ValueError -- distinguish by the sentinel message so only a real dup-key
+            # object routes to the faithful path; malformed JSON falls through to whole-string redaction.
+            has_dup = 'duplicate object key' in str(e)
+            parsed = None
         except Exception:
             parsed = None
-    if isinstance(parsed, (dict, list)):
+    if has_dup:
+        # FAITHFUL DUP-KEY PATH (FIX-ROUND-5-R6, residual ~:859): the prior fallback scanned the RAW arguments string,
+        # so a JSON-ESCAPED PII value (@, \n, \") inside a dup-key object evaded the span detector and leaked.
+        # Re-parse PRESERVING all duplicates, surface every key+value (the NER sees the DECODED value), and re-emit
+        # on write -- so every duplicate's PII (escaped or not) is masked and NO key is collapsed/dropped on re-dump.
+        try:
+            tree = json.loads(raw, object_pairs_hook=_DupObj)
+        except Exception:
+            tree = None
+        if isinstance(tree, (_DupObj, list)):
+            _collect_dup_args(tree, tree, container, key, kind, fields)
+            return True
+        # else fall through to whole-string redaction (never drop it)
+    elif isinstance(parsed, (dict, list)):
         _collect_json_args_values(parsed, parsed, container, key, kind, fields)
         return True
-    # not valid JSON, a bare JSON scalar, OR an object with duplicate keys -> fall back to whole-string redaction
+    # not valid JSON, a bare JSON scalar, OR an undecodable dup tree -> fall back to whole-string redaction
     # (the whole arguments string is scanned span-wise so PII is still masked), never drop it.
     fields.append(Field(container, key, kind))
     return True
@@ -1015,9 +1104,9 @@ def extract_text_fields_responses(body):
     # Record the file-passthrough notes on a private, NON-WIRE key. pop_file_passthrough_notes() reads + REMOVES
     # it so the marker never reaches the upstream body. It is stripped here only if a prior run left it; the egress
     # route is responsible for popping it before forwarding (see /v1/responses).
-    body.pop('_qc_pii_file_notes', None)
+    body.pop('_ossredact_file_notes', None)
     if notes:
-        body['_qc_pii_file_notes'] = notes
+        body['_ossredact_file_notes'] = notes
     return fields
 
 
@@ -1026,7 +1115,7 @@ def pop_file_passthrough_notes(body):
     {mime, filename, reason} for every inline file payload whose bytes were NOT scanned (binary/undetermined or
     undecodable text). The egress logs these so a binary-file bypass is a DOCUMENTED limitation, never silent --
     and popping guarantees the private marker is NEVER forwarded upstream. Returns [] when none were recorded."""
-    notes = body.pop('_qc_pii_file_notes', None)
+    notes = body.pop('_ossredact_file_notes', None)
     return notes if isinstance(notes, list) else []
 
 
@@ -1036,10 +1125,11 @@ def pop_file_passthrough_notes(body):
 def rehydrate_text(s, replay):
     if not replay or not isinstance(s, str):
         return s
-    for ph, v in replay.items():
-        if ph in s:
-            s = s.replace(ph, v)
-    return s
+    tokens = [ph for ph in replay if isinstance(ph, str) and ph in s]
+    if not tokens:
+        return s
+    pat = re.compile('|'.join(re.escape(ph) for ph in sorted(tokens, key=len, reverse=True)))
+    return pat.sub(lambda m: replay[m.group()], s)
 
 
 def _rehydrate_json(v, replay):
@@ -1067,12 +1157,15 @@ def _rehydrate_json(v, replay):
 
 class _DupObj:
     """A JSON object that carries DUPLICATE keys -- a plain dict cannot hold them, so the duplicate-preserving
-    parse below wraps such an object in this list-of-pairs container. Used ONLY on the response-side duplicate-key
-    rehydration fallback (FIX-ROUND-4-R3-R2 ITEM 4); ordinary (no-duplicate) objects stay plain dicts."""
+    parse below wraps such an object in this list-of-pairs container. Used on the response-side duplicate-key
+    rehydration fallback (FIX-ROUND-4-R3-R2 ITEM 4) AND the request-side extraction dup path (_collect_dup_args,
+    FIX-ROUND-5-R6); ordinary (no-duplicate) objects stay plain dicts on the response side.
+    Pairs are MUTABLE [key, value] lists (not tuples) so the request-side _DupSlot can redact a value/key in place;
+    the response side only READS pairs, so the list-vs-tuple change is transparent to it."""
     __slots__ = ('pairs',)
 
     def __init__(self, pairs):
-        self.pairs = pairs   # list of (key, value), duplicates preserved in order
+        self.pairs = [list(p) for p in pairs]   # [key, value] lists, duplicates preserved in order
 
 
 def _dup_preserving_pairs(pairs):

@@ -1,7 +1,7 @@
 """Unit test for the entity-F1 compute_metrics in train_suite.py.
 
-train_suite imports torch at module top, so this runs where torch is available (P620 venv-pii):
-    /home/steven/Sparx/.venv-pii/bin/python training/tests/test_compute_metrics.py
+train_suite imports torch at module top, so this runs where torch is available:
+    python training/tests/test_compute_metrics.py
 It also works under pytest in any env that has torch+numpy+seqeval.
 """
 import sys, os

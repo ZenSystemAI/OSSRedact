@@ -132,7 +132,7 @@ re-opening a genuine leak. The honest ship criterion is **full-stack catastrophi
 
 ## Artifacts
 
-- Models: `p620:~/Sparx/models/privacy-filters/pii-gpu-xlmr-{base,large}-v11r5`
+- Models: `~/.ossredact/models/pii-xlmr-{base,large}`
 - Corpus: `datasets/pii-merged-v11r5(+win)` (train, 39998 docs -> 94846 windowed chunks at the gate's exact
   600/80 char chunker, 0 spans dropped), `datasets/pii-heldout-v11r5` (7498, 0 train overlap)
 - Eval JSONs: `/tmp/v11r5-eval-{base,large}.json` (eval harness `validation/eval_labelaware.py`, bar check

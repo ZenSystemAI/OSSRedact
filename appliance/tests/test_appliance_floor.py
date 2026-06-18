@@ -16,6 +16,8 @@ _spec = importlib.util.spec_from_file_location('appliance_privacy_gate', _PATH)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 tier0_spans = _mod.tier0_spans
+PrivacyGate = _mod.PrivacyGate
+show = _mod.show
 
 
 def labset(text):
@@ -24,6 +26,11 @@ def labset(text):
 
 def labels(text):
     return {s['label'] for s in tier0_spans(text)}
+
+
+def _span(text, value, label, start_at=0):
+    i = text.index(value, start_at)
+    return {'start': i, 'end': i + len(value), 'label': label, 'tier': 0, 'conf': 1.0, 'rule': 'test'}
 
 
 # ---- F14: IBAN deterministic backstop ----
@@ -50,3 +57,33 @@ def test_appliance_sin_cue_overrides_bn():
 
 def test_appliance_still_emits_bare_sin():
     assert ('government_id', '046454286') in labset('NAS 046454286')
+
+
+# ---- Label-aware dedup: case-significant credentials stay lossless ----
+def test_appliance_redact_case_sensitive_password_variants_lossless(monkeypatch):
+    text = "primary AbC123xy backup abc123xy repeat abc123xy."
+    spans = [_span(text, "AbC123xy", "password"), _span(text, "abc123xy", "password")]
+    gate = PrivacyGate(None)
+    monkeypatch.setattr(gate, 'detect', lambda _text, min_score=0.5: spans)
+    redacted, mapping, _ = gate.redact(text)
+    assert redacted.count("<PASSWORD_001>") == 1
+    assert redacted.count("<PASSWORD_002>") == 2
+    assert mapping == {"<PASSWORD_001>": "AbC123xy", "<PASSWORD_002>": "abc123xy"}
+    assert PrivacyGate.rehydrate(redacted, mapping) == text
+
+
+def test_appliance_demo_show_does_not_print_raw_input_or_map_value(capsys):
+    class FakeGate:
+        def redact(self, text, min_score=0.5):
+            return (
+                "Contact <EMAIL_001>",
+                {"<EMAIL_001>": "demo.user@example.test"},
+                [{"label": "email", "tier": 0}],
+            )
+
+    show(FakeGate(), "Contact demo.user@example.test")
+    out = capsys.readouterr().out
+    assert "demo.user@example.test" not in out
+    assert "Contact <EMAIL_001>" in out
+    assert "MAP_KEYS: ['<EMAIL_001>']" in out
+    assert "ROUNDTRIP OK: True" in out

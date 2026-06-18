@@ -1,24 +1,25 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Header from './components/Header'
 import Toolbar from './components/Toolbar'
 import DocCanvas from './components/DocCanvas'
 import LayoutCanvas, { layoutKind } from './components/LayoutCanvas'
-import PageView from './components/PageView'
 import Inspector from './components/Inspector'
 import Dropzone from './components/Dropzone'
 import type { Span, RegionBox, EntityMap } from './lib/types'
 import { tier0Spans } from './lib/tier0'
-import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, sweepKnownValues, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
+import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
 import { labelTier, type Tier } from './lib/labels'
-import { deepDetect, gateHealth, type GateHealth } from './lib/gate'
-import { renderRedactedPdf, verifyNoText } from './lib/pdfExport'
+import { deepDetect, gateHealth, loadNeural, neuralSupported, neuralStatus, type GateHealth } from './lib/gate'
 import { verifyDocx } from './lib/docx'
 import { verifyXlsx } from './lib/xlsx'
-import { download, downloadBlob, type LoadedDoc } from './lib/formats'
-import { putMap, sha256Hex, getRemember } from './lib/mapStore'
-import { extOf, neutralName, assembleZip, type BatchEntry, type ZipFile } from './lib/batch'
+import { download, downloadBlob, findPlaceholders, survivingValues, type LoadedDoc } from './lib/formats'
+import { putMap, sha256Hex, getRemember, type Fingerprint } from './lib/mapStore'
+import { extOf, neutralName, assembleZip, redactedBatchText, replacementsForText, type BatchEntry, type ZipFile } from './lib/batch'
+import { maskPlaceholdersForPrint } from './lib/printMask'
 
 const MIME: Record<string, string> = { md: 'text/markdown', markdown: 'text/markdown', csv: 'text/csv', json: 'application/json', html: 'text/html' }
+type ResolvedBatchEntry = { entry: BatchEntry; placeholderOf: Map<string, string> }
+const PageView = lazy(() => import('./components/PageView'))
 
 export default function App() {
   const [doc, setDoc] = useState<LoadedDoc | null>(null)
@@ -28,6 +29,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [gate, setGate] = useState<GateHealth | null>(null)
+  // On-device model download progress (0..100) while the one-time ~300 MB fetch is in flight; null otherwise.
+  const [loadPct, setLoadPct] = useState<number | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   // Redaction-filter preference: labels the reviewer chose NOT to redact. Persists across re-detection so a
   // muted category does not silently come back active after Deep detect. Empty = redact every category.
@@ -159,22 +162,40 @@ export default function App() {
     setSpans((prev) => combineWithManual(prev, fresh))
   }, [doc, mutedLabels])
 
+  // Ensure the on-device neural model is loaded, surfacing the one-time ~300 MB download as a % so the
+  // button can show progress. Idempotent (loadNeural shares one promise); a no-op once ready. Throws if
+  // the browser can't run WASM or the fetch fails -- the caller degrades to Tier-0.
+  const ensureModel = useCallback(async () => {
+    if (neuralStatus() === 'ready') return
+    if (!neuralSupported()) throw new Error('this browser cannot run the on-device model')
+    setLoadPct(0)
+    flash('Loading the on-device model -- one-time ~300 MB download, then it runs offline (wifi off).')
+    try {
+      await loadNeural((p) => {
+        if (typeof p.progress === 'number') setLoadPct(Math.min(100, Math.round(p.progress)))
+      })
+    } finally {
+      setLoadPct(null)
+    }
+  }, [flash])
+
   const runDeep = useCallback(async () => {
     if (!doc) return
     setBusy(true)
     try {
+      await ensureModel()
       const raw = await deepDetect(doc.text)
       const fresh = toSpans(raw, 'neural', mutedLabels)
       setSpans((prev) => combineWithManual(prev, fresh))
       setGate((g) => ({ ...(g ?? {}), ok: true }))
-      flash(`Gate found ${fresh.length} spans (Tier-0 + GPU)`)
+      flash(`On-device model found ${fresh.length} spans (Tier-0 + neural) -- 0 bytes left this machine`)
     } catch (e) {
       setGate((g) => ({ ...(g ?? {}), ok: false }))
-      flash(`Neural gate unreachable -- using local Tier-0 only. (${e instanceof Error ? e.message : e})`)
+      flash(`On-device model unavailable -- using local Tier-0 only. (${e instanceof Error ? e.message : e})`)
     } finally {
       setBusy(false)
     }
-  }, [doc, flash, mutedLabels])
+  }, [doc, ensureModel, flash, mutedLabels])
 
   // Batch "Deep detect all": iterate entries SEQUENTIALLY (one /gate/detect at a time -- never a parallel
   // flood) with a cancellable AbortSignal and per-file progress. On gate failure for an entry, mark it
@@ -189,6 +210,14 @@ export default function App() {
     // snapshot of entries with the live active entry's spans flushed in (so manual work on it is kept)
     const work = batch.map((e) => (e.id === activeId ? { ...e, spans, regions } : e))
     setBatchProgress({ done: 0, total: work.length })
+    // Load the on-device model ONCE up front (the ~300 MB fetch should not repeat per file). If it can't
+    // load, every entry degrades to Tier-0 below without re-attempting the download each iteration.
+    let modelOk = true
+    try {
+      await ensureModel()
+    } catch {
+      modelOk = false
+    }
     let gateOk: boolean | null = null
     let degraded = 0
     const updated: BatchEntry[] = []
@@ -196,14 +225,15 @@ export default function App() {
       if (ac.signal.aborted) break
       const e = work[i]
       try {
+        if (!modelOk) throw new Error('model unavailable')
         const raw = await deepDetect(e.doc.text, 0.5, ac.signal)
         const fresh = toSpans(raw, 'neural', mutedLabels)
         updated.push({ ...e, spans: combineWithManual(e.spans, fresh), status: 'detected' })
         gateOk = true
       } catch (err) {
         if (ac.signal.aborted) break
-        // gate unreachable for this entry: keep its Tier-0 spans, mark it, continue
-        updated.push({ ...e, status: 'detected', error: 'Tier-0 only (gate unreachable)' })
+        // model unavailable for this entry: keep its Tier-0 spans, mark it, continue
+        updated.push({ ...e, status: 'detected', error: 'Tier-0 only (model unavailable)' })
         degraded++
         gateOk = gateOk ?? false
       }
@@ -301,9 +331,16 @@ export default function App() {
     return `${prefix}.${ext}`
   }
 
+  const redactedCurrentText = useCallback((): string | null => {
+    if (!doc) return null
+    if (!inBatch) return redactedText(doc.text, spans)
+    return redactedBatchText(doc.text, spans, placeholderOf, map)
+  }, [doc, inBatch, spans, placeholderOf, map])
+
   function copyRedacted() {
-    if (!doc) return
-    navigator.clipboard.writeText(redactedText(doc.text, spans)).then(
+    const redacted = redactedCurrentText()
+    if (redacted == null) return
+    navigator.clipboard.writeText(redacted).then(
       () => flash('Redacted text copied'),
       () => flash('Copy failed -- your browser blocked clipboard access'),
     )
@@ -315,10 +352,11 @@ export default function App() {
   const persistMap = useCallback(async () => {
     if (!doc) return
     if (!getRemember()) return
-    const redacted = redactedText(doc.text, spans)
-    const fpExact = await sha256Hex(redacted)
-    const placeholders = Object.keys(map).sort()
+    const redacted = redactedCurrentText()
+    if (redacted == null) return
+    const placeholders = findPlaceholders(redacted).filter((ph) => Object.prototype.hasOwnProperty.call(map, ph))
     if (!placeholders.length) return // nothing redacted -> nothing to remember
+    const fpExact = await sha256Hex(redacted)
     const stamp = new Date().toISOString().slice(0, 10) // neutral date stamp -- no filename, no original text
     await putMap({
       id: fpExact, // idempotent under StrictMode double-invoke
@@ -329,7 +367,25 @@ export default function App() {
       map,
       fingerprints: [{ fpExact, placeholders }], // forward-compat for batch redaction (finding 020)
     })
-  }, [doc, spans, map])
+  }, [doc, map, redactedCurrentText])
+
+  const persistBatchMap = useCallback(async (sharedMap: EntityMap, fingerprints: Fingerprint[]) => {
+    if (!getRemember()) return false
+    const usable = fingerprints.filter((fp) => fp.placeholders.length)
+    if (!usable.length || !Object.keys(sharedMap).length) return false
+    const primary = usable[0]
+    const stamp = new Date().toISOString().slice(0, 10)
+    await putMap({
+      id: primary.fpExact,
+      createdAt: Date.now(),
+      neutralLabel: `batch redaction from ${stamp}`,
+      fpExact: primary.fpExact,
+      placeholders: primary.placeholders,
+      map: sharedMap,
+      fingerprints: usable,
+    })
+    return true
+  }, [])
 
   async function downloadRedacted() {
     if (!doc) return
@@ -340,9 +396,7 @@ export default function App() {
         ? { rebuild: doc.rebuildXlsx, verify: verifyXlsx, ext: 'xlsx' }
         : null
     if (office) {
-      const repls = spans
-        .filter((s) => s.active)
-        .map((s) => ({ start: s.start, end: s.end, text: placeholderOf.get(s.id) ?? '' }))
+      const repls = replacementsForText(doc.text, spans, placeholderOf, map)
       const blob = await office.rebuild(repls)
       const leaked = await office.verify(blob, Object.values(map)) // block if any redacted value survives
       if (leaked.length) {
@@ -354,7 +408,14 @@ export default function App() {
       return
     }
     const ext = doc.kind === 'pdf' ? 'txt' : doc.kind || 'txt'
-    download(exportName('redacted', ext), redactedText(doc.text, spans), MIME[ext] ?? 'text/plain')
+    const redacted = redactedCurrentText()
+    if (redacted == null) return
+    const leaked = survivingValues(redacted, Object.values(map))
+    if (leaked.length) {
+      flash(`BLOCKED: ${leaked.length} redacted value(s) still present in the .${ext}. Not saved.`)
+      return
+    }
+    download(exportName('redacted', ext), redacted, MIME[ext] ?? 'text/plain')
     if (doc.kind === 'pdf') flash('Saved redacted text. For a redacted PDF, use “Redacted PDF” (print / Save as PDF).')
     else await persistMap() // text/office round-trip-capable export -> remember the map on-device (gated). PDF has no placeholders.
   }
@@ -389,14 +450,14 @@ export default function App() {
     setBusy(true)
     try {
       const { sharedMap, perEntry } = resolveBatch()
-      const values = Object.values(sharedMap)
       const total = perEntry.length
       const zipFiles: ZipFile[] = []
       const audits: Record<string, unknown>[] = []
+      const fingerprints = await buildBatchFingerprints(perEntry, sharedMap)
       setBatchProgress({ done: 0, total })
       for (let i = 0; i < perEntry.length; i++) {
         const { entry, placeholderOf: po } = perEntry[i]
-        const built = await exportEntryBlob(entry, po, values)
+        const built = await exportEntryBlob(entry, po, sharedMap)
         if (!built) {
           flash(`BLOCKED: file ${i + 1} of ${total} (${entry.kind}) leaked a redacted value or could not be redacted. Zip not saved.`)
           setBatch((prev) => prev.map((e) => (e.id === entry.id ? { ...e, status: 'error', error: 'verify failed -- blocked' } : e)))
@@ -410,14 +471,15 @@ export default function App() {
       }
       const zip = await assembleZip(zipFiles, JSON.stringify(audits, null, 2))
       downloadBlob('redacted-batch.zip', zip)
-      flash(`Batch zip saved: ${zipFiles.length} redacted files, all passed verify. Download the shared map separately to restore.`)
+      const remembered = await persistBatchMap(sharedMap, fingerprints)
+      flash(`Batch zip saved: ${zipFiles.length} redacted files, all passed verify. ${remembered ? 'Shared map saved on this device; download it separately for cross-device restore.' : 'Download the shared map separately to restore.'}`)
     } catch (e) {
       flash('Batch export failed: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setBatchProgress(null)
       setBusy(false)
     }
-  }, [inBatch, resolveBatch, flash])
+  }, [inBatch, resolveBatch, persistBatchMap, flash])
 
   // Rebuild one entry's redacted blob and run its FORMAT-SPECIFIC fail-closed verify. Returns null if the
   // verify leaks (caller blocks the whole zip). Office: rewrite slices + verifyDocx/verifyXlsx. Text: splice
@@ -425,16 +487,17 @@ export default function App() {
   async function exportEntryBlob(
     entry: BatchEntry,
     po: Map<string, string>,
-    values: string[],
+    sharedMap: EntityMap,
   ): Promise<{ blob: Blob; ext: string } | null> {
     const d = entry.doc
+    const values = Object.values(sharedMap)
     const office = d.rebuildDocx
       ? { rebuild: d.rebuildDocx, verify: verifyDocx, ext: 'docx' }
       : d.rebuildXlsx
         ? { rebuild: d.rebuildXlsx, verify: verifyXlsx, ext: 'xlsx' }
         : null
     if (office) {
-      const repls = entry.spans.filter((s) => s.active).map((s) => ({ start: s.start, end: s.end, text: po.get(s.id) ?? '' }))
+      const repls = replacementsForText(d.text, entry.spans, po, sharedMap)
       const blob = await office.rebuild(repls)
       const leaked = await office.verify(blob, values)
       if (leaked.length) return null
@@ -443,6 +506,7 @@ export default function App() {
     if (d.kind === 'pdf' && d.pages && d.bytes) {
       // Phase 2: lazy per-file rasterization -- render, verify, return; the canvas is freed inside
       // renderRedactedPdf so only ONE rasterized PDF is held at a time.
+      const { renderRedactedPdf, verifyNoText } = await import('./lib/pdfExport')
       const { blob, uncovered } = await renderRedactedPdf(d.bytes, d.pages, entry.spans.filter((s) => s.active), entry.regions.filter((r) => r.active))
       if (uncovered.length) return null
       const verdict = await verifyNoText(blob, values)
@@ -450,39 +514,42 @@ export default function App() {
       return { blob, ext: 'pdf' }
     }
     // text-ish: splice placeholders, then sweep any duplicate occurrence of a detected value (Finding C),
-    // consistent with redactedText, so a repeated value does not block the whole batch. The verify below
-    // stays as a fail-closed backstop (also covers any cross-file value).
-    const entryMap: EntityMap = {}
-    for (const s of entry.spans) if (s.active) { const ph = po.get(s.id); if (ph) entryMap[ph] = d.text.slice(s.start, s.end) }
-    const out = sweepKnownValues(redactBodyWith(d.text, entry.spans, po), entryMap)
-    if (values.some((v) => v && out.includes(v))) return null
+    // consistent with the active batch preview and using the FULL shared map, so a value detected in file 1
+    // is still masked if it appears in file 2 but detection missed that occurrence.
+    const out = redactedBatchText(d.text, entry.spans, po, sharedMap)
+    if (survivingValues(out, values).length) return null
     const ext = d.kind || 'txt'
     return { blob: new Blob([out], { type: (MIME[ext] ?? 'text/plain') + ';charset=utf-8' }), ext }
   }
 
-  // Splice a body's active spans -> their shared placeholders (uses the batch's per-entry placeholderOf so
-  // numbering is consistent with the shared map), keeping inactive spans' original text.
-  function redactBodyWith(text: string, entrySpans: typeof spans, po: Map<string, string>): string {
-    const active = entrySpans.filter((s) => s.active).sort((a, b) => a.start - b.start)
-    let out = ''
-    let last = 0
-    for (const s of active) {
-      out += text.slice(last, s.start) + (po.get(s.id) ?? '')
-      last = s.end
+  function fingerprintTextForEntry(entry: BatchEntry, po: Map<string, string>, sharedMap: EntityMap): string | null {
+    const d = entry.doc
+    if (d.kind === 'pdf') return null
+    return redactedBatchText(d.text, entry.spans, po, sharedMap)
+  }
+
+  async function buildBatchFingerprints(perEntry: ResolvedBatchEntry[], sharedMap: EntityMap): Promise<Fingerprint[]> {
+    const fingerprints: Fingerprint[] = []
+    for (const { entry, placeholderOf: po } of perEntry) {
+      const text = fingerprintTextForEntry(entry, po, sharedMap)
+      if (!text) continue
+      const placeholders = findPlaceholders(text)
+      if (placeholders.length) fingerprints.push({ fpExact: await sha256Hex(text), placeholders })
     }
-    return out + text.slice(last)
+    return fingerprints
   }
 
   // The shared batch entity map -> a SEPARATE local .json download. Mirrors the single-file "keep it local"
   // warning; this file holds originals and must NEVER be shared or placed inside the zip.
-  const downloadBatchMap = useCallback(() => {
-    const { sharedMap } = resolveBatch()
+  const downloadBatchMap = useCallback(async () => {
+    const { sharedMap, perEntry } = resolveBatch()
     download('entity-map.json', JSON.stringify(sharedMap, null, 2), 'application/json')
+    await persistBatchMap(sharedMap, await buildBatchFingerprints(perEntry, sharedMap))
     flash('Shared entity map saved -- contains original values for the whole batch, keep it local')
-  }, [resolveBatch, flash])
+  }, [resolveBatch, persistBatchMap, flash])
 
   // "Redacted PDF": for a real PDF, image-flatten + paint boxes + verify (fail-closed); for txt/docx, the
-  // print region (already only █-blocks, value-free) via the browser's Save-as-PDF.
+  // print region renders fixed-width blocks from the swept redacted text via the browser's Save-as-PDF.
   const handleRedactedPdf = useCallback(async () => {
     if (!doc) return
     if (doc.kind !== 'pdf' || !doc.pages || !doc.bytes) {
@@ -508,6 +575,7 @@ export default function App() {
     }
     setBusy(true)
     try {
+      const { renderRedactedPdf, verifyNoText } = await import('./lib/pdfExport')
       const { blob, uncovered } = await renderRedactedPdf(doc.bytes, doc.pages, spans.filter((s) => s.active), regions.filter((r) => r.active))
       if (uncovered.length) {
         flash(`BLOCKED: ${uncovered.length} detected value(s) could not be covered by a box (no matching position on the page). Not saved -- review in "Pages".`)
@@ -529,16 +597,8 @@ export default function App() {
   }, [doc, spans, regions, map, flash])
 
   function maskedForPrint(): string {
-    if (!doc) return ''
-    const active = spans.filter((s) => s.active).sort((a, b) => a.start - b.start)
-    let out = ''
-    let last = 0
-    for (const s of active) {
-      out += doc.text.slice(last, s.start)
-      out += '█'.repeat(Math.min(Math.max(s.end - s.start, 3), 30)) // solid blocks -- no original text in the PDF text layer
-      last = s.end
-    }
-    return out + doc.text.slice(last)
+    const redacted = redactedCurrentText()
+    return redacted ? maskPlaceholdersForPrint(redacted, map) : ''
   }
 
   function reset() {
@@ -571,6 +631,7 @@ export default function App() {
             onView={setView}
             busy={busy}
             gate={gate}
+            loadPct={loadPct}
             onAutoDetect={autoDetect}
             onDeepDetect={runDeep}
             onClearDetections={() => {
@@ -593,7 +654,11 @@ export default function App() {
                 Batch: {batch.length} {batch[0]?.kind} files · one shared map
               </span>
               <button className="btn btn-ghost" onClick={runDeepAll} disabled={busy}>
-                {batchProgress ? `Detecting ${batchProgress.done}/${batchProgress.total}…` : 'Deep detect all'}
+                {loadPct != null
+                  ? `Loading model ${loadPct}%`
+                  : batchProgress
+                    ? `Detecting ${batchProgress.done}/${batchProgress.total}…`
+                    : 'Deep detect all'}
               </button>
               {batchProgress && (
                 <button className="btn btn-ghost" onClick={cancelBatch}>
@@ -660,17 +725,19 @@ export default function App() {
           )}
           <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid var(--border)' }}>
             {view === 'pages' && doc.kind === 'pdf' && doc.bytes && doc.pages ? (
-              <PageView
-                bytes={doc.bytes}
-                pages={doc.pages}
-                assess={doc.assess ?? []}
-                spans={spans}
-                regions={regions}
-                selectedSpanId={selectedId}
-                onSelectSpan={setSelectedId}
-                onAddRegion={addRegion}
-                onDeleteRegion={deleteRegion}
-              />
+              <Suspense fallback={<div className="panel" style={{ margin: 20, padding: 16 }}>Loading pages...</div>}>
+                <PageView
+                  bytes={doc.bytes}
+                  pages={doc.pages}
+                  assess={doc.assess ?? []}
+                  spans={spans}
+                  regions={regions}
+                  selectedSpanId={selectedId}
+                  onSelectSpan={setSelectedId}
+                  onAddRegion={addRegion}
+                  onDeleteRegion={deleteRegion}
+                />
+              </Suspense>
             ) : view === 'layout' && layoutKind(doc.kind, doc.pages) ? (
               <LayoutCanvas
                 text={doc.text}

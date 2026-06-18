@@ -146,11 +146,26 @@ export function newPlaceholderIndex(): PlaceholderIndex {
   return { counters: {}, byKey: new Map(), map: {} }
 }
 
-// Dedup key: label + value normalized so trivially-different renderings of the SAME value
-// (case, surrounding whitespace) collapse to one placeholder. Kept deliberately conservative -- only
-// case-fold + trim + inner-whitespace-collapse -- so distinct values never accidentally merge.
+const CASE_SENSITIVE_LABEL_KEYS = new Set(['password', 'secret', 'username', 'accesstoken', 'apikey', 'filepath'])
+
+function labelKey(label: string): string {
+  return label.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+function isCaseSensitiveLabel(label: string): boolean {
+  return CASE_SENSITIVE_LABEL_KEYS.has(labelKey(label))
+}
+
+function labelFromPlaceholder(ph: string): string {
+  return /^<([A-Z][A-Z0-9_]*)_\d{3,}>$/.exec(ph)?.[1] ?? ''
+}
+
+// Dedup key: label + value normalized so trivially-different renderings of the SAME ordinary PII value
+// (case, surrounding whitespace) collapse to one placeholder. Case-significant labels skip the case fold.
+// Kept deliberately conservative -- trim + inner-whitespace-collapse -- so distinct values do not merge.
 function dedupKey(label: string, value: string): string {
-  const norm = value.trim().replace(/\s+/g, ' ').toLowerCase()
+  const compact = value.trim().replace(/\s+/g, ' ')
+  const norm = isCaseSensitiveLabel(label) ? compact : compact.toLowerCase()
   return `${label.toUpperCase()} ${norm}`
 }
 
@@ -205,33 +220,81 @@ const TOK = '[\\p{L}\\p{N}\\p{M}_]'
 // naive global replace is the known "sweep_known fragility"). The sweep runs ONLY on the literal segments
 // BETWEEN placeholders, so it can never rewrite a placeholder the positional pass already inserted. Over-
 // masking an already-detected value is the safe error; rehydrate() restores every occurrence regardless.
-export function sweepKnownValues(redacted: string, map: EntityMap): string {
+export function sweepKnownValues(
+  redacted: string,
+  map: EntityMap,
+  insertedPlaceholders?: ReadonlySet<string>,
+): string {
   const entries = Object.entries(map)
     .filter(([, v]) => v && v.trim().length >= MIN_SWEEP_LEN)
     .sort((a, b) => b[1].length - a[1].length) // longest first -> the alternation prefers the longer value
   if (!entries.length) return redacted
-  // value -> placeholder (values are unique in an EntityMap; longest-first insertion preserved by the Map)
-  const valueToPh = new Map<string, string>()
-  for (const [ph, v] of entries) if (!valueToPh.has(v)) valueToPh.set(v, ph)
-  // ONE combined left-to-right pass per gap. String.replace matches against the ORIGINAL gap and never
-  // re-scans the placeholders it inserts, so a later value can NOT rewrite a placeholder produced by an
-  // earlier match in the same sweep (the cascade bug Codex caught in the per-value loop). Longest-first
-  // alternation order makes the engine prefer the longer value at any position.
-  const alt = [...valueToPh.keys()].map((v) => v.replace(RE_SPECIAL, '\\$&')).join('|')
-  // Case-insensitive (parity with the Python gate, Codex HIGH-1): a known value must be masked regardless of
-  // case, so match with the 'i' flag and resolve the placeholder by the lowercased match. The map is already
-  // casefold-deduped (dedupKey lowercases), so each lowercased value maps to exactly one placeholder.
-  const re = new RegExp(`(?<!${TOK})(?:${alt})(?!${TOK})`, 'giu')
-  const valueToPhCi = new Map<string, string>()
-  for (const [v, ph] of valueToPh) if (!valueToPhCi.has(v.toLowerCase())) valueToPhCi.set(v.toLowerCase(), ph)
-  const sweepGap = (gap: string): string => gap.replace(re, (m) => valueToPhCi.get(m.toLowerCase()) ?? m)
+  const exactEntries = entries.filter(([ph]) => isCaseSensitiveLabel(labelFromPlaceholder(ph)))
+  const ciEntries = entries.filter(([ph]) => !isCaseSensitiveLabel(labelFromPlaceholder(ph)))
+
+  const protectedTokens = new Set(
+    [...new Set(redacted.match(PLACEHOLDER_TOKEN_RE) ?? [])].filter((t) =>
+      insertedPlaceholders ? insertedPlaceholders.has(t) : Object.prototype.hasOwnProperty.call(map, t),
+    ),
+  )
+
+  const sweepEntries = (
+    input: string,
+    passEntries: [string, string][],
+    caseSensitive: boolean,
+  ): { text: string; added: Set<string> } => {
+    if (!passEntries.length) return { text: input, added: new Set() }
+    const valueToPh = new Map<string, string>()
+    for (const [ph, v] of passEntries) {
+      const key = caseSensitive ? v : v.toLowerCase()
+      if (!valueToPh.has(key)) valueToPh.set(key, ph)
+    }
+    const alt = passEntries
+      .map(([, v]) => v)
+      .filter((v, i, vals) => vals.indexOf(v) === i)
+      .map((v) => v.replace(RE_SPECIAL, '\\$&'))
+      .join('|')
+    if (!alt) return { text: input, added: new Set() }
+    // ONE combined left-to-right pass per gap. String.replace matches against the ORIGINAL gap and never
+    // re-scans the placeholders it inserts, so a later value can NOT rewrite a placeholder produced by an
+    // earlier match in the same sweep. Longest-first alternation order prefers the longer value at any position.
+    const flags = caseSensitive ? 'gu' : 'giu'
+    const re = new RegExp(`(?<!${TOK})(?:${alt})(?!${TOK})`, flags)
+    const added = new Set<string>()
+    const sweepGap = (gap: string): string =>
+      gap.replace(re, (m) => {
+        const ph = valueToPh.get(caseSensitive ? m : m.toLowerCase())
+        if (!ph) return m
+        added.add(ph)
+        return ph
+      })
+    const protectedInText = [...protectedTokens]
+      .filter((t) => input.includes(t))
+      .sort((a, b) => b.length - a.length)
+    if (!protectedInText.length) return { text: sweepGap(input), added }
+    const tokenRe = new RegExp(protectedInText.map((p) => p.replace(RE_SPECIAL, '\\$&')).join('|'), 'g')
+    const parts = input.split(tokenRe)
+    const tokens = input.match(tokenRe) ?? []
+    let out = sweepGap(parts[0] ?? '')
+    for (let i = 0; i < tokens.length; i++) out += tokens[i] + sweepGap(parts[i + 1] ?? '')
+    return { text: out, added }
+  }
+
   // Split into literal gaps (swept) and placeholder tokens (preserved verbatim). split() with a global,
   // capture-free regex drops the delimiters, so parts.length === tokens.length + 1; reassemble interleaved.
-  const parts = redacted.split(PLACEHOLDER_TOKEN_RE)
-  const tokens = redacted.match(PLACEHOLDER_TOKEN_RE) ?? []
-  let out = sweepGap(parts[0] ?? '')
-  for (let i = 0; i < tokens.length; i++) out += tokens[i] + sweepGap(parts[i + 1] ?? '')
-  return out
+  // FINDING 2 (Codex 2026-06-17): protect ONLY the placeholders ACTUALLY inserted into THIS string, not every
+  // placeholder-SHAPED token. A placeholder-shaped string the USER typed (or that a known value itself contains)
+  // must be SWEPT like any other text, not skipped as if it were an inserted token and leak a repeated value next to
+  // it. (Parity with Python _sweep_known.)
+  // FINDING 3 (Codex 2026-06-17, batch leak): the caller (redactedText) passes the EXACT set of placeholders it just
+  // inserted (placeholderOf.values()). We MUST NOT infer "inserted" from the shared-batch map keys: in the batch /
+  // shared-index case the map holds placeholders from OTHER files, so a cross-file placeholder appearing inside THIS
+  // file's user content (e.g. a secret value that literally contains "<EMAIL_001>") would be wrongly protected and the
+  // containing value would leak. Fall back to map-key membership ONLY for direct callers that pass no set (single-doc,
+  // where map IS this doc's map).
+  const exact = sweepEntries(redacted, exactEntries, true)
+  for (const ph of exact.added) protectedTokens.add(ph)
+  return sweepEntries(exact.text, ciEntries, false).text
 }
 
 // Redacted text with <LABEL_NNN> placeholders (round-trip-capable). Inactive spans keep their original text.
@@ -246,14 +309,17 @@ export function redactedText(text: string, spans: Span[], index?: PlaceholderInd
     last = s.end
   }
   out += text.slice(last)
-  // Finding C hardening: catch any duplicate occurrence positional redaction missed (token-boundary-safe).
-  return sweepKnownValues(out, map)
+  // Finding C hardening: catch any duplicate occurrence positional redaction missed (token-boundary-safe). Pass the
+  // EXACT placeholders inserted in THIS call (placeholderOf.values()) so the sweep protects only those, never a
+  // cross-file placeholder from the shared batch map that happens to appear in this doc's user content (Codex F3).
+  return sweepKnownValues(out, map, new Set(placeholderOf.values()))
 }
 
 export function rehydrate(text: string, map: EntityMap): string {
-  let out = text
-  for (const [ph, v] of Object.entries(map)) out = out.split(ph).join(v)
-  return out
+  const tokens = Object.keys(map).filter((ph) => text.includes(ph))
+  if (!tokens.length) return text
+  const re = new RegExp(tokens.sort((a, b) => b.length - a.length).map((ph) => ph.replace(RE_SPECIAL, '\\$&')).join('|'), 'g')
+  return text.replace(re, (ph) => map[ph])
 }
 
 // Privacy-safe per-span provenance (the appliance's explain() analogue): offsets + metadata only,

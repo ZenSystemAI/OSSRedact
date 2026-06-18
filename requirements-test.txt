@@ -1,7 +1,7 @@
 # Torch-free test dependencies (finding F7: reproducible Python env for the test path).
 # This pins ONLY what the CI gate-floor job and the pure-Python unit tests need; it is the
 # verified content of the local .venv-test. The full GPU inference stack (torch,
-# onnxruntime, transformers) is environment-specific to the P620 box and the deployed
+# onnxruntime, transformers) is environment-specific to the GPU box and the deployed
 # appliance, and is intentionally NOT pinned here -- pin it where the model actually runs.
 #
 # Reproduce the test env:
@@ -14,3 +14,4 @@
 pytest==9.1.0
 numpy==2.4.6
 scipy==1.17.1
+cryptography==49.0.0

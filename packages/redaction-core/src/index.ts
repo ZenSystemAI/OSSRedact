@@ -38,4 +38,4 @@ export {
 
 // Label metadata + tier classification
 export type { LabelMeta, Tier } from './labels.js'
-export { labelMeta, labelTier, MANUAL_LABELS } from './labels.js'
+export { LABEL_REGISTRY, labelMeta, labelTier, MANUAL_LABELS } from './labels.js'

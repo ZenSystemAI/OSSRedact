@@ -2,12 +2,12 @@
 // (`types.ts:25` -- placeholder -> original value, sensitive), so it stays on THIS device only and
 // NEVER travels inside a shared/redacted artifact. This module persists the map keyed by a CONTENT
 // fingerprint of the REDACTED (placeholder-bearing) body -- never the original text, never the upload
-// filename -- so a redacted file that comes back can auto-match its map with no separate .json upload.
+// filename -- so an unchanged redacted file can auto-match its map with no separate .json upload.
 //
 // Design notes the next maintainer must keep:
 // - The fingerprint MUST be over the redacted body, never the original. Hashing originals would itself
 //   be a (weak) leak and would not match the returned (colleague-edited) file anyway.
-// - Raw IndexedDB is used (browser-native, no runtime dep). DB `sparx-maps`, store `entityMaps`,
+// - Raw IndexedDB is used (browser-native, no runtime dep). DB `ossredact-maps`, store `entityMaps`,
 //   keyPath `id`. `id` == `fpExact`, so a re-redact of the same body is idempotent (matters under
 //   React StrictMode, which double-invokes effects in dev -- main.tsx).
 // - The record carries a forward-compatible `fingerprints` array (one entry per source body) so a
@@ -16,14 +16,14 @@
 
 import type { EntityMap } from './types'
 
-const DB_NAME = 'sparx-maps'
+const DB_NAME = 'ossredact-maps'
 const STORE = 'entityMaps'
 const DB_VERSION = 1
 
 // Opt-in preference key. ONLY a boolean preference lives in localStorage -- never the map (which holds
 // originals). Default ON for usability: when OFF, putMap callers must write nothing. Shared by the
 // redact-side write gate (App.tsx) and the toggle UI (Dropzone.tsx) so there is one source of truth.
-const REMEMBER_KEY = 'sparx-remember-maps'
+const REMEMBER_KEY = 'ossredact-remember-maps'
 
 export function getRemember(): boolean {
   try {
@@ -79,12 +79,33 @@ function tx(db: IDBDatabase, mode: IDBTransactionMode): IDBObjectStore {
 }
 
 // Persist a record. Idempotent on `id` (use `fpExact` as `id`): a re-redact of the same body just
-// overwrites with identical content, so StrictMode's double-invoke does not create duplicates.
+// overwrites with identical content, so StrictMode's double-invoke does not create duplicates. If two
+// different originals produce the same redacted body, keep both records under distinct IDs; matching will
+// refuse an ambiguous restore rather than rehydrate with the wrong map.
+function canonicalMap(map: EntityMap): string {
+  return JSON.stringify(Object.entries(map).sort(([a], [b]) => a.localeCompare(b)))
+}
+
+function sameMap(a: EntityMap, b: EntityMap): boolean {
+  return canonicalMap(a) === canonicalMap(b)
+}
+
+async function collisionRecordId(rec: MapRecord): Promise<string> {
+  const base = rec.fpExact || rec.id
+  const mapHash = await sha256Hex(canonicalMap(rec.map))
+  return `${base}:map-${mapHash.slice(0, 16)}`
+}
+
 export async function putMap(rec: MapRecord): Promise<void> {
+  const records = await allMaps()
+  const sameId = records.find((r) => r.id === rec.id)
+  const safeRec = sameId && !sameMap(sameId.map, rec.map)
+    ? { ...rec, id: await collisionRecordId(rec) }
+    : rec
   const db = await openDb()
   try {
     await new Promise<void>((resolve, reject) => {
-      const req = tx(db, 'readwrite').put(rec)
+      const req = tx(db, 'readwrite').put(safeRec)
       req.onsuccess = () => resolve()
       req.onerror = () => reject(req.error)
     })
@@ -127,12 +148,18 @@ function allResolvable(rec: MapRecord, present: string[]): boolean {
   return present.every((ph) => ph in rec.map)
 }
 
+function unambiguousMatch(candidates: MapRecord[], present: string[]): MapRecord | null {
+  if (!candidates.length) return null
+  const signatures = new Set(
+    candidates.map((rec) => JSON.stringify(present.map((ph) => [ph, rec.map[ph]]))),
+  )
+  return signatures.size === 1 ? candidates[0] : null
+}
+
 // Match a returned file to a stored map.
-// Priority: exact `fpExact` hit (own copy, untouched body) -> else the stored record with the best
-// placeholder-subset overlap where ALL present placeholders are resolvable in that record's map.
-// If no single record resolves every survivor, return null and let the caller fall back to manual
-// upload. `present` must be non-empty for a subset match (a file with no surviving placeholders has
-// nothing to restore).
+// Exact fingerprint match only: placeholder tokens are scoped per redaction (`<EMAIL_001>`, etc.), so
+// placeholder-subset matching can restore the wrong local value into an unrelated redacted document.
+// Edited or cross-device files must use the manual entity-map upload fallback.
 export async function matchByFingerprint(
   fpExact: string,
   presentPlaceholders: string[],
@@ -143,25 +170,12 @@ export async function matchByFingerprint(
   // 1) exact own-copy fast path: the redacted body is byte-identical to what was stored.
   // Guard it with allResolvable too -- a true own-copy always resolves, and this keeps the
   // invariant uniform (never restore an unresolvable survivor).
-  const exact = records.find(
+  const exact = records.filter(
     (r) =>
       (r.fpExact === fpExact || (r.fingerprints ?? []).some((f) => f.fpExact === fpExact)) &&
       allResolvable(r, presentPlaceholders),
   )
-  if (exact) return exact
-
-  // 2) placeholder-subset match: the colleague edited the body so the hash will not match. A record
-  // is a candidate iff at least one placeholder survives AND every survivor is resolvable in its map.
-  if (!presentPlaceholders.length) return null
-  let best: MapRecord | null = null
-  let bestOverlap = 0
-  for (const r of records) {
-    if (!allResolvable(r, presentPlaceholders)) continue
-    const overlap = presentPlaceholders.filter((ph) => ph in r.map).length
-    if (overlap >= 1 && overlap > bestOverlap) {
-      best = r
-      bestOverlap = overlap
-    }
-  }
-  return best
+  const exactHit = unambiguousMatch(exact, presentPlaceholders)
+  if (exactHit) return exactHit
+  return null
 }

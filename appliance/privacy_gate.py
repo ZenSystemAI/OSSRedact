@@ -311,8 +311,19 @@ _PLACEHOLDER_TOKEN_RE = re.compile(r'<[A-Z][A-Z0-9_]*_\d{3,}>')
 # Minimum value length to sweep -- below this a value is too generic to mask globally without spurious
 # matches (and tiny tokens are rarely uniquely-identifying on their own). Mirrors the egress proxy len>=4.
 _MIN_SWEEP_LEN = 4
+_CASE_SENSITIVE_LABELS = {'password', 'secret', 'username', 'access_token', 'api_key', 'file_path'}
 
-def _build_known_re(values):
+
+def _case_sensitive_label(label):
+    return str(label).casefold() in _CASE_SENSITIVE_LABELS
+
+
+def _dedup_key(label, value):
+    norm = value if _case_sensitive_label(label) else value.casefold()
+    return (str(label).casefold(), norm)
+
+
+def _build_known_re(values, ignore_case=True):
     """Regex over already-known session entity VALUES (len>=4, word-boundary-guarded, longest-first).
     The known-entity backstop (Finding C): positional redaction masks only DETECTED span positions, so a value
     that repeats across a long/multi-page document (footers, repeated headers, line items) leaks at the
@@ -321,8 +332,9 @@ def _build_known_re(values):
     NOTE: Python stdlib re has no \\p{M}; we use \\w boundaries (letter/digit/underscore, ASCII-by-default), so a
     DECOMPOSED combining accent immediately adjacent to a value is not part of the guard. The egress proxy twin
     has the same limitation; the JS twin uses \\p{M}. Acceptable: over-masking is the safe error here anyway.
-    Compiled IGNORECASE (Codex HIGH-1): a known value must be masked regardless of case, else "John" detected
-    once leaks as "JOHN"/"john" elsewhere. _sweep_known resolves the placeholder via a casefolded lookup."""
+    By default this is compiled IGNORECASE (Codex HIGH-1): ordinary known values must be masked regardless of
+    case, else "John" detected once leaks as "JOHN"/"john" elsewhere. Case-significant labels use an exact-case
+    companion regex so credentials and paths that differ only by case stay lossless."""
     vals = [v for v in values if v and len(v) >= _MIN_SWEEP_LEN]
     if not vals:
         return None
@@ -335,25 +347,29 @@ def _build_known_re(values):
         if v[-1].isalnum():
             esc = esc + r'(?!\w)'    # ...nor one that ends alnum
         parts.append(esc)
-    return re.compile('|'.join(parts), re.IGNORECASE)
+    return re.compile('|'.join(parts), re.IGNORECASE if ignore_case else 0)
 
-def _sweep_known(text, known_re, value_to_placeholder):
+def _sweep_known(text, known_re, value_to_placeholder, protected_placeholders=None, case_sensitive=False):
     """Replace every literal occurrence of a known value with its EXISTING placeholder (never mint a new one),
     running ONLY on the literal segments BETWEEN already-inserted placeholders so it can never rewrite a
     placeholder the positional pass produced. Returns (text, n_swept). Over-masking an already-detected value
     is the safe error; rehydrate() restores every occurrence regardless of which pass inserted it."""
     if known_re is None:
         return text, 0
-    # Case-insensitive resolution (Codex HIGH-1): known_re matches any case, so look up the placeholder by the
-    # casefolded match. If two differently-cased values collide on casefold, first-wins is fine -- it still
-    # masks, and rehydrate restores a same-PII value.
-    cf_lookup = {}
-    for v, ph in value_to_placeholder.items():
-        cf_lookup.setdefault(v.casefold(), ph)
+    # Ordinary PII resolves case-insensitively. Case-significant labels resolve by exact text so two credentials
+    # that differ only by case never collapse to one placeholder during the repeated-value sweep.
+    if case_sensitive:
+        lookup = dict(value_to_placeholder)
+        lookup_key = lambda s: s
+    else:
+        lookup = {}
+        for v, ph in value_to_placeholder.items():
+            lookup.setdefault(v.casefold(), ph)
+        lookup_key = lambda s: s.casefold()
     n = 0
     def repl(m):
         nonlocal n
-        ph = cf_lookup.get(m.group().casefold())
+        ph = lookup.get(lookup_key(m.group()))
         if ph is None:
             return m.group()
         n += 1
@@ -361,8 +377,17 @@ def _sweep_known(text, known_re, value_to_placeholder):
     # Split into literal gaps (swept) and placeholder tokens (preserved verbatim). A capture-free split drops
     # the delimiters, so parts.length == tokens.length + 1; reassemble interleaved so a value equal to a
     # placeholder token can never corrupt the token itself.
-    parts = _PLACEHOLDER_TOKEN_RE.split(text)
-    tokens = _PLACEHOLDER_TOKEN_RE.findall(text)
+    # Protect ONLY the placeholders THIS redaction actually inserted (value_to_placeholder.values()), NOT the generic
+    # placeholder SHAPE. Splitting on the generic _PLACEHOLDER_TOKEN_RE treats placeholder-shaped text that was in the
+    # ORIGINAL user content (a literal "<EMAIL_001>" the user wrote, or a known value that itself contains one) as an
+    # inserted token and SKIPS sweeping it -> a repeated known value sitting in/next to such text leaks (Codex FINDING
+    # 2, 2026-06-17). The inserted placeholders are known exactly, so split on THEM and sweep every other segment.
+    inserted = sorted(set(protected_placeholders or value_to_placeholder.values()), key=len, reverse=True)
+    if not inserted:
+        return known_re.sub(repl, text), n
+    token_re = re.compile('|'.join(re.escape(ph) for ph in inserted))
+    parts = token_re.split(text)
+    tokens = token_re.findall(text)
     out = [known_re.sub(repl, parts[0])]
     for i, tok in enumerate(tokens):
         out.append(tok)
@@ -384,31 +409,36 @@ class PrivacyGate:
     def redact(self, text, min_score=0.5):
         spans = self.detect(text, min_score)
         mapping = {}; counters = defaultdict(int); out = []; last = 0
-        # Dedup placeholders by CASEFOLDED value (Codex 2026-06-17): case variants of the same string are the
-        # same sensitive token, so they share ONE placeholder. This keeps the case-insensitive Finding-C sweep
-        # coherent -- the value->placeholder map can never hold two case-only-different values pointing at
-        # DIFFERENT placeholders (which would restore the wrong original on rehydrate). Mirrors the TS twin
-        # (buildEntityMap dedupKey lowercases) and the EntityMap session dedup.
-        cf_to_ph = {}
+        # Dedup placeholders by label + value. Ordinary PII keeps casefold dedup so "Jane"/"JANE" and
+        # case-variant emails share a stable placeholder. Case-significant labels (credentials and paths) keep
+        # exact-case values distinct so rehydrate is lossless for "AbC123" vs "abc123".
+        seen = {}
+        label_by_ph = {}
         for s in spans:
             value = text[s['start']:s['end']]
-            ph = cf_to_ph.get(value.casefold())
+            ph = seen.get(_dedup_key(s['label'], value))
             if ph is None:
                 counters[s['label']] += 1
                 # Canonical angle-bracket placeholder (entity_map.py:116 / gate_service.py:94 / redaction-core):
                 # UPPERCASE label, underscores preserved, 3-digit zero-padded counter. round-trips via rehydrate().
                 ph = f"<{s['label'].upper()}_{counters[s['label']]:03d}>"
-                cf_to_ph[value.casefold()] = ph
+                seen[_dedup_key(s['label'], value)] = ph
                 mapping[ph] = value
+                label_by_ph[ph] = s['label']
             out.append(text[last:s['start']]); out.append(ph); last = s['end']
         out.append(text[last:])
         redacted = ''.join(out)
         # Finding C backstop: after the positional pass, sweep the redacted text for any repeated occurrence of
         # an already-known value the detector missed at OTHER positions, masking it with its EXISTING placeholder.
-        # The map is now collision-free by casefold, so the sweep's case-insensitive lookup resolves uniquely.
-        value_to_placeholder = {v: ph for ph, v in mapping.items()}
-        known_re = _build_known_re(value_to_placeholder.keys())
-        redacted, _ = _sweep_known(redacted, known_re, value_to_placeholder)
+        # Ordinary PII sweeps case-insensitively. Credentials/paths sweep exact-case only to preserve lossless
+        # rehydration when two distinct known values differ only by case.
+        exact_v2p = {v: ph for ph, v in mapping.items() if _case_sensitive_label(label_by_ph.get(ph, ''))}
+        ci_v2p = {v: ph for ph, v in mapping.items() if not _case_sensitive_label(label_by_ph.get(ph, ''))}
+        protected = set(mapping.keys())
+        redacted, _ = _sweep_known(redacted, _build_known_re(exact_v2p.keys(), ignore_case=False),
+                                   exact_v2p, protected_placeholders=protected, case_sensitive=True)
+        redacted, _ = _sweep_known(redacted, _build_known_re(ci_v2p.keys(), ignore_case=True),
+                                   ci_v2p, protected_placeholders=protected)
         return redacted, mapping, spans
     @staticmethod
     def rehydrate(text, mapping):
@@ -449,9 +479,9 @@ def gate_eval(gate, path, min_score=0.5):
 
 def show(gate, s, min_score=0.5):
     red, mp, spans = gate.redact(s, min_score)
-    print('IN  :', s)
+    print('INPUT_CHARS:', len(s))
     print('OUT :', red)
-    print('MAP :', {k: v for k, v in mp.items()})
+    print('MAP_KEYS:', sorted(mp))
     print('TIERS:', [(sp['label'], 't%d' % sp['tier']) for sp in spans])
     print('ROUNDTRIP OK:', PrivacyGate.rehydrate(red, mp) == s)
     print()
@@ -459,7 +489,7 @@ def show(gate, s, min_score=0.5):
 if __name__ == '__main__':
     import argparse, sys
     ap = argparse.ArgumentParser()
-    ap.add_argument('--model', default='/home/steven/Sparx/models/privacy-filters/pii-npu-xlmr-quebec-v1')
+    ap.add_argument('--model', default='models/pii-xlmr-quebec')
     ap.add_argument('--eval', default='')
     ap.add_argument('--text', default='', help='redact this string and exit')
     ap.add_argument('--repl', action='store_true', help='load model once, then redact each line of stdin')
@@ -487,11 +517,4 @@ if __name__ == '__main__':
         "Le service tourne sur le port 8080, GPU 3090, aucune donnée personnelle ici.",
     ]
     for s in samples:
-        red, mp, spans = gate.redact(s)
-        print('IN  :', s)
-        print('OUT :', red)
-        print('MAP :', {k: v for k, v in mp.items()})
-        print('TIERS:', [(text_lab['label'], 't%d' % text_lab['tier']) for text_lab in spans])
-        rehyd = PrivacyGate.rehydrate(red, mp)
-        print('ROUNDTRIP OK:', rehyd == s)
-        print()
+        show(gate, s, args.min_score)

@@ -2,16 +2,16 @@
 // puts the original values back into the surviving placeholders while keeping the colleague's edits. Everything
 // runs in-browser; files stay on the machine.
 //
-// DEFAULT path (no separate upload): if this device redacted the file, its entity map was saved locally
-// (IndexedDB, keyed by the fingerprint of the REDACTED body -- see mapStore.ts). When the edited file is
-// dropped, we scan its surviving placeholders + content fingerprint and AUTO-MATCH the stored map. The
-// matched map (the originals) never leaves this device.
+// DEFAULT path (no separate upload): if this device redacted the exact file, its entity map was saved locally
+// (IndexedDB, keyed by the fingerprint of the REDACTED body -- see mapStore.ts). When the file is dropped,
+// we scan its surviving placeholders + content fingerprint and AUTO-MATCH only an exact stored fingerprint.
+// The matched map (the originals) never leaves this device.
 //
 // FALLBACK path (kept forever): no stored map matches (different machine, cleared store, private browsing)
 // -> the manual entity-map .json picker appears and the original two-file flow still works.
 
 import { useRef, useState } from 'react'
-import { rehydrateFile, downloadBlob, findPlaceholders } from '../lib/formats'
+import { rehydrateFile, downloadBlob, findPlaceholders, validateEntityMap } from '../lib/formats'
 import { loadDocx } from '../lib/docx'
 import { loadXlsx } from '../lib/xlsx'
 import { sha256Hex, matchByFingerprint, type MapRecord } from '../lib/mapStore'
@@ -42,8 +42,9 @@ export default function Rehydrate() {
   const docRef = useRef<HTMLInputElement>(null)
   const mapRef = useRef<HTMLInputElement>(null)
 
-  // On docFile pick: try to auto-match a locally-stored map. Hit -> one-click restore (no .json). Miss ->
-  // reveal the manual map picker. PDF / unreadable -> reveal the manual picker too (it will error clearly).
+  // On docFile pick: try to auto-match a locally-stored map by exact redacted-body fingerprint. Hit ->
+  // one-click restore (no .json). Miss -> reveal the manual map picker. PDF / unreadable -> reveal the
+  // manual picker too (it will error clearly).
   async function tryAutoMatch(file: File) {
     setMatched(null)
     setNoMatch(false)
@@ -78,16 +79,13 @@ export default function Rehydrate() {
         setStatus({ kind: 'err', msg: 'The saved map on this device does not resolve every placeholder. Upload the entity-map .json instead.' })
         return
       }
-      const { blob, filename, restored, unknown } = await rehydrateFile(docFile, matched.map)
+      const { blob, filename, restored } = await rehydrateFile(docFile, matched.map)
       downloadBlob(filename, blob)
-      const warn = unknown.length
-        ? ` ${unknown.length} placeholder(s) had no value in the map and were left as-is (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? '…' : ''}).`
-        : ''
       setStatus({
         kind: 'ok',
         msg: restored
-          ? `Restored ${restored} value(s) from this device's saved map and saved ${filename}.${warn}`
-          : `No placeholders matched the saved map -- nothing to restore.${warn}`,
+          ? `Restored ${restored} value(s) from this device's saved map and saved ${filename}.`
+          : `No placeholders matched the saved map -- nothing to restore.`,
       })
     } catch (e) {
       setStatus({ kind: 'err', msg: e instanceof Error ? e.message : String(e) })
@@ -103,25 +101,21 @@ export default function Rehydrate() {
     setStatus({ kind: 'idle', msg: '' })
     try {
       const raw = await mapFile.text()
-      let map: EntityMap
+      let parsed: unknown
       try {
-        map = JSON.parse(raw)
+        parsed = JSON.parse(raw)
       } catch {
         throw new Error('The entity map is not valid JSON. Use the .json saved from “Download entity map”.')
       }
-      if (!map || typeof map !== 'object' || Array.isArray(map))
-        throw new Error('The entity map must be a JSON object of placeholder → value.')
+      const map: EntityMap = validateEntityMap(parsed)
 
-      const { blob, filename, restored, unknown } = await rehydrateFile(docFile, map)
+      const { blob, filename, restored } = await rehydrateFile(docFile, map)
       downloadBlob(filename, blob)
-      const warn = unknown.length
-        ? ` ${unknown.length} placeholder(s) had no value in the map and were left as-is (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? '…' : ''}).`
-        : ''
       setStatus({
         kind: 'ok',
         msg: restored
-          ? `Restored ${restored} value(s) from the uploaded map and saved ${filename}.${warn}`
-          : `No placeholders matched the map -- nothing to restore.${warn}`,
+          ? `Restored ${restored} value(s) from the uploaded map and saved ${filename}.`
+          : `No placeholders matched the map -- nothing to restore.`,
       })
     } catch (e) {
       setStatus({ kind: 'err', msg: e instanceof Error ? e.message : String(e) })
@@ -133,10 +127,10 @@ export default function Rehydrate() {
   return (
     <div className="w-full max-w-2xl flex flex-col gap-4">
       <p className="text-sm" style={{ color: 'var(--color-muted)', lineHeight: 1.6 }}>
-        Got an edited copy back from a colleague? Drop the edited document. If you redacted it on this device,
-        the saved map is matched automatically and the original values go back into the placeholders -- no
-        separate file needed. If there is no saved map (another machine, cleared storage), upload the entity-map
-        .json you saved when you redacted it. Every edit your colleague made is kept.
+        Got a redacted or edited copy back from a colleague? Drop the document. If this exact redacted file was
+        created on this device, the saved map is matched automatically and the original values go back into the
+        placeholders -- no separate file needed. For edited files, another machine, or cleared storage, upload
+        the entity-map .json you saved when you redacted it. Every edit your colleague made is kept.
       </p>
 
       <FilePick

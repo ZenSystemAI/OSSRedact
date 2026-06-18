@@ -36,7 +36,7 @@ expenses-eval/
 .claude/
 .playwright-mcp/
 
-# Appliance runtime data + artifacts (Beelink egress proxy -- never commit)
+# Appliance runtime data + artifacts (egress proxy -- never commit)
 # SENSITIVE: encrypted session entity maps + .mapkey AES key
 maps/
 # model weights (singular dir on the host)

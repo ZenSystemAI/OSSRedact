@@ -4,6 +4,13 @@
   "description": "Tier-0 deterministic PII detector and span/redaction core for OSSRedact. Pure TypeScript, browser-safe, zero runtime dependencies.",
   "license": "MIT",
   "author": "ZenSystemAI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZenSystemAI/OSSRedact.git",
+    "directory": "packages/redaction-core"
+  },
+  "homepage": "https://github.com/ZenSystemAI/OSSRedact/tree/main/packages/redaction-core#readme",
+  "bugs": "https://github.com/ZenSystemAI/OSSRedact/issues",
   "keywords": [
     "pii",
     "redaction",
@@ -43,5 +50,8 @@
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "overrides": {
+    "esbuild": "0.27.2"
   }
 }

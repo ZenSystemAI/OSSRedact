@@ -42,6 +42,19 @@ function parseSst(xml: string | null): string[] {
   return Array.from(doc.getElementsByTagName('si')).map((si) => elementText(si))
 }
 
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+function searchableXml(xml: string): string {
+  return decodeXmlEntities(xml) + '\n' + decodeXmlEntities(xml.replace(/<[^>]+>/g, ''))
+}
+
 // displayed text of one <c> cell ('' when it has none we care about: booleans, errors, empty)
 function cellText(c: Element, sst: string[]): string {
   const t = c.getAttribute('t')
@@ -198,6 +211,7 @@ export async function loadXlsx(file: File): Promise<LoadedXlsx> {
     if (zip.file('xl/sharedStrings.xml')) zip.file('xl/sharedStrings.xml', SST_EMPTY)
     await scrubComments(zip)
     await scrubDocProps(zip)
+    await scrubWorkbookMetadata(zip)
     return zip.generateAsync({ type: 'blob', mimeType: XLSX_MIME })
   }
 
@@ -228,8 +242,10 @@ async function scrubDocProps(zip: JSZip) {
     if (!/^docProps\/.*\.xml$/.test(name)) continue
     const xml = await zip.file(name)!.async('string')
     const doc = new DOMParser().parseFromString(xml, 'application/xml')
+    let customPropN = 0
     for (const el of Array.from(doc.getElementsByTagName('*'))) {
       const local = el.localName
+      if (local === 'property') el.setAttribute('name', `property-${++customPropN}`)
       // Blank named PII tags (core.xml + app.xml)
       if (DOCPROPS_PII_TAGS.has(local)) {
         el.textContent = ''
@@ -244,6 +260,17 @@ async function scrubDocProps(zip: JSZip) {
   }
 }
 
+async function scrubWorkbookMetadata(zip: JSZip) {
+  const path = 'xl/workbook.xml'
+  const xml = await zip.file(path)?.async('string')
+  if (!xml) return
+  const doc = new DOMParser().parseFromString(xml, 'application/xml')
+  Array.from(doc.getElementsByTagName('sheet')).forEach((sheet, i) => {
+    sheet.setAttribute('name', `Sheet${i + 1}`)
+  })
+  zip.file(path, new XMLSerializer().serializeToString(doc))
+}
+
 // Comment text can hold PII the cell grid doesn't show. Blank the text of every comment part (legacy <t> runs +
 // threaded-comment <text> nodes); the structure stays valid, the words are gone.
 async function scrubComments(zip: JSZip) {
@@ -253,7 +280,12 @@ async function scrubComments(zip: JSZip) {
     const xml = await zip.file(name)!.async('string')
     const doc = new DOMParser().parseFromString(xml, 'application/xml')
     for (const el of Array.from(doc.getElementsByTagName('*'))) {
-      if (el.localName === 't' || el.localName === 'text') el.textContent = ''
+      if (el.localName === 't' || el.localName === 'text' || el.localName === 'author') el.textContent = ''
+      for (const attr of Array.from(el.attributes)) {
+        if (['author', 'displayName', 'name', 'initials'].includes(attr.localName)) {
+          el.setAttributeNS(attr.namespaceURI, attr.name, '')
+        }
+      }
     }
     zip.file(name, new XMLSerializer().serializeToString(doc))
   }
@@ -269,13 +301,7 @@ export async function verifyXlsx(blob: Blob, values: string[]): Promise<string[]
     if (zip.files[name].dir) continue
     if (!/^(xl|docProps)\/.*\.xml$/.test(name)) continue
     const xml = await zip.file(name)!.async('string')
-    all += xml.replace(/<[^>]+>/g, '')
+    all += searchableXml(xml)
   }
-  all = all
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&')
   return values.filter((v) => v && all.includes(v))
 }

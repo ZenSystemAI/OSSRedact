@@ -154,6 +154,16 @@ describe('round-trip', () => {
     expect(restored).toBe(t)
   })
 
+  it('rehydrate does not rescan placeholder-shaped text inside restored values', () => {
+    const map = {
+      '<SECRET_001>': 'tok_<EMAIL_001>_x',
+      '<EMAIL_001>': 'alice@example.test',
+    }
+    expect(rehydrate('secret=<SECRET_001> email=<EMAIL_001>', map)).toBe(
+      'secret=tok_<EMAIL_001>_x email=alice@example.test',
+    )
+  })
+
   it('inactive spans are skipped by redactedText and do not appear in buildEntityMap', () => {
     const t = 'Call 514-555-0100 or 514-555-0101 for help.'
     const spans: Span[] = [
@@ -227,6 +237,24 @@ describe('buildEntityMap carry-in (shared index)', () => {
     const c = buildEntityMap(t3, s3, idx).placeholderOf.get('3')
     expect(a).toBe(b)
     expect(c).not.toBe(a)
+  })
+
+  it('case-sensitive password variants stay distinct and round-trip losslessly', () => {
+    const t = 'primary AbC123xy backup abc123xy repeat abc123xy'
+    const p1 = t.indexOf('AbC123xy')
+    const p2 = t.indexOf('abc123xy')
+    const spans: Span[] = [
+      span(p1, p1 + 'AbC123xy'.length, 'password'),
+      span(p2, p2 + 'abc123xy'.length, 'password'),
+    ]
+    spans[0].id = 'p1'; spans[1].id = 'p2'
+    const { map } = buildEntityMap(t, spans)
+    const out = redactedText(t, spans)
+    expect(map['<PASSWORD_001>']).toBe('AbC123xy')
+    expect(map['<PASSWORD_002>']).toBe('abc123xy')
+    expect((out.match(/<PASSWORD_001>/g) || []).length).toBe(1)
+    expect((out.match(/<PASSWORD_002>/g) || []).length).toBe(2)
+    expect(rehydrate(out, map)).toBe(t)
   })
 
   it('no index = legacy per-document behaviour (fresh counters, byte-for-byte unchanged)', () => {
@@ -322,6 +350,41 @@ describe('sweepKnownValues (repeated-value masking)', () => {
     const out = sweepKnownValues('Footer a@b.example and EMAIL_001', { '<EMAIL_001>': 'a@b.example', '<ORG_001>': 'EMAIL_001' })
     expect(out).toBe('Footer <EMAIL_001> and <ORG_001>')
     expect(out).not.toMatch(/<</)
+  })
+
+  it('sweeps a repeated value even when USER content holds a placeholder-shaped token (Finding 2)', () => {
+    // 'sk_live_<TOKEN_999>_x' is USER content that contains a <LABEL_NNN>-shaped substring NOT in the map. The old
+    // sweep split on the GENERIC placeholder shape and treated '<TOKEN_999>' as an inserted token, skipping the
+    // value around it -> the repeated occurrence leaked. Splitting on only the ACTUALLY-inserted placeholders fixes it.
+    const value = 'sk_live_<TOKEN_999>_x'
+    const text = value + ' rotated to ' + value
+    const out = redactedText(text, [span(0, value.length, 'secret')]) // only the FIRST occurrence detected
+    expect(out).not.toContain(value)
+    expect((out.match(/<SECRET_001>/g) || []).length).toBe(2)
+  })
+
+  it('batch sweep does NOT protect a CROSS-FILE placeholder appearing in this file content (Finding 3)', () => {
+    // Shared-index batch: file 1 inserts <EMAIL_001> into the shared map. File 2 holds a secret value that LITERALLY
+    // contains "<EMAIL_001>" (a cross-file placeholder) and repeats. The repeated occurrence must be swept -- it must
+    // NOT be protected just because <EMAIL_001> is a key in the shared batch map (it was inserted in a DIFFERENT file).
+    const idx = newPlaceholderIndex()
+    const e = span(8, 25, 'email'); e.id = 'e1'
+    const f1 = redactedText('Contact user@example.test', [e], idx)
+    expect(f1).toContain('<EMAIL_001>')
+    const secret = 'sk_live_<EMAIL_001>_x'
+    const s = span(0, secret.length, 'secret'); s.id = 's1'
+    const out2 = redactedText(secret + ' rotated to ' + secret, [s], idx)
+    expect(out2).not.toContain(secret)
+    expect((out2.match(/<SECRET_001>/g) || []).length).toBe(2)
+  })
+
+  it('uses exact-case sweep for case-sensitive credentials', () => {
+    const out = sweepKnownValues('again abc123xy and Jane Roy and JANE ROY', {
+      '<PASSWORD_001>': 'AbC123xy',
+      '<PASSWORD_002>': 'abc123xy',
+      '<PERSON_001>': 'Jane Roy',
+    })
+    expect(out).toBe('again <PASSWORD_002> and <PERSON_001> and <PERSON_001>')
   })
 })
 

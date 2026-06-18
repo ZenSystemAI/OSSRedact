@@ -1,4 +1,4 @@
-# qc-pii: Measured Results (real, for Track D benchmarks)
+# OSSRedact: Measured Results (real, for Track D benchmarks)
 
 > All numbers MEASURED 2026-06-14 on-box, not estimated. Recall = leak-prevention (label-agnostic substring
 > match); clean_fp = over-redactions on negative rows. Source of truth for the launch benchmark tables/graphs.

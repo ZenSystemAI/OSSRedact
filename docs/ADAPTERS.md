@@ -8,7 +8,7 @@ the real values locally, so your CLI sees real data while the upstream model onl
 reasons over placeholders. Point any compatible tool at the proxy instead of the vendor
 endpoint and the redaction happens transparently.
 
-Live on the tailnet: `http://100.65.111.24:8011`.
+Live on your tailnet: `http://<tailnet-host>:8011`.
 
 ## Routes the proxy exposes today
 
@@ -16,26 +16,21 @@ Live on the tailnet: `http://100.65.111.24:8011`.
 |---|---|---|
 | `/v1/messages` | Anthropic Messages | Claude / Anthropic clients, opencode (anthropic adapter), Hermes (Claude), Pi / omp (`anthropic-messages`) |
 | `/v1/chat/completions` | OpenAI Chat Completions | opencode (openai-compatible adapter), Hermes, Pi / omp (`openai-completions`), older Codex (`wire_api = "chat"`) |
+| `/v1/responses` | OpenAI Responses API | current Codex CLI (`wire_api = "responses"`) |
 
-Both routes run the SAME redact-on-egress / rehydrate-on-response contract.
-
-> **Not yet routed: `/v1/responses` (OpenAI Responses API).** As of this writing the live
-> proxy returns `404` for `POST /v1/responses` (verified against its OpenAPI route table:
-> only `/v1/messages`, `/v1/chat/completions`, and `/healthz` are served). The Responses
-> adapter is planned, not live. This matters for current Codex CLI -- see the Codex section
-> for the exact consequence and the working fallback.
+All three routes run the SAME redact-on-egress / rehydrate-on-response contract.
 
 ## The privacy guarantee
 
 EVERY user-supplied text field in a request is redacted before egress. The extractor walks
-the request schema and isolates each free-text / data field (system prompt, message
-content, tool-result content for the Anthropic route; message content strings and text
-content-parts for the OpenAI route), then redacts in place. Tool schemas, tool-call
-arguments, image / audio blocks, and the `model` field are not free text and are not sent
-with raw user values. A once-identified entity is also re-masked anywhere it reappears
-later in the session via the known-entity backstop, so a value the model misses in a new
-context still cannot leak. If the proxy is unreachable, your CLI simply cannot reach the
-upstream -- it fails closed, it does not fall back to a raw direct call.
+the request schema and isolates free-text / user-data fields (system prompt, message
+content, tool-result text, OpenAI Responses `input`, `instructions`, `prompt.variables`,
+agentic item text, and JSON argument values), then redacts in place. Routing IDs, tool
+schemas, images / audio, binary file bytes, and the `model` field are not free text and are
+left structural. A once-identified entity is also re-masked anywhere it reappears later in
+the session via the known-entity backstop, so a value the model misses in a new context
+still cannot leak. If the proxy is unreachable, your CLI simply cannot reach the upstream
+-- it fails closed, it does not fall back to a raw direct call.
 
 ## How to verify redaction is happening
 
@@ -45,7 +40,8 @@ Watch the proxy's egress log. Every redacted request prints one line:
 [egress] redaction=redacted spans=3 labels={'email': 1, 'person': 2} rules={...} wire_placeholders=['<EMAIL_001>', '<PERSON_002>', '<PERSON_003>'] stream=false degraded=false
 ```
 
-The OpenAI route prints the same line tagged `[egress:openai]`. Read it like this:
+The OpenAI routes print the same line tagged `[egress:openai]` or `[egress:responses]`.
+Read it like this:
 
 - `redaction=redacted spans=N` -- N values were replaced with placeholders before egress.
   N spans redacted means N real values never left the box.
@@ -73,7 +69,7 @@ In `~/.codex/config.toml` add a custom provider block and select it:
 ```toml
 [model_providers.ossredact]
 name = "OSSRedact proxy"
-base_url = "http://100.65.111.24:8011"
+base_url = "http://<tailnet-host>:8011"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 
@@ -86,17 +82,9 @@ provider ignores `base_url` overrides from `config.toml`, so pointing it at the 
 requires a custom provider block. `env_key = "OPENAI_API_KEY"` tells Codex which env var
 holds the key it forwards as the upstream `Authorization` header.
 
-> **Heads-up -- current Codex needs a route the proxy does not yet serve.** Recent Codex
-> CLI accepts ONLY `wire_api = "responses"` (the `chat` wire protocol was removed and now
-> errors at config-load). `responses` targets `/v1/responses`, which the live proxy returns
-> `404` for today. So with current Codex + this proxy, requests fail at the route. Until the
-> Responses adapter ships, your options are:
->
-> 1. Use a Codex version that still supports `wire_api = "chat"`, and set
->    `wire_api = "chat"` in the block above -- that routes to the live `/v1/chat/completions`
->    and redacts correctly. (Newer Codex rejects `"chat"`, so this only works on older builds.)
-> 2. Wait for the proxy's `/v1/responses` route, then keep `wire_api = "responses"` exactly
->    as shown above -- no other config change needed.
+Current Codex should keep `wire_api = "responses"` so it lands on `/v1/responses`. Older
+Codex builds that still support `wire_api = "chat"` can use `/v1/chat/completions`, but
+newer Codex rejects `"chat"` at config load.
 
 ---
 
@@ -115,7 +103,7 @@ In `opencode.json`, add a custom provider. Pick the adapter for the wire format 
       "npm": "@ai-sdk/openai-compatible",
       "name": "OSSRedact proxy",
       "options": {
-        "baseURL": "http://100.65.111.24:8011/v1"
+        "baseURL": "http://<tailnet-host>:8011/v1"
       },
       "models": {
         "your-model-id": { "name": "Your Model" }
@@ -132,9 +120,9 @@ To route the Anthropic wire format instead, swap the adapter:
 ```
 
 **Note on `baseURL`:** the `@ai-sdk/openai-compatible` adapter appends `/chat/completions`
-to `baseURL`, so set `baseURL` to `http://100.65.111.24:8011/v1` and it resolves to the
+to `baseURL`, so set `baseURL` to `http://<tailnet-host>:8011/v1` and it resolves to the
 proxy's `/v1/chat/completions` route. The `@ai-sdk/anthropic` adapter appends `/v1/messages`,
-so for that adapter set `baseURL` to the proxy root `http://100.65.111.24:8011`. Either way
+so for that adapter set `baseURL` to the proxy root `http://<tailnet-host>:8011`. Either way
 the final URL must land on a route the proxy serves -- confirm with the egress log.
 
 ---
@@ -149,13 +137,13 @@ In `~/.hermes/config.yaml` set the model's `base_url` to the proxy:
 ```yaml
 model:
   provider: custom
-  base_url: http://100.65.111.24:8011
+  base_url: http://<tailnet-host>:8011
 ```
 
 Or set it via environment instead of editing the file:
 
 ```bash
-export OPENAI_BASE_URL=http://100.65.111.24:8011
+export OPENAI_BASE_URL=http://<tailnet-host>:8011
 ```
 
 When `base_url` is set, Hermes calls it directly (no vendor-default fallback). Hermes speaks
@@ -177,7 +165,7 @@ the wire format with `api`:
 {
   "providers": {
     "ossredact": {
-      "baseUrl": "http://100.65.111.24:8011",
+      "baseUrl": "http://<tailnet-host>:8011",
       "api": "openai-completions",
       "models": {
         "your-model-id": {}
@@ -202,7 +190,7 @@ Same shape as Pi, in YAML. In `~/.omp/agent/models.yml` add a provider block:
 ```yaml
 providers:
   ossredact:
-    baseUrl: http://100.65.111.24:8011
+    baseUrl: http://<tailnet-host>:8011
     api: openai-completions
     models:
       your-model-id: {}

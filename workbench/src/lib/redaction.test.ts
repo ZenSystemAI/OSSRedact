@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest'
 import JSZip from 'jszip'
 import { mergeSpans, combineWithManual, buildEntityMap, redactedText, rehydrate, toSpans, newPlaceholderIndex, sweepKnownValues, resolveRenderSpans } from './redaction'
-import { extOf, typeBucket, sameTypeError, neutralName, assembleZip } from './batch'
+import { extOf, typeBucket, sameTypeError, neutralName, assembleZip, redactedBatchText, redactTextWithPlaceholders, replacementsForText } from './batch'
 import type { RawSpan, Span } from './types'
 
 // Helper: build a minimal RawSpan
@@ -240,6 +240,24 @@ describe('buildEntityMap carry-in (shared index)', () => {
     expect(c).not.toBe(a) // a different person stays distinct
   })
 
+  it('case-sensitive password variants stay distinct and round-trip losslessly', () => {
+    const t = 'primary AbC123xy backup abc123xy repeat abc123xy'
+    const p1 = t.indexOf('AbC123xy')
+    const p2 = t.indexOf('abc123xy')
+    const spans: Span[] = [
+      span(p1, p1 + 'AbC123xy'.length, 'password'),
+      span(p2, p2 + 'abc123xy'.length, 'password'),
+    ]
+    spans[0].id = 'p1'; spans[1].id = 'p2'
+    const { map } = buildEntityMap(t, spans)
+    const out = redactedText(t, spans)
+    expect(map['<PASSWORD_001>']).toBe('AbC123xy')
+    expect(map['<PASSWORD_002>']).toBe('abc123xy')
+    expect((out.match(/<PASSWORD_001>/g) || []).length).toBe(1)
+    expect((out.match(/<PASSWORD_002>/g) || []).length).toBe(2)
+    expect(rehydrate(out, map)).toBe(t)
+  })
+
   it('no index = legacy per-document behaviour (fresh counters, byte-for-byte unchanged)', () => {
     const t = 'Contact alice@example.com or bob@example.com'
     const spans: Span[] = [span(8, 25, 'email'), span(29, 44, 'email')]
@@ -333,6 +351,138 @@ describe('batch helpers', () => {
     // and no upload filename leaked in as an archive entry
     expect(names.every((n) => /^redacted-\d+\.txt$|^audit-trail\.json$/.test(n))).toBe(true)
   })
+
+  it('redactedBatchText sweeps known values from the shared map across files', () => {
+    const text = 'Second file repeats cross.file@example.test after detection missed it.'
+    const shared = { '<EMAIL_001>': 'cross.file@example.test' }
+    const out = redactedBatchText(text, [], new Map(), shared)
+    expect(out).toBe('Second file repeats <EMAIL_001> after detection missed it.')
+    expect(out).not.toContain('cross.file@example.test')
+  })
+
+  it('replacementsForText emits shared-map replacements outside active spans', () => {
+    const text = 'First cross.file@example.test then cross.file@example.test again.'
+    const s = span(6, 29, 'email')
+    s.id = 'first'
+    const repls = replacementsForText(text, [s], new Map([['first', '<EMAIL_001>']]), {
+      '<EMAIL_001>': 'cross.file@example.test',
+    })
+    expect(repls).toEqual([
+      { start: 6, end: 29, text: '<EMAIL_001>' },
+      { start: 35, end: 58, text: '<EMAIL_001>' },
+    ])
+  })
+
+  it('redactTextWithPlaceholders preserves inactive spans for review-controlled exports', () => {
+    const text = 'Keep keep@example.test, redact mask@example.test.'
+    const active = span(31, 48, 'email')
+    active.id = 'active'
+    const inactive = span(5, 22, 'email', 0.9, false)
+    inactive.id = 'inactive'
+    const out = redactTextWithPlaceholders(text, [inactive, active], new Map([['active', '<EMAIL_001>']]))
+    expect(out).toBe('Keep keep@example.test, redact <EMAIL_001>.')
+  })
+})
+
+// -------------------------
+// Drift guard: the TEXT export path (redactedBatchText -> redaction-core sweepKnownValues) and the
+// OFFICE export path (replacementsForText -> batch.ts sweepReplacements) are two SEPARATE sweep
+// implementations that must stay leak-equivalent. They share MIN_SWEEP_LEN and the case-sensitive
+// label set by hand; if one drifts (e.g. a changed min length or a removed cred label), these cases
+// diverge and fail. Both paths self-redact here -- App.tsx's survivor gate is intentionally NOT
+// involved, so this pins the library behaviour itself.
+// -------------------------
+describe('batch text vs office sweep stay leak-equivalent', () => {
+  // Apply replacementsForText() ranges to the original text the way the office rebuild() does.
+  function applyRepls(text: string, repls: { start: number; end: number; text: string }[]): string {
+    const sorted = [...repls].sort((a, b) => a.start - b.start)
+    let out = ''
+    let last = 0
+    for (const r of sorted) {
+      out += text.slice(last, r.start) + r.text
+      last = r.end
+    }
+    return out + text.slice(last)
+  }
+
+  type Case = {
+    name: string
+    text: string
+    spans: Span[]
+    placeholderOf: Map<string, string>
+    sharedMap: Record<string, string>
+    gone: string[] // values that MUST NOT survive in either output
+    kept: string[] // values that MUST survive in both (sub-min-length / wrong-case)
+  }
+
+  const sp = (start: number, end: number, label: string): Span => span(start, end, label)
+
+  const cases: Case[] = [
+    {
+      name: 'repeated regular value: span on first occurrence, sweep on the second',
+      text: 'Email a.user@example.test now; footer a.user@example.test end.',
+      spans: [sp(6, 25, 'email')],
+      placeholderOf: new Map([['t_6_25', '<EMAIL_001>']]),
+      sharedMap: { '<EMAIL_001>': 'a.user@example.test' },
+      gone: ['a.user@example.test'],
+      kept: [],
+    },
+    {
+      name: 'cross-file value present only via the shared map (no local span)',
+      text: 'Second file repeats cross.file@example.test after detection missed it.',
+      spans: [],
+      placeholderOf: new Map(),
+      sharedMap: { '<EMAIL_001>': 'cross.file@example.test' },
+      gone: ['cross.file@example.test'],
+      kept: [],
+    },
+    {
+      name: 'regular label is case-insensitive: a lower-case repeat is also swept',
+      text: 'Owner Marie Tremblay; cc marie tremblay on file.',
+      spans: [],
+      placeholderOf: new Map(),
+      sharedMap: { '<PERSON_001>': 'Marie Tremblay' },
+      gone: ['Marie Tremblay', 'marie tremblay'],
+      kept: [],
+    },
+    {
+      name: 'credential label is case-sensitive: a different-case token is left intact',
+      text: 'pw Hunter2Token set; old value hunter2token differs.',
+      spans: [],
+      placeholderOf: new Map(),
+      sharedMap: { '<PASSWORD_001>': 'Hunter2Token' },
+      gone: ['Hunter2Token'],
+      kept: ['hunter2token'], // proves the case-sensitive cred path, in BOTH implementations
+    },
+    {
+      name: 'sub-min-length value is not swept (MIN_SWEEP_LEN floor, both paths)',
+      text: 'code abc appears, then abc again.',
+      spans: [],
+      placeholderOf: new Map(),
+      sharedMap: { '<CODE_001>': 'abc' },
+      gone: [],
+      kept: ['abc'],
+    },
+  ]
+
+  for (const c of cases) {
+    it(c.name, () => {
+      const fromText = redactedBatchText(c.text, c.spans, c.placeholderOf, c.sharedMap)
+      const fromOffice = applyRepls(c.text, replacementsForText(c.text, c.spans, c.placeholderOf, c.sharedMap))
+      // 1) byte-for-byte parity: the two implementations must produce the identical redaction
+      expect(fromOffice).toBe(fromText)
+      // 2) every value that must be removed is gone from both
+      for (const v of c.gone) {
+        expect(fromText).not.toContain(v)
+        expect(fromOffice).not.toContain(v)
+      }
+      // 3) every value that must remain is preserved in both
+      for (const v of c.kept) {
+        expect(fromText).toContain(v)
+        expect(fromOffice).toContain(v)
+      }
+    })
+  }
 })
 
 // -------------------------
@@ -408,6 +558,15 @@ describe('sweepKnownValues + redactedText repeated-value hardening', () => {
     const { map } = buildEntityMap(text, spans)
     const out = redactedText(text, spans)
     expect(rehydrate(out, map)).toBe(text)
+  })
+
+  it('uses exact-case sweep for case-sensitive credentials', () => {
+    const out = sweepKnownValues('again abc123xy and Jane Roy and JANE ROY', {
+      '<PASSWORD_001>': 'AbC123xy',
+      '<PASSWORD_002>': 'abc123xy',
+      '<PERSON_001>': 'Jane Roy',
+    })
+    expect(out).toBe('again <PASSWORD_002> and <PERSON_001> and <PERSON_001>')
   })
 })
 

@@ -795,7 +795,7 @@ def test_input_file_binary_mime_is_documented_passthrough_not_silent():
     # the LOG note records only a sanitized extension descriptor, NEVER the raw filename (it could carry PII)
     assert notes[0]['mime'] == 'image/png' and notes[0]['filename'] == '*.png'
     assert notes[0]['reason'] == 'binary-or-undetermined'
-    assert '_qc_pii_file_notes' not in body, 'the private note marker must be popped so it never goes upstream'
+    assert '_ossredact_file_notes' not in body, 'the private note marker must be popped so it never goes upstream'
     assert body['input'][0]['file_data'] == b64, 'binary file_data must pass through unchanged'
 
 
@@ -1484,12 +1484,13 @@ def test_top_level_metadata_values_surfaced_and_redacted():
 
 
 # ---------------------------------------------------------------------------
-# FINDING 5 (MEDIUM corruption/leak): json.loads collapses DUPLICATE object keys, so the FIRST value of a duplicate
-# is invisible to the value collector AND would be silently dropped on re-dump. A duplicate-keyed arguments string
-# must fall back to WHOLE-STRING redaction (the full string is scanned span-wise so the first value's PII is still
-# masked) and must NOT silently drop a key.
+# FINDING 5 (MEDIUM corruption/leak) + ROUND-5-R6 residual: json.loads collapses DUPLICATE object keys, so the FIRST
+# value of a duplicate is invisible to the value collector AND would be silently dropped on re-dump. The OLD fix fell
+# back to WHOLE-STRING redaction of the RAW arguments string -- which leaked a JSON-ESCAPED PII value (it scanned the
+# escaped bytes, not the decoded value). The faithful dup path now PARSES preserving all duplicates, surfaces each
+# DECODED value as its own field, and re-emits all duplicates verbatim on write.
 # ---------------------------------------------------------------------------
-def test_arguments_duplicate_keys_fall_back_to_whole_string():
+def test_arguments_duplicate_keys_faithful_per_value_redaction():
     name1 = 'sophie.tremblay@example.com'      # the FIRST (would-be-collapsed) value
     name2 = 'marc-andre.dubois@example.com'    # the surviving value
     ph = '<EMAIL_001>'
@@ -1501,18 +1502,38 @@ def test_arguments_duplicate_keys_fall_back_to_whole_string():
         ],
     }
     fields = ra.extract_text_fields_responses(body)
-    # exactly one WHOLE-STRING field is surfaced for the arguments (not per-value), so the first value is visible
-    arg_fields = [f for f in fields if name1 in f.text]
-    assert len(arg_fields) == 1, 'a duplicate-keyed arguments string must surface as one whole-string field'
-    assert name1 in arg_fields[0].text and name2 in arg_fields[0].text, (
-        'whole-string fallback must keep BOTH duplicate values visible to the scanner (no silent collapse)')
+    # each duplicate value is surfaced as its OWN decoded field (the NER scans a bare email, not the JSON blob)
+    assert any(f.text == name1 for f in fields), 'first duplicate value must be surfaced (not collapsed away)'
+    assert any(f.text == name2 for f in fields), 'second duplicate value must be surfaced'
 
-    # whole-string redaction masks both PII values; the arguments string is preserved (no key dropped)
     touched = _swap_all(fields, name1, ph) + _swap_all(fields, name2, ph)
-    assert touched == 2, 'both duplicate-key values must be redactable via the whole-string field'
-    wire = json.dumps(body, ensure_ascii=False)
-    assert name1 not in wire and name2 not in wire, (
-        'PRIVACY FAILURE: a duplicate-key arguments value leaked (the first value was collapsed away)')
+    assert touched == 2, 'both duplicate-key values must be redactable, each via its own field'
+    args_out = body['input'][0]['arguments']
+    assert name1 not in args_out and name2 not in args_out, (
+        'PRIVACY FAILURE: a duplicate-key arguments value leaked')
+    # BOTH duplicate keys are preserved on re-dump (no silent collapse), and the result is still valid JSON
+    assert args_out.count('"assignee"') == 2, 'both duplicate keys must survive the re-dump'
+    assert args_out.count(ph) == 2
+    json.loads(args_out)  # must not raise -- still valid JSON
+
+
+def test_arguments_duplicate_keys_escaped_pii_is_caught():
+    # THE RESIDUAL: a JSON-ESCAPED PII value inside a duplicate-key object. The old whole-string fallback scanned the
+    # raw escaped bytes ("jane..."), so the email never matched and leaked. The faithful path decodes it first.
+    decoded = 'jane.roe@example.com'
+    # jane... = "jane..." with the leading chars unicode-escaped; valid JSON, decodes to `decoded`.
+    escaped_args = '{"to": "\\u006a\\u0061ne.roe@example.com", "to": "ok"}'
+    body = {'model': 'gpt-test',
+            'input': [{'type': 'function_call', 'call_id': 'c1', 'name': 'send', 'arguments': escaped_args}]}
+    fields = ra.extract_text_fields_responses(body)
+    # the decoded email is surfaced as a clean field (NOT the escaped form) -> the detector can match it
+    assert any(f.text == decoded for f in fields), (
+        'an escaped PII value in a dup-key object must be surfaced DECODED so the detector can match it')
+    touched = _swap_all(fields, decoded, '<EMAIL_001>')
+    assert touched == 1
+    args_out = body['input'][0]['arguments']
+    assert decoded not in args_out and '\\u006a' not in args_out, 'escaped PII must be masked, not left raw'
+    json.loads(args_out)  # still valid JSON
 
 
 # ===========================================================================
@@ -2047,6 +2068,41 @@ def test_fixB_user_data_url_surfaced_routing_url_protected():
     assert not _PH_RE.search(json.dumps(resp))
 
 
+def test_routing_url_inside_user_data_part_stays_protected():
+    # Codex F1/F2 (2026-06-17): a type:input_image / input_file content PART can be nested INSIDE a user-data
+    # container (a prompt.variables value, a function_call_output.output content array). There _is_denied_key is NOT
+    # consulted (user-data scope), so a genuine routing image_url/file_url would be span-redacted -> the routing URL
+    # that selects the image/file is CORRUPTED. The 3 enumerated routing url keys are now protected in BOTH scopes.
+    pii = 'leak@example.com'
+    img = f'https://cdn.example.test/u/{pii}.png'   # a routing url that happens to contain a PII substring
+    body = {
+        'model': 'gpt-test',
+        'input': [
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': [
+                {'type': 'input_image', 'image_url': img},          # routing -> must STAY protected
+                {'type': 'input_text', 'text': f'note {pii}'},       # content -> scanned
+            ]},
+        ],
+        'prompt': {'id': 'p1', 'variables': {
+            'avatar': {'type': 'input_image', 'image_url': img},     # routing inside prompt.variables -> protected
+            'bio': f'contact {pii}',                                 # content -> scanned
+            'profile_url': f'https://crm.example/?e={pii}',          # GENERIC *_url -> still scanned (content)
+        }},
+    }
+    fields = ra.extract_text_fields_responses(body)
+    surfaced = {f.text for f in fields}
+    assert img not in surfaced, 'a routing image_url inside a user-data part must STAY protected (Codex F1/F2)'
+    # genuine content + a generic (non-routing) *_url stay scannable
+    assert f'note {pii}' in surfaced and f'contact {pii}' in surfaced
+    assert f'https://crm.example/?e={pii}' in surfaced, 'a generic profile_url is still scanned (FIX B preserved)'
+    # redacting the PII never corrupts the routing image_url (it is a resource selector, left byte-identical)
+    _swap_all(fields, pii, '<EMAIL_001>')
+    assert body['input'][0]['output'][0]['image_url'] == img, 'routing image_url in user-data output was corrupted'
+    assert body['prompt']['variables']['avatar']['image_url'] == img, 'routing image_url in prompt.variables corrupted'
+    assert body['input'][0]['output'][1]['text'] == 'note <EMAIL_001>'
+    assert body['prompt']['variables']['profile_url'] == 'https://crm.example/?e=<EMAIL_001>'
+
+
 # ---------------------------------------------------------------------------
 # FIX C (HIGH :165 + :235, MEDIUM :940): a placeholder-key COLLISION must never leave a raw PII key on the wire AND
 # must never drop an entry. Cover all three sites: (1) JSON-args key rename (the leaky no-op was already retargeted
@@ -2094,6 +2150,26 @@ def test_fixC_response_rehydrate_collision_drops_nothing():
     assert len(resp['metadata']) == 2, f'recursive rehydrate must not drop a metadata entry on collision: {resp}'
     assert set(resp['metadata'].values()) == {'a', 'b'}, 'both metadata entry values must survive'
     assert not _PH_RE.search(json.dumps(resp)), 'no placeholder may survive recursive rehydration'
+
+
+def test_response_rehydrate_is_single_pass_for_placeholder_shaped_values():
+    """A restored ORIGINAL value may itself contain placeholder-shaped text; rehydration must not rescan it."""
+    replay = {
+        '<SECRET_001>': 'tok_<EMAIL_001>_x',
+        '<EMAIL_001>': 'alice@example.test',
+    }
+    sample = 'secret=<SECRET_001> email=<EMAIL_001>'
+    assert ra.rehydrate_text(sample, replay) == 'secret=tok_<EMAIL_001>_x email=alice@example.test'
+
+    args = json.dumps({'secret': '<SECRET_001>', 'email': '<EMAIL_001>'})
+    assert json.loads(ra.rehydrate_json_string(args, replay)) == {
+        'secret': 'tok_<EMAIL_001>_x',
+        'email': 'alice@example.test',
+    }
+
+    resp = {'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': sample}]}]}
+    ra.rehydrate_responses_response(resp, replay)
+    assert resp['output'][0]['content'][0]['text'] == 'secret=tok_<EMAIL_001>_x email=alice@example.test'
 
 
 # ---------------------------------------------------------------------------

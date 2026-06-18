@@ -5,8 +5,8 @@
 // boxes (see pdfExport.renderRedactedPdf). Auto-detected text spans are overlaid as read-only teal outlines so
 // the reviewer can confirm coverage visually before exporting. Everything renders in-browser; no upload.
 //
-// The pdf.js worker is configured as a module side effect by lib/pdf.ts (already loaded by the time any PDF is
-// open), so the singleton GlobalWorkerOptions is set when this component renders.
+// The pdf.js worker is configured as a module side effect by lib/pdf.ts during PDF load, before this lazy
+// component renders.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type * as React from 'react'
@@ -14,7 +14,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import type { PageGeom, PageAssessment, PageStatus } from '../lib/pdf'
 import type { Span, RegionBox } from '../lib/types'
-import { rectsForRange, type Rect, type Viewport } from '../lib/pdfExport'
+import { rectsForRange, type Rect, type Viewport } from '../lib/pdfGeometry'
 import { labelMeta } from '../lib/labels'
 
 type Props = {

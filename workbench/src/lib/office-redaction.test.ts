@@ -11,6 +11,8 @@ import { loadDocx, verifyDocx } from './docx'
 import { loadXlsx, verifyXlsx } from './xlsx'
 import { tier0Spans } from './tier0'
 import { mergeSpans, toSpans, buildEntityMap } from './redaction'
+import { replacementsForText } from './batch'
+import type { Span } from './types'
 import { makeDocxBlob, blobToFile as docxBlobToFile } from '../../test/fixtures/make-docx'
 import { makeXlsxBlob, blobToFile as xlsxBlobToFile } from '../../test/fixtures/make-xlsx'
 
@@ -18,6 +20,39 @@ import { makeXlsxBlob, blobToFile as xlsxBlobToFile } from '../../test/fixtures/
 const SYNTHETIC_NAME = 'Sylvie Bouchard'
 // Public SIN test vector -- passes Luhn check
 const SYNTHETIC_SIN = '046 454 286'
+const REPEATED_EMAIL = 'repeat.office@example.test'
+
+function emailSpan(text: string): Span {
+  const start = text.indexOf(REPEATED_EMAIL)
+  if (start < 0) throw new Error('missing repeated email in fixture')
+  return {
+    id: 'email-1',
+    start,
+    end: start + REPEATED_EMAIL.length,
+    label: 'email',
+    tier: 0,
+    conf: 0.99,
+    rule: 'test:email',
+    source: 'auto',
+    active: true,
+  }
+}
+
+function valueSpan(text: string, value: string, label = 'person'): Span {
+  const start = text.indexOf(value)
+  if (start < 0) throw new Error('missing synthetic value in fixture')
+  return {
+    id: `${label}-manual-1`,
+    start,
+    end: start + value.length,
+    label,
+    tier: 1,
+    conf: 1,
+    rule: 'test:manual',
+    source: 'manual',
+    active: true,
+  }
+}
 
 // -------------------------
 // .docx round-trip
@@ -49,6 +84,21 @@ describe('docx round-trip', () => {
 
     // Rebuild and verify
     const outputBlob = await rebuild(repls)
+    const leaked = await verifyDocx(outputBlob, Object.values(map))
+    expect(leaked).toHaveLength(0)
+  })
+
+  it('sweeps repeated known values that were missed positionally', async () => {
+    const blob = await makeDocxBlob([
+      `First: ${REPEATED_EMAIL}`,
+      `Second: ${REPEATED_EMAIL}`,
+    ])
+    const file = docxBlobToFile(blob, 'repeat.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [emailSpan(text)] // simulate detector finding only the first occurrence
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
     const leaked = await verifyDocx(outputBlob, Object.values(map))
     expect(leaked).toHaveLength(0)
   })
@@ -109,6 +159,21 @@ describe('xlsx round-trip', () => {
 
     // Rebuild and verify
     const outputBlob = await rebuild(repls)
+    const leaked = await verifyXlsx(outputBlob, Object.values(map))
+    expect(leaked).toHaveLength(0)
+  })
+
+  it('sweeps repeated known values that were missed positionally', async () => {
+    const blob = await makeXlsxBlob([
+      `First: ${REPEATED_EMAIL}`,
+      `Second: ${REPEATED_EMAIL}`,
+    ])
+    const file = xlsxBlobToFile(blob, 'repeat.xlsx')
+    const { text, rebuild } = await loadXlsx(file)
+    const spans = [emailSpan(text)] // simulate detector finding only the first occurrence
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
     const leaked = await verifyXlsx(outputBlob, Object.values(map))
     expect(leaked).toHaveLength(0)
   })
@@ -187,6 +252,68 @@ describe('docx metadata scrub', () => {
     expect(postCustomXml).not.toContain(META_CUSTOM_VALUE)
   })
 
+  it('scrubs custom property names from docProps/custom.xml on rebuild', async () => {
+    const blob = await makeDocxBlob({
+      paragraphs: [`Contact: ${SYNTHETIC_NAME}`],
+      customProperties: { [SYNTHETIC_NAME]: 'neutral value' },
+    })
+
+    const preZip = await JSZip.loadAsync(blob)
+    const preCustomXml = await preZip.file('docProps/custom.xml')!.async('string')
+    expect(preCustomXml).toContain(SYNTHETIC_NAME)
+
+    const file = docxBlobToFile(blob, 'meta-custom-name-test.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const repls = spans.map((s) => ({ start: s.start, end: s.end, text: placeholderOf.get(s.id) ?? '' }))
+    const outputBlob = await rebuild(repls)
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postCustomXml = await postZip.file('docProps/custom.xml')!.async('string')
+    expect(postCustomXml).not.toContain(SYNTHETIC_NAME)
+    expect(await verifyDocx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
+  it('verifyDocx detects redacted values that survive only in XML attributes', async () => {
+    const blob = await makeDocxBlob({
+      paragraphs: ['Dossier 2026-001'],
+      customProperties: { [SYNTHETIC_NAME]: 'neutral value' },
+    })
+
+    const leaked = await verifyDocx(blob, [SYNTHETIC_NAME])
+    expect(leaked).toContain(SYNTHETIC_NAME)
+  })
+
+  it('scrubs comment author metadata from word/comments*.xml on rebuild', async () => {
+    const base = await makeDocxBlob({
+      paragraphs: [`Contact: ${SYNTHETIC_NAME}`],
+    })
+    const zip = await JSZip.loadAsync(base)
+    zip.file(
+      'word/comments.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="0" w:author="${SYNTHETIC_NAME}" w:initials="SB">
+    <w:p><w:r><w:t>neutral comment</w:t></w:r></w:p>
+  </w:comment>
+</w:comments>`,
+    )
+    const blob = await zip.generateAsync({ type: 'blob', mimeType: base.type })
+
+    const file = docxBlobToFile(blob, 'comment-author-test.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const repls = spans.map((s) => ({ start: s.start, end: s.end, text: placeholderOf.get(s.id) ?? '' }))
+    const outputBlob = await rebuild(repls)
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postCommentsXml = await postZip.file('word/comments.xml')!.async('string')
+    expect(postCommentsXml).not.toContain(SYNTHETIC_NAME)
+    expect(await verifyDocx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
   it('body redaction still works when metadata is also present', async () => {
     const blob = await makeDocxBlob({
       paragraphs: [`Contact: ${SYNTHETIC_NAME}`, `NAS: ${SYNTHETIC_SIN}`],
@@ -255,6 +382,89 @@ describe('xlsx metadata scrub', () => {
     const postZip = await JSZip.loadAsync(outputBlob)
     const postCustomXml = await postZip.file('docProps/custom.xml')!.async('string')
     expect(postCustomXml).not.toContain(META_CUSTOM_VALUE)
+  })
+
+  it('scrubs custom property names from docProps/custom.xml on rebuild', async () => {
+    const blob = await makeXlsxBlob({
+      rows: [`Contact: ${SYNTHETIC_NAME}`],
+      customProperties: { [SYNTHETIC_NAME]: 'neutral value' },
+    })
+
+    const preZip = await JSZip.loadAsync(blob)
+    const preCustomXml = await preZip.file('docProps/custom.xml')!.async('string')
+    expect(preCustomXml).toContain(SYNTHETIC_NAME)
+
+    const file = xlsxBlobToFile(blob, 'meta-custom-name-test.xlsx')
+    const { text, rebuild } = await loadXlsx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postCustomXml = await postZip.file('docProps/custom.xml')!.async('string')
+    expect(postCustomXml).not.toContain(SYNTHETIC_NAME)
+    expect(await verifyXlsx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
+  it('scrubs worksheet names from xl/workbook.xml on rebuild', async () => {
+    const blob = await makeXlsxBlob({
+      rows: [`Contact: ${SYNTHETIC_NAME}`],
+      sheetName: SYNTHETIC_NAME,
+    })
+
+    const preZip = await JSZip.loadAsync(blob)
+    const preWorkbookXml = await preZip.file('xl/workbook.xml')!.async('string')
+    expect(preWorkbookXml).toContain(SYNTHETIC_NAME)
+
+    const file = xlsxBlobToFile(blob, 'sheet-name-test.xlsx')
+    const { text, rebuild } = await loadXlsx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postWorkbookXml = await postZip.file('xl/workbook.xml')!.async('string')
+    expect(postWorkbookXml).not.toContain(SYNTHETIC_NAME)
+    expect(await verifyXlsx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
+  it('verifyXlsx detects redacted values that survive only in XML attributes', async () => {
+    const blob = await makeXlsxBlob({
+      rows: ['Dossier 2026-001'],
+      sheetName: SYNTHETIC_NAME,
+    })
+
+    const leaked = await verifyXlsx(blob, [SYNTHETIC_NAME])
+    expect(leaked).toContain(SYNTHETIC_NAME)
+  })
+
+  it('scrubs comment author metadata from xl comment parts on rebuild', async () => {
+    const base = await makeXlsxBlob({
+      rows: [`Contact: ${SYNTHETIC_NAME}`],
+    })
+    const zip = await JSZip.loadAsync(base)
+    zip.file(
+      'xl/comments1.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <authors><author>${SYNTHETIC_NAME}</author></authors>
+  <commentList>
+    <comment ref="A1" authorId="0"><text><t>neutral comment</t></text></comment>
+  </commentList>
+</comments>`,
+    )
+    const blob = await zip.generateAsync({ type: 'blob', mimeType: base.type })
+
+    const file = xlsxBlobToFile(blob, 'comment-author-test.xlsx')
+    const { text, rebuild } = await loadXlsx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postCommentsXml = await postZip.file('xl/comments1.xml')!.async('string')
+    expect(postCommentsXml).not.toContain(SYNTHETIC_NAME)
+    expect(await verifyXlsx(outputBlob, Object.values(map))).toHaveLength(0)
   })
 
   it('body redaction still works when metadata is also present', async () => {

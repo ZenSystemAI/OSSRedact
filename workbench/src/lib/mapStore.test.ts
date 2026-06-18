@@ -77,27 +77,44 @@ describe('matchByFingerprint -- own-copy exact match', () => {
   })
 })
 
-describe('matchByFingerprint -- colleague-edited (placeholder subset)', () => {
-  it('subset match resolves survivors and leaves net-new colleague text untouched', async () => {
+describe('matchByFingerprint -- edited or unrelated files', () => {
+  it('does not placeholder-subset match an edited body with a changed fingerprint', async () => {
     const rec = await makeRecord(REDACTED_BODY, MAP)
     await putMap(rec)
 
     // The colleague edited the body: <EMAIL_002> was deleted, new prose added. The full-body hash no
-    // longer matches, so the matcher must fall back to a placeholder-subset match.
+    // longer matches. Placeholder-only matching is unsafe because tokens are per-redaction, not global.
     const editedBody = 'Hi, please reach <EMAIL_001>. Bob already left the team -- thanks!'
     const present = [...new Set(editedBody.match(/<[A-Z][A-Z0-9_]*_\d{3,}>/g) ?? [])].sort()
     const editedFp = await sha256Hex(editedBody)
     expect(editedFp).not.toBe(rec.fpExact) // edits broke the exact hash
 
-    const hit = await matchByFingerprint(editedFp, present)
-    expect(hit).not.toBeNull()
+    expect(await matchByFingerprint(editedFp, present)).toBeNull()
+  })
 
-    // rehydrate the surviving placeholder; net-new colleague text ("Bob already left...") is untouched,
-    // and the deleted <EMAIL_002> simply contributes nothing (its entity was removed on purpose).
-    const out = rehydrate(editedBody, hit!.map)
-    expect(out).toBe('Hi, please reach alice@example.com. Bob already left the team -- thanks!')
-    expect(out).toContain('Bob already left the team') // colleague edit preserved
-    expect(out).not.toContain('bob@example.com') // <EMAIL_002> was deleted, not reinserted
+  it('does not restore an unrelated one-placeholder document from the only local map', async () => {
+    await putMap(await makeRecord('Local <EMAIL_001>', { '<EMAIL_001>': 'alice@example.com' }))
+
+    // Another redacted file from another device/project can legitimately contain the same token. With only
+    // one local record, the old placeholder-subset fallback would have restored Alice into this unrelated doc.
+    const unrelated = 'Vendor contact <EMAIL_001>'
+    expect(await matchByFingerprint(await sha256Hex(unrelated), ['<EMAIL_001>'])).toBeNull()
+  })
+
+  it('exact-matches a secondary fingerprint from a batch shared-map record', async () => {
+    const fileA = 'A <EMAIL_001>'
+    const fileB = 'B <EMAIL_002>'
+    const rec = await makeRecord(fileA, MAP)
+    const fpB = await sha256Hex(fileB)
+    rec.fingerprints = [
+      { fpExact: rec.fpExact, placeholders: ['<EMAIL_001>'] },
+      { fpExact: fpB, placeholders: ['<EMAIL_002>'] },
+    ]
+    await putMap(rec)
+
+    const hit = await matchByFingerprint(fpB, ['<EMAIL_002>'])
+    expect(hit).not.toBeNull()
+    expect(rehydrate(fileB, hit!.map)).toBe('B bob@example.com')
   })
 
   it('does NOT match when a survivor is unresolvable in any stored map (cross-map collision guard)', async () => {
@@ -106,6 +123,19 @@ describe('matchByFingerprint -- colleague-edited (placeholder subset)', () => {
     // A returned file bearing a placeholder the stored map cannot resolve -> no match -> manual fallback.
     const hit = await matchByFingerprint('deadbeef', ['<EMAIL_001>', '<PHONE_001>'])
     expect(hit).toBeNull()
+  })
+
+  it('refuses ambiguous auto-match when the same placeholder token maps to different originals', async () => {
+    const redacted = 'Contact <EMAIL_001>.'
+    const recA = await makeRecord(redacted, { '<EMAIL_001>': 'alice@example.com' })
+    const recB = await makeRecord(redacted, { '<EMAIL_001>': 'bob@example.com' })
+    await putMap(recA)
+    await putMap(recB)
+
+    expect(await allMaps()).toHaveLength(2)
+    const present = ['<EMAIL_001>']
+    expect(await matchByFingerprint(await sha256Hex(redacted), present)).toBeNull()
+    expect(await matchByFingerprint('edited-body-fingerprint', present)).toBeNull()
   })
 })
 

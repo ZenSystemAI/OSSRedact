@@ -94,9 +94,9 @@ make clear this is the no-model pass and (b) surface "enable deep detect (neural
 is what turns 82 noisy spans into the precise PII set. Tracked as a launch finding for operator decision;
 no recall-cutting change should ship without sign-off.
 
-## 3. Neural tier -- full P620 GPU gate (floor + xlm-roberta-large v11r5)
+## 3. Neural tier -- full GPU gate (floor + xlm-roberta-large v11r5)
 
-Operator-approved run of the live model gate (`qc-pii/pii-gpu-xlmr-large-v11r5`, fp16/CUDA) over all 88
+Operator-approved run of the live model gate (`ossredact/pii-gpu-xlmr-large-v11r5`, fp16/CUDA) over all 88
 docs via `/redact` (33s, 0 errors). Reproduce: `python3 validation/realworld_neural.py`. PII stays in
 memory; only PII-free aggregates persist.
 
@@ -129,21 +129,20 @@ redacted output** (19 email + 1 tax_id), concentrated in 5 long / multi-page doc
 (PII-free occurrence counts): `duplicate_partial_miss` -- the same value repeats many times (per-page
 footers, repeated headers, line items) and the gate masks only the **detected span positions**, not every
 occurrence of the value. Worst case: one email occurred **51 times and 33 survived** (only 18 masked). The
-gate `/redact` does positional replacement (`appliance/gate_service.py:91-101`); any occurrence the
-detector misses on a long document survives. This is invisible on the synthetic corpus (single-occurrence
-values) and is a direct hit on the "no data exposed" promise for real multi-page documents.
+the then-current gate `/redact` did positional replacement; any occurrence the detector missed on a long
+document survived. This is invisible on the synthetic corpus (single-occurrence values) and is a direct hit
+on the "no data exposed" promise for real multi-page documents.
 
-**Fix -- workbench DONE on this branch; gate-side still gated.** The fix is to mask EVERY verbatim
+**Fix -- repo source DONE; live redeploy still gated.** The fix is to mask EVERY verbatim
 occurrence of each ALREADY-DETECTED value ("sweep known values"). The naive version is fragile (a 7-digit
 account value is a substring of an 8-digit number; a name is a substring of a longer word), so the sweep is
 **token-boundary-aware** (`(?<!TOK)value(?!TOK)`, `TOK = [\p{L}\p{N}\p{M}_]`), runs only on the literal gaps
 between placeholders (never rewrites a placeholder), and uses a single combined-alternation pass so an
-earlier replacement cannot cascade into a later one. Implemented in the workbench `sweepKnownValues` +
-wired into `redactedText` and the batch text export; **Codex 5.5 xhigh reviewed it across 3 rounds** (it
-caught a placeholder-corruption bug and a same-pass cascade bug -- both fixed) -> SHIP. The workbench
-office/xlsx/PDF exports were already safe (fail-closed verify). **REMAINING (operator-gated):** the same
-boundary-aware sweep (or a fail-closed re-scan) must be added to the live gate `/redact` and redeployed --
-that is where the measured leak lives. Tracked as LAUNCH-CHECKLIST item 1b.
+earlier replacement cannot cascade into a later one. Implemented in the workbench `sweepKnownValues`, gate
+`PrivacyGate.redact`, deploy CPU gate, appliance gate, NPU sidecar, and egress known-value backstop; plan 025 also made
+credential/path dedup and sweep exact-case. The workbench office/xlsx/PDF exports were already safe
+(fail-closed verify). **REMAINING (operator-gated):** redeploy the patched live gate/proxy, then rerun this
+real-doc check on-host. Tracked as LAUNCH-CHECKLIST item 1b.
 
 ## 4. What is NOT covered here
 
@@ -156,5 +155,5 @@ that is where the measured leak lives. Tracked as LAUNCH-CHECKLIST item 1b.
 # extract (out-of-repo, gitignored): pdftotext -layout each PDF to ~/expenses-eval/text/exp_NNN.layout.txt
 python3 validation/realworld_expenses.py            # floor + secrets, writes per-doc offsets + auto summary
 node --experimental-strip-types ~/expenses-eval/run_tier0.ts   # TS twin
-python3 validation/realworld_neural.py              # full P620 GPU gate (floor + neural), PII-free aggregates
+python3 validation/realworld_neural.py              # full GPU gate (floor + neural), PII-free aggregates
 ```

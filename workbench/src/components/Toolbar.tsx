@@ -13,6 +13,7 @@ type Props = {
   onView: (v: 'text' | 'layout' | 'pages') => void
   busy: boolean
   gate: GateHealth | null
+  loadPct: number | null
   onAutoDetect: () => void
   onDeepDetect: () => void
   onClearDetections: () => void
@@ -45,7 +46,7 @@ export default function Toolbar(p: Props) {
         Auto-detect
       </button>
 
-      <button className="btn btn-ghost" onClick={p.onDeepDetect} disabled={p.busy} title="Run the local neural gate (Tier-0 + GPU XLM-R, over the tailnet)">
+      <button className="btn btn-ghost" onClick={p.onDeepDetect} disabled={p.busy} title="Run the neural model (Tier-0 + XLM-R) right in your browser -- nothing leaves this machine">
         <span
           style={{
             width: 7,
@@ -55,7 +56,7 @@ export default function Toolbar(p: Props) {
             boxShadow: p.gate?.ok ? '0 0 8px var(--color-success)' : 'none',
           }}
         />
-        {p.busy ? 'Detecting…' : 'Deep detect (GPU)'}
+        {p.loadPct != null ? `Loading model ${p.loadPct}%` : p.busy ? 'Detecting…' : 'Deep detect (on-device)'}
       </button>
 
       <button className="btn btn-ghost" onClick={p.onClearDetections} disabled={p.busy || p.totalCount === 0}>

@@ -3,28 +3,30 @@
 
 Drop-in replacement for the retired ~/ai-tools/privacy-filter sidecar: serves the EXACT contract the
 parser's redactBertFallback() expects:
-  POST /redact  {text, mode}  -> {redacted_text, mapping, stats{request_id,total_spans,by_category,elapsed_ms}}
+  POST /redact  {text, mode='substitute'} -> {redacted_text, mapping, stats{request_id,total_spans,by_category,elapsed_ms}}
   GET  /healthz               -> {status, model, uptime_s}
 Placeholders are <LABEL_NNN> so the parser's uniquePlaceholder()/unredact() handle them unchanged.
 Tier-0 regex (incl. unicode-dash-normalized accounts, UUIDs, NAS, cards) + NPU neural tier + union merge.
 """
-import sys, time, json, uuid
+import os, sys, time, json, uuid
 from collections import defaultdict
 import numpy as np
-sys.path.insert(0, '/home/steven/sparx-npu')
+APPLIANCE_DIR = os.environ.get('GATEWAY_APPLIANCE_DIR') or os.path.dirname(os.path.abspath(__file__))
+if APPLIANCE_DIR not in sys.path:
+    sys.path.insert(0, APPLIANCE_DIR)
 from openvino import Core
 from transformers import AutoTokenizer
-from privacy_gate import PrivacyGate, _build_known_re, _sweep_known
-from fastapi import FastAPI
+from privacy_gate import PrivacyGate, _build_known_re, _sweep_known, _case_sensitive_label, _dedup_key
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
-MODEL_DIR = '/home/steven/sparx-npu/model'
-XML = MODEL_DIR + '/openvino/model_fp16.xml'
+MODEL_DIR = os.environ.get('GATEWAY_NPU_MODEL_DIR', os.path.join(APPLIANCE_DIR, 'model'))
+XML = os.path.join(MODEL_DIR, 'openvino', 'model_fp16.xml')
 DEVICE = 'NPU'
 MAXLEN = 512   # match NPUTier/GPUTier + the 600-char chunking: a token-dense 600-char chunk reaches ~300 tokens; 256 truncated the tail and dropped PII (see NPUTier note in privacy_gate.py)
-CACHE_DIR = '/home/steven/sparx-npu/.ovcache'
-MODEL_NAME = 'qc-pii/npu-xlmr-base-v7 (OpenVINO FP16, Intel NPU)'
+CACHE_DIR = os.environ.get('GATEWAY_NPU_CACHE_DIR', os.path.join(APPLIANCE_DIR, '.ovcache'))
+MODEL_NAME = 'ossredact/npu-xlmr-base-v7 (OpenVINO FP16, Intel NPU)'
 START = time.time()
 
 
@@ -75,7 +77,16 @@ gate.npu = OVTier(XML, MODEL_DIR, DEVICE, MAXLEN)
 gate.npu.spans('warmup Jean Tremblay NAS 046 454 286 compte 006-02761-1234567')
 print('NPU gate ready', flush=True)
 
-app = FastAPI(title='qc-pii NPU sidecar')
+app = FastAPI(title='OSSRedact NPU sidecar')
+SUPPORTED_REDACT_MODES = {'substitute'}
+
+
+def _require_supported_redact_mode(mode):
+    if mode not in SUPPORTED_REDACT_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="unsupported redact mode; only 'substitute' is implemented",
+        )
 
 
 class RedactReq(BaseModel):
@@ -86,13 +97,20 @@ class RedactReq(BaseModel):
 @app.post('/redact')
 def redact(req: RedactReq):
     t0 = time.time()
+    _require_supported_redact_mode(req.mode)
     spans = gate.detect(req.text, min_score=0.5)
     counters = defaultdict(int); by_cat = defaultdict(int); by_rule = defaultdict(int); mapping = {}; out = []; last = 0
+    seen = {}; label_by_ph = {}
     for s in sorted(spans, key=lambda s: s['start']):
+        value = req.text[s['start']:s['end']]
         lab = s['label'].upper()
-        counters[lab] += 1
-        ph = f"<{lab}_{counters[lab]:03d}>"
-        mapping[ph] = req.text[s['start']:s['end']]
+        ph = seen.get(_dedup_key(s['label'], value))
+        if ph is None:
+            counters[lab] += 1
+            ph = f"<{lab}_{counters[lab]:03d}>"
+            seen[_dedup_key(s['label'], value)] = ph
+            mapping[ph] = value
+            label_by_ph[ph] = s['label']
         by_cat[s['label']] += 1
         by_rule[s.get('rule', '?')] += 1
         out.append(req.text[last:s['start']]); out.append(ph); last = s['end']
@@ -103,11 +121,14 @@ def redact(req: RedactReq):
     # detector skipped. Sweep the redacted text for every already-known value (len>=4, word-boundary-guarded,
     # longest-first) and mask each remaining occurrence with its EXISTING placeholder -- never a new one. Runs
     # only on the literal gaps BETWEEN placeholders, so it cannot rewrite a placeholder already inserted.
-    value_to_placeholder = {}
-    for ph_, v_ in mapping.items():
-        value_to_placeholder.setdefault(v_, ph_)
-    known_re = _build_known_re(value_to_placeholder.keys())
-    redacted_text, _swept = _sweep_known(redacted_text, known_re, value_to_placeholder)
+    exact_v2p = {v: ph for ph, v in mapping.items() if _case_sensitive_label(label_by_ph.get(ph, ''))}
+    ci_v2p = {v: ph for ph, v in mapping.items() if not _case_sensitive_label(label_by_ph.get(ph, ''))}
+    protected = set(mapping.keys())
+    redacted_text, swept_exact = _sweep_known(redacted_text, _build_known_re(exact_v2p.keys(), ignore_case=False),
+                                              exact_v2p, protected_placeholders=protected, case_sensitive=True)
+    redacted_text, swept_ci = _sweep_known(redacted_text, _build_known_re(ci_v2p.keys(), ignore_case=True),
+                                           ci_v2p, protected_placeholders=protected)
+    _swept = swept_exact + swept_ci
     return {
         'redacted_text': redacted_text,
         'mapping': mapping,
@@ -149,7 +170,7 @@ def healthz():
 
 
 if __name__ == '__main__':
-    # 0.0.0.0 so the dockerized parser can reach it via host.docker.internal (host-gateway). The Beelink
+    # 0.0.0.0 so the dockerized parser can reach it via host.docker.internal (host-gateway). The host
     # firewall gates LAN exposure (same posture the retired sidecar had on :8001). Parser is loopback-local
     # otherwise; PII text only crosses the host-internal docker bridge.
     uvicorn.run(app, host='0.0.0.0', port=8001, log_level='warning')

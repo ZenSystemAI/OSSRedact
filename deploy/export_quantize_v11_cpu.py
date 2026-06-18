@@ -15,10 +15,10 @@ from onnxruntime.quantization import (quantize_dynamic, quantize_static, QuantTy
                                       CalibrationDataReader, CalibrationMethod, QuantFormat)
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 
-MDIR = Path('/home/steven/Sparx/models/privacy-filters/pii-gpu-xlmr-base-v11r5')
+MDIR = Path('models/pii-xlmr-base')
 FP32 = MDIR / 'model.onnx'
 INT8 = MDIR / 'model.int8.onnx'  # dynamic (weights-only) int8 -- the proven v6/v7 recipe
-CALIB = '/home/steven/Sparx/datasets/pii-merged-v11r5-win/train.jsonl'
+CALIB = 'datasets/pii-merged/train.jsonl'
 N_CALIB = 200
 MAXLEN = 512
 

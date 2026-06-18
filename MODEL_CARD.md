@@ -89,6 +89,9 @@ The privacy metric is **full-stack catastrophic DETECTION recall**: any detected
 | GPU  | xlm-r-large-v11r5 | **0.9964** | 0.9785 | 0.9598 | 12 / 7498 rows |
 | CPU  | xlm-r-base-v11r5  | **0.9932** | 0.9664 | 0.9456 | 12 / 7498 rows |
 
+**Published model ids** (HuggingFace, publication targets -- not yet live):
+`ZenSystemAI/pii-xlmr-large` (GPU, full precision) and `ZenSystemAI/pii-xlmr-base` (CPU dynamic-INT8 ONNX, also the in-browser tier). The revision label `v11rN` is the measured weight revision and ships as an HF revision tag, not as part of the repo id; the figures above are revision `v11r5`.
+
 Every catastrophic label is caught at >=0.974 full-stack detection (large); 11 of 13 at 1.000. FR is not weaker than EN (FR R=0.980, EN R=0.978): the Quebec-French moat holds on unseen structure.
 
 ### v6/v7 historical (superseded by v11 -- see validation/RESULT-v11.md)

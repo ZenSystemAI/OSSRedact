@@ -4,6 +4,10 @@
 
 OSSRedact is an HTTP proxy that sits in front of cloud LLM APIs. On the way out it redacts PII and secrets in the request's free-text fields to stable placeholders. On the way back it rehydrates those placeholders into the real values. Your local tool sees real data the whole time; the cloud model only ever sees placeholders. Claude Code and Codex are verified today, and OpenAI/Anthropic-compatible tools such as Hermes, Pi, omp, and opencode route through the same documented adapters. The detection model runs locally on-device (CPU INT8 always-on; NPU/OpenVINO alternate), so no detection call ever leaves your machine.
 
+![OSSRedact vs Microsoft Presidio -- held-out Quebec FR/EN PII](charts/fig5_vs_presidio.png)
+
+*Higher recall than Microsoft Presidio on held-out Quebec FR/EN PII, with zero false positives on clean text -- full benchmarks below.*
+
 ## Why
 
 Going fully local for data sovereignty is too expensive: SOTA-quality local inference needs 256GB+ of VRAM. OSSRedact takes the other path. Filter the private data out, use cloud SOTA, redact on egress and rehydrate transparently. Two users:
@@ -99,6 +103,8 @@ The privacy metric is **full-stack catastrophic DETECTION recall**: any detected
 | GPU  | xlm-r-large-v11r5 | **0.9964** | 0.9785 | 0.9598 | 12 / 7498 rows |
 | CPU  | xlm-r-base-v11r5  | **0.9932** | 0.9664 | 0.9456 | 12 / 7498 rows |
 
+Published model ids (HuggingFace, publication targets): `ZenSystemAI/pii-xlmr-large` (GPU) and `ZenSystemAI/pii-xlmr-base` (CPU INT8 / in-browser). `v11rN` is the weight revision (an HF revision tag), not part of the repo id; figures above are `v11r5`.
+
 Every catastrophic label is caught at >=0.974 full-stack detection (large); 11 of 13 at 1.000. FR is not weaker than EN (FR R=0.980, EN R=0.978): the Quebec-French moat holds on unseen structure.
 
 **Latency:** clean fast-path 1.7ms median; PII-bearing request 23.5ms median; on-device about 34ms per 256-token window.
@@ -107,9 +113,7 @@ Every catastrophic label is caught at >=0.974 full-stack detection (large); 11 o
 
 Earlier results on the v6 generation sets (in-distribution held-out, train and val shared document layouts). Kept for reference; **do not use these as current figures**.
 
-**NER vs Microsoft Presidio** (English + French large spaCy, union, same sets, same metric):
-
-![OSSRedact vs Presidio](charts/fig5_vs_presidio.png)
+**NER vs Microsoft Presidio** (English + French large spaCy, union, same sets, same metric) -- charted at the top:
 
 | Set | OSSRedact recall | Presidio recall | OSSRedact clean_fp | Presidio clean_fp |
 |-----|---------------|-----------------|-----------------|-------------------|

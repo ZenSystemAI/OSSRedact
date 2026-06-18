@@ -28,7 +28,7 @@ PORT = int(os.environ.get('CPU_GATE_PORT', '8011'))
 HOST = os.environ.get('CPU_GATE_HOST', '0.0.0.0')  # host-internal bind; gate behind your firewall (parity with the GPU gate)
 CHUNK_CHARS = 600  # stay under the 256-token window even on dense tabular text (matches the egress proxy)
 CHUNK_OVERLAP = 80  # window overlap so a value straddling a boundary is caught in one window + union-merged
-MODEL_NAME = f'ossredact/{os.path.basename(MODEL_DIR)} (int8, CPU)'
+MODEL_NAME = f'ZenSystemAI/{os.path.basename(MODEL_DIR).removesuffix("-int8")} (int8, CPU)'  # public HF repo id (ZenSystemAI/pii-xlmr-base); the "(int8, CPU)" suffix already conveys quantization, version ships as an HF revision tag
 START = time.time()
 
 print(f'loading CPU gate ({MODEL_DIR}) onnxruntime CPUExecutionProvider ...', flush=True)

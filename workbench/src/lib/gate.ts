@@ -1,5 +1,5 @@
 // The OPTIONAL deep tier -- now running FULLY IN-BROWSER (zero egress). Previously this fetched a local
-// gate over the tailnet (a local GPU appliance ran Tier-0 + neural XLM-R + union merge). That path made
+// network gate (a GPU appliance ran Tier-0 + neural XLM-R + union merge). That path made
 // text leave the browser; here the same pipeline runs client-side via transformers.js, so deep detect
 // makes ZERO network requests after the one-time model download. The workbench is still fully functional
 // without the model (client-side Tier-0 in tier0.ts); the neural tier is opt-in.

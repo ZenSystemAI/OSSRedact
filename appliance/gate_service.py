@@ -26,7 +26,7 @@ XML = os.path.join(MODEL_DIR, 'openvino', 'model_fp16.xml')
 DEVICE = 'NPU'
 MAXLEN = 512   # match NPUTier/GPUTier + the 600-char chunking: a token-dense 600-char chunk reaches ~300 tokens; 256 truncated the tail and dropped PII (see NPUTier note in privacy_gate.py)
 CACHE_DIR = os.environ.get('GATEWAY_NPU_CACHE_DIR', os.path.join(APPLIANCE_DIR, '.ovcache'))
-MODEL_NAME = 'ossredact/npu-xlmr-base-v7 (OpenVINO FP16, Intel NPU)'
+MODEL_NAME = 'ZenSystemAI/pii-xlmr-base (OpenVINO FP16, Intel NPU)'  # public HF repo id; same base model family as the CPU/GPU gates, version ships as an HF revision tag
 START = time.time()
 
 

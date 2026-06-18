@@ -7,7 +7,7 @@ The GPU sibling of the CPU/NPU sidecar gate. SAME contract, so the egress proxy
   POST /redact  {text, mode='substitute'} -> {redacted_text, mapping(<LABEL_NNN>), stats{request_id,total_spans,by_category,by_rule,elapsed_ms}}
   GET  /healthz                    -> {status, model, device, uptime_s}
 
-Neural tier = xlm-r-LARGE fp16 (pii-gpu-xlmr-large-v6), the strongest tier of the SAME model family as the
+Neural tier = xlm-r-LARGE fp16 (ZenSystemAI/pii-xlmr-large), the strongest tier of the SAME model family as the
 always-on CPU/NPU (xlm-r-base) -- so identical labels + BIO decoding + case-norm second pass. Pinned to the GPU host
 3090 Ti via CUDA_VISIBLE_DEVICES=4 in the unit. Tier-0 regex/Luhn + context-cue + union merge + provenance
 are shared from privacy_gate.py (the provenance-complete superset, mirrored next to this file).
@@ -30,7 +30,7 @@ PORT = int(os.environ.get('GPU_GATE_PORT', '8001'))
 HOST = os.environ.get('GPU_GATE_HOST', '0.0.0.0')  # host-internal bind; gate behind your firewall (parity with the CPU/NPU gate)
 CHUNK_CHARS = 600  # stay under the 256-token window even on dense tabular text (matches the egress proxy)
 CHUNK_OVERLAP = 80  # window overlap so a value straddling a boundary is caught in one window + union-merged
-MODEL_NAME = f'ossredact/{os.path.basename(MODEL_DIR)} (fp16, CUDA)'
+MODEL_NAME = f'ZenSystemAI/{os.path.basename(MODEL_DIR)} (fp16, CUDA)'  # public HF repo id; version (v11r5/v11r6) ships as an HF revision tag, not in the id
 START = time.time()
 
 print(f'loading GPU gate ({MODEL_DIR}) CVD={os.environ.get("CUDA_VISIBLE_DEVICES")} ...', flush=True)

@@ -78,7 +78,8 @@ The bilingual Québec-French focus is the differentiator: general English-first 
 
 ```js
 import { pipeline } from '@huggingface/transformers'
-const ner = await pipeline('token-classification', 'ZenSystemAI/ossredact-pii-base')
+// dtype:'int8' loads onnx/model_int8.onnx -- this repo ships INT8 only (the WASM-native browser format)
+const ner = await pipeline('token-classification', 'ZenSystemAI/ossredact-pii-base', { dtype: 'int8' })
 const out = await ner('Contactez Marie-Eve Tremblay au 514-555-0188; NAS 046 454 286.')
 // out: [{ entity, score, word, start, end }, ...]  -- the document never leaves the page
 ```
@@ -90,7 +91,8 @@ from optimum.onnxruntime import ORTModelForTokenClassification
 from transformers import AutoTokenizer, pipeline
 
 tok = AutoTokenizer.from_pretrained("ZenSystemAI/ossredact-pii-base")
-model = ORTModelForTokenClassification.from_pretrained("ZenSystemAI/ossredact-pii-base")
+# the repo ships INT8 only (model.int8.onnx at the root); name it explicitly
+model = ORTModelForTokenClassification.from_pretrained("ZenSystemAI/ossredact-pii-base", file_name="model.int8.onnx")
 ner = pipeline("token-classification", model=model, tokenizer=tok)
 print(ner("Reçu de la Caisse Desjardins; IBAN GB82 WEST 1234 5698 7654 32."))
 ```

@@ -365,6 +365,12 @@ _DENY_KEYS = frozenset({
     # its meaning (a placeholder is not the same matcher), so we never surface it.
     'properties', 'required', 'pattern', 'additionalProperties', '$ref', '$defs', 'parameters',
     'strict',
+    # Custom-tool GRAMMAR fields (Responses `tools[].format = {type:'grammar', syntax:'lark'|'regex',
+    # definition:'<grammar>'}`). Same class as `pattern`: structural, request-breaking if rewritten. `syntax`
+    # is a strict enum the backend validates ('lark'/'regex') -- the NER tagged a literal 'lark' as an
+    # ORGANIZATION and masked it to <ORGANIZATION_001>, which the ChatGPT/Codex backend rejected with a 400.
+    # `definition` is the grammar source (not user PII); masking a token inside it would change the grammar.
+    'syntax', 'definition',
 })
 
 

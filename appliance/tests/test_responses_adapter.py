@@ -268,6 +268,23 @@ def test_dup_key_arguments_native_numeric_surfaced_no_500_regression():
     assert '12345678' not in wire and '87654321' not in wire, 'PRIVACY FAILURE: dup-key native numeric leaked'
 
 
+def test_tool_grammar_format_not_surfaced():
+    """REGRESSION (live, Codex ChatGPT-plan): a custom-tool grammar format
+    ({type:'grammar', syntax:'lark'|'regex', definition:'<grammar>'}) is STRUCTURAL. `syntax` is a strict
+    enum the backend validates; the NER tagged a literal 'lark' as an ORGANIZATION and masked it to a
+    placeholder, which the ChatGPT/Codex backend rejected with a 400. syntax + definition must NOT be
+    surfaced for redaction (rewriting them breaks the request); real PII elsewhere still must be."""
+    body = {'model': 'gpt-test',
+            'input': 'reach me at jane.roe@example.com',
+            'tools': [{'type': 'custom', 'name': 'grammar_tool', 'description': 'parse input',
+                       'format': {'type': 'grammar', 'syntax': 'lark',
+                                  'definition': 'start: "lark" | "regex"'}}]}
+    fields = ra.extract_text_fields_responses(body)
+    assert _swap_all(fields, 'lark', '<ORG>') == 0, 'grammar syntax enum must not be surfaced for redaction'
+    assert _swap_all(fields, 'start: "lark" | "regex"', '<G>') == 0, 'grammar definition must not be surfaced'
+    assert _swap_all(fields, 'jane.roe@example.com', '<EMAIL_001>') == 1, 'real PII must still be surfaced'
+
+
 # ---------------------------------------------------------------------------
 # LEAK PATH (3): a `refusal` content part -- the model's refusal text is model-visible and
 # can echo a sensitive value back. It must redact + rehydrate like any other content text.

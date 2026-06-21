@@ -38,6 +38,11 @@ from name_carrier import name_shaped, carrier_person_spans   # plan 026: rare-na
 
 ANTHROPIC_UPSTREAM = os.environ.get('GATEWAY_ANTHROPIC_UPSTREAM', 'https://api.anthropic.com')
 OPENAI_UPSTREAM = os.environ.get('GATEWAY_OPENAI_UPSTREAM', 'https://api.openai.com')
+# Codex with a ChatGPT/Codex PLAN (no platform API key) authenticates against the ChatGPT backend, not the
+# platform API -- its OAuth token has no `api.responses.write` scope, so api.openai.com 401s it. Plan
+# requests are routed here instead (see /v1/responses), keyed on the chatgpt-account-id header Codex sends
+# only on the plan path. Override for a self-hosted/enterprise ChatGPT backend.
+CHATGPT_UPSTREAM = os.environ.get('GATEWAY_CHATGPT_UPSTREAM', 'https://chatgpt.com/backend-api/codex')
 GATE_URL = os.environ.get('GATEWAY_GATE_URL', 'http://127.0.0.1:8001')
 DRYRUN = os.environ.get('GATEWAY_DRYRUN', '0') == '1'        # don't forward upstream; echo would-be-upstream body
 EXPOSE_MAP = os.environ.get('GATEWAY_TEST_EXPOSE_MAP', '0') == '1'   # test-only: include replay map in dryrun
@@ -1568,7 +1573,13 @@ async def responses(req: Request):
         return blocked
 
     headers = responses_adapter.fwd_headers_responses(req)
-    url = OPENAI_UPSTREAM + '/v1/responses'
+    # Plan path (Codex ChatGPT/Codex subscription) -> ChatGPT backend /responses; API-key path -> platform
+    # /v1/responses. The chatgpt-account-id header is present only on the plan path (Codex forwards it for
+    # plan authorization; the OAuth token alone is rejected without it), so it is the reliable discriminator.
+    if req.headers.get('chatgpt-account-id'):
+        url = CHATGPT_UPSTREAM + '/responses'
+    else:
+        url = OPENAI_UPSTREAM + '/v1/responses'
     payload = json.dumps(body)
     live_ctx = {'route': '/v1/responses', 'client': client, 'ctx': ctx}
     if not stream:

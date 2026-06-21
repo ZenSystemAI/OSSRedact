@@ -70,3 +70,7 @@ ACE-Step/
 # internal planning / handoff history + agent-conventions doc (kept local, excluded from the public snapshot)
 plans/
 AGENTS.md
+# (the bare AGENTS.md pattern above also covers workbench/AGENTS.md once untracked)
+
+# draft browser extension (WXT harness, not a shipping interceptor -- roadmap only; keep out of the snapshot)
+extension/

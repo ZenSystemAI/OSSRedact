@@ -36,7 +36,7 @@ The suite covers **20 labels** (shipped model, `training/labels_v20.json`): `acc
 
 The prior 23-label scheme was consolidated: `bank_account` + `routing_number` folded into `account_number` / `sensitive_account_id`; `api_key` + `access_token` folded into `secret` / `password`; `sensitive_date` folded into `date_of_birth`; `phone` renamed `phone_number`; `postal` renamed `postal_code`; `ip` renamed `ip_address`.
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline below). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift (F6 closed).
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline below). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift.
 
 Alongside the NER model run two deterministic layers (in the deployed appliance):
 - **Tier-0** (regex + Luhn) owns the catastrophic structured categories.
@@ -73,7 +73,7 @@ Per-project and per-session PII config (session overrides project overrides defa
 
 The NER models are **trained on a SYNTHETIC corpus** of French-Quebec + English PII. This is stated explicitly: the suite is **synthetic-trained**. No real personal data is used at any stage; every span is machine-generated, and only counts (never values) leave the generator.
 
-### Corpus composition (v11r7, current generation)
+### Corpus composition (cumulative through v11r9c)
 
 The training corpus is **cumulative across the v11 error-mine rounds** -- the v11r5 base plus the v11r6 structural-name augmentation plus the v11r7 organization/address augmentation (`training/gen/`):
 
@@ -107,12 +107,12 @@ The privacy metric is **full-stack catastrophic DETECTION recall**: any detected
 | GPU  | xlm-r-large-v11r9c | **0.9954** | 0.9882 | 0.9615 | 34 / 7498 rows |
 | CPU  | xlm-r-base-v11r9c | **0.9941** | 0.9777 | 0.9139 | 48 / 7498 rows |
 
-For the GPU/large v11r9c (full config, all 20 labels) the all-label detection recall is **0.9882**, precision **0.9615**, F1 **0.9742**. Of the 13 catastrophic categories, email, iban, secret, password, file_path, tax_id, card_expiry, card_cvv, government_id, postal_code, date_of_birth, ip_address, and payment_card all detect at 1.000; person is 0.9946 (precision 0.9999) and sensitive_account_id is 0.9993. On the GPU/large tier the clean false positives rise from 12 (large v11r5) to 34 (large v11r9c) -- the cost of closing the org/address leak (see the model description): per-label precision dips on the digit-ID-shaped labels (government_id ~0.87, phone_number ~0.84, sensitive_account_id ~0.88, account_number ~0.94, date_of_birth ~0.96). This is the safe failure direction -- over-redaction never leaks.
+For the GPU/large v11r9c (full config, all 20 labels) the all-label detection recall is **0.9882**, precision **0.9615**, F1 **0.9742**. Of the 13 catastrophic categories, 10 detect at 1.000 (email, government_id, payment_card, card_cvv, card_expiry, secret, password, iban, date_of_birth, tax_id); the three exceptions are person 0.9946 (precision 0.9999), sensitive_account_id 0.9993, and account_number 0.974 (the one neural-only watch-item). On the GPU/large tier the clean false positives rise from 12 (large v11r5) to 34 (large v11r9c) -- the cost of closing the org/address leak (see the model description): per-label precision dips on the digit-ID-shaped labels (government_id ~0.87, phone_number ~0.84, sensitive_account_id ~0.88, account_number ~0.94, date_of_birth ~0.96). This is the safe failure direction -- over-redaction never leaks.
 
 **Published model ids** (HuggingFace, publication targets -- not yet live):
 `ZenSystemAI/ossredact-pii-large` (GPU, full precision) and `ZenSystemAI/ossredact-pii-base` (CPU dynamic per-channel INT8 ONNX, also the in-browser tier). The revision label `v11rN` is the measured weight revision and ships as an HF revision tag, not as part of the repo id; both the GPU and CPU figures are revision `v11r9c`. The base ships as **per-channel dynamic INT8** (the WASM-native in-browser format): v11r9c's org/address augmentation sharpened the boundaries, so the INT8 export lands at pii_argmax 0.967 (cosine 0.997, faithful) -- the `validation/parity_check.py` INT8 bar is 0.965 for this reason (the carded fp32 metrics are the reference; ~62% of the INT8 token-flips are on floor-protected types the deterministic Tier-0 layer redacts regardless of the model, and person -- the highest-frequency no-floor type -- is barely affected; full analysis: `validation/RESULT-base-int8-parity-v11r9c.md`). Weights are not yet published; the service fails gracefully until then.
 
-Every catastrophic label is caught at >=0.99 full-stack detection (large, v11r9c); most at 1.000. FR is not weaker than EN: the Quebec-French moat holds on unseen structure.
+Every catastrophic label is caught at >=0.974 full-stack detection (large, v11r9c); 10 of 13 at 1.000. FR is not weaker than EN: the Quebec-French moat holds on unseen structure.
 
 ### v6/v7 historical (superseded by v11 -- see validation/RESULT-v11.md)
 
@@ -186,4 +186,4 @@ Then run Claude Code, Codex, Hermes, or another configured CLI as usual. The gat
 
 ## Status
 
-The Track A appliance is built, running as a systemd service, and verified end-to-end (a real Claude Code session through the proxy redacts and rehydrates transparently). It is **not yet published**. The workbench UI is built. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`.
+The appliance is built, running as a systemd service, and verified end-to-end (a real Claude Code session through the proxy redacts and rehydrates transparently). It is **not yet published**. The workbench UI is built. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`.

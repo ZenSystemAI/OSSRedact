@@ -7,7 +7,7 @@ sequential, all-digit) so we do NOT nuke benign high-entropy tokens (commit SHAs
 the coding-assistant use case. NO model, zero training. Returns spans labeled 'secret' (subtype in metadata),
 conf 1.0 so they win any merge cluster -> always redacted.
 
-Refs (verified 2026-06-14, see PRIOR-ART.md): gitleaks config/gitleaks.toml (MIT); detect-secrets
+Refs (verified 2026-06-14): gitleaks config/gitleaks.toml (MIT); detect-secrets
 filters/heuristic.py + high_entropy_strings.py (Apache-2.0).
 """
 import re

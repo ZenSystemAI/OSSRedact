@@ -116,7 +116,7 @@ To make it permanent, add the export to your shell profile (`~/.bashrc` or `~/.z
 
 To expose the proxy on a tailnet interface instead of loopback, set `GATEWAY_HOST=<tailnet-ip-or-host>` in a systemd drop-in for `ossredact-egress.service`, then restart it. Keep the NER gate on loopback unless you have a specific reason to expose `/detect`.
 
-> **Adapters:** Anthropic `/v1/messages`, OpenAI `/v1/chat/completions` (routing Codex/omp/Hermes/Pi/opencode), and OpenAI `/v1/responses` (the API the current Codex CLI speaks) are supported today, same redact/rehydrate contract. Tool-specific wiring is documented in `docs/ADAPTERS.md`. (The egress-proxy code lives under `appliance/` and the GPU NER gate service it calls under `gate/`; both are version-controlled, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift -- F6 closed.)
+> **Adapters:** Anthropic `/v1/messages`, OpenAI `/v1/chat/completions` (routing Codex/omp/Hermes/Pi/opencode), and OpenAI `/v1/responses` (the API the current Codex CLI speaks) are supported today, same redact/rehydrate contract. Tool-specific wiring is documented in `docs/ADAPTERS.md`. (The egress-proxy code lives under `appliance/` and the GPU NER gate service it calls under `gate/`; both are version-controlled, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift.)
 
 ---
 
@@ -280,7 +280,7 @@ A successful end-to-end check: a real Claude Code session through the proxy reda
 
 ## 8. What it detects
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift (F6 closed).
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift.
 
 A 3-tier NER suite focused on **French-Quebec + English** (the bilingual Quebec PII focus is the differentiator), across **20 labels** (`training/labels_v20.json`): `account_number`, `address`, `card_cvv`, `card_expiry`, `date_of_birth`, `email`, `file_path`, `government_id`, `iban`, `ip_address`, `organization`, `password`, `payment_card`, `person`, `phone_number`, `postal_code`, `secret`, `sensitive_account_id`, `tax_id`, `username`.
 
@@ -301,7 +301,7 @@ The privacy metric is **full-stack catastrophic DETECTION recall**: any detected
 | GPU  | xlm-r-large-v11r9c | **0.9954** | 0.9882 | 0.9615 | 34 / 7498 rows |
 | CPU  | xlm-r-base-v11r9c  | **0.9941** | 0.9777 | 0.9139 | 48 / 7498 rows |
 
-For the GPU/large tier (v11r9c), all-label F1 is 0.9742. Every catastrophic label is caught at full recall (1.000 detection) under v11r9c. FR is not weaker than EN.
+For the GPU/large tier (v11r9c), all-label F1 is 0.9742. Every catastrophic label is caught at >=0.974 full-stack detection under v11r9c (10 of 13 at 1.000; person 0.9946, sensitive_account_id 0.9993, account_number 0.974). FR is not weaker than EN.
 
 **Why v11r9c ships:** it closes a real structural-form leak in the prior model -- organization recall ~0.10 → 1.00, address recall ~0.60 → 0.95 -- at the cost of slightly more over-redaction on digit-ID-shaped tokens (clean false positives 12 → 34). That is the safe failure direction: over-redaction never leaks PII; it only costs a coding agent a little context when a benign number is ID-shaped. For a privacy firewall whose prime directive is "never leak," closing the org/address leak is worth the extra over-redaction -- a deliberate, principled trade. The CPU/base tier ships the same **v11r9c** revision, so it carries the org/address fix too (base `address` recall ~0.93; its own clean-FP trade is 12 → 48).
 
@@ -339,4 +339,4 @@ The redaction-proxy concept already exists. og-local/OutGate (BSL license) and r
 
 ## 10. Status
 
-The Track A appliance is built, running as a systemd service, and verified end-to-end (a real Claude Code session through the proxy redacts and rehydrates transparently). It is **not yet published**. The workbench UI is built. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`.
+The appliance is built, running as a systemd service, and verified end-to-end (a real Claude Code session through the proxy redacts and rehydrates transparently). It is **not yet published**. The workbench UI is built. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`.

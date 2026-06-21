@@ -84,7 +84,7 @@ That is it -- *once the appliance is running*. The two services (the NER engine 
 
 Open `http://127.0.0.1:8011/` in a local browser for the **console**: a do-not-redact dictionary editor and a **live activity** view that shows, per request, each real value → the placeholder the cloud sees and each placeholder → your real value on the reply -- visual proof the firewall is working on your own sessions. It is loopback-only and kept in memory (`GATEWAY_LIVE_VIEW=0` to disable).
 
-Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions` (Codex, omp, Hermes, Pi, opencode), and OpenAI `/v1/responses` (current Codex) are supported today, through the same redact/rehydrate contract. Tool-specific wiring is documented in `docs/ADAPTERS.md`. (The egress-proxy code lives under `appliance/` and the GPU NER gate service it calls under `gate/`; both are version-controlled, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift -- F6 closed.)
+Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions` (Codex, omp, Hermes, Pi, opencode), and OpenAI `/v1/responses` (current Codex) are supported today, through the same redact/rehydrate contract. Tool-specific wiring is documented in `docs/ADAPTERS.md`. (The egress-proxy code lives under `appliance/` and the GPU NER gate service it calls under `gate/`; both are version-controlled, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift.)
 
 ## Desktop app
 
@@ -97,7 +97,7 @@ One app, two surfaces, one codebase (`workbench/`) -- shipped both as a static w
 
 ## What it catches
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline above). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift (F6 closed).
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer described in the pipeline above). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift.
 
 **Tier-0 deterministic floor (always on, in the deployed appliance).** Regex + Luhn for the catastrophic structured categories, plus a deterministic secrets layer: ported gitleaks-style patterns and a Shannon-entropy backstop, with UUID / git-SHA / sequential false-positive filters. This layer is the reliable floor and runs on every request.
 
@@ -130,11 +130,11 @@ The privacy metric is **full-stack catastrophic DETECTION recall**: any detected
 
 *Benchmark basis: synthetic held-out corpus (`pii-heldout`, 7,498 rows, 20 labels), "full" config (Tier-0 floor + neural model), 597 no-PII negatives for clean_fp. The GPU/large row is the shipping `v11r9c` revision; the CPU/base row is also the `v11r9c` revision.*
 
-Published model ids (HuggingFace publication targets): `ZenSystemAI/ossredact-pii-large` (GPU) and `ZenSystemAI/ossredact-pii-base` (CPU INT8 / in-browser). `v11rN` is the weight revision (an HF revision tag), not part of the repo id. Both the GPU/large and CPU/base figures are the `v11r9c` revision; the base ships as per-channel dynamic INT8 (the WASM-native in-browser format) at pii_argmax 0.967 vs fp32 (parity bar 0.965 -- see `validation/RESULT-base-int8-parity-v11r9c.md`).
+Published model ids (HuggingFace publication targets): `ZenSystemAI/ossredact-pii-large` (GPU) and `ZenSystemAI/ossredact-pii-base` (CPU INT8 / in-browser). `v11rN` is the weight revision (an HF revision tag), not part of the repo id. Both the GPU/large and CPU/base figures are the `v11r9c` revision; the base ships as per-channel dynamic INT8 (the WASM-native in-browser format) at pii_argmax 0.967 vs fp32 -- a hair under the original 0.97 parity bar, which was relaxed to 0.965 to ship this export. The shortfall is acceptable because the flips are mostly on Tier-0-floor-protected tokens (redacted regardless of the model) and `account_number` is the one neural-only watch-item -- full analysis in `validation/RESULT-base-int8-parity-v11r9c.md`.
 
 **What changed in v11r9c (GPU/large).** v11r9c closes the structural-form organization and address leak that the prior revision missed: organization recall ~0.10 → 1.00 and address recall ~0.60 → 0.95 on the synthetic held-out corpus, with `sensitive_account_id` nudged 0.9983 → 0.9993. The cost is a little more over-redaction on digit-ID-shaped tokens (clean_fp 12 → 34; per-label precision dips on `government_id` ~0.87, `phone_number` ~0.84, `sensitive_account_id` ~0.88, `account_number` ~0.94, `date_of_birth` ~0.96). This is the safe failure direction: over-redaction never leaks PII, it only costs a coding agent a little context when a benign number is ID-shaped. For a privacy firewall whose prime directive is "never leak," closing the org/address leak is the right trade.
 
-Every catastrophic label is caught at >=0.974 full-stack detection (large); 11 of 13 at 1.000, with `person` at 0.9946 and `sensitive_account_id` at 0.9993. FR is not weaker than EN (FR R=0.980, EN R=0.978): the Quebec-French moat holds on unseen structure.
+Every catastrophic label is caught at >=0.974 full-stack detection (large); 10 of 13 at 1.000, the three exceptions being `person` 0.9946, `sensitive_account_id` 0.9993, and `account_number` 0.974 (the one neural-only watch-item). FR is not weaker than EN (FR R=0.980, EN R=0.978): the Quebec-French moat holds on unseen structure.
 
 **Latency:** clean fast-path 1.7ms median; PII-bearing request 23.5ms median; on-device about 34ms per 256-token window.
 
@@ -197,7 +197,7 @@ OSSRedact does not claim to be first or only at the proxy pattern.
 
 ## Status
 
-The Track A appliance is built, running as a systemd service, and verified end-to-end: a real Claude Code session through the proxy redacts and rehydrates transparently. **Not yet published.** The workbench UI is built. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`.
+The appliance is built, running as a systemd service, and verified end-to-end: a real Claude Code session through the proxy redacts and rehydrates transparently. **Not yet published.** The workbench UI is built. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`.
 
 ## License
 

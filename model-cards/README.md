@@ -18,6 +18,7 @@ huggingface-cli upload ZenSystemAI/ossredact-pii-base  model-cards/ossredact-pii
 ```
 
 The charts are bundled in each folder (rather than linked to the GitHub repo) so they render on HF regardless
-of GitHub repo visibility. The large-tier numbers are sourced from `validation/RESULT-v11.md`; the base-tier
-figures are the `v11r9c` re-eval (`eval_labelaware.py` + `bar_check_v11.py` on `datasets/pii-heldout-v11r5`),
-not the stale v11r5 base rows in `RESULT-v11.md`. Numbers are kept in sync with the root `MODEL_CARD.md`.
+of GitHub repo visibility. Both tiers' numbers are the `v11r9c` shipping benchmark, sourced from
+`validation/RESULT-v11r9c.md` (`eval_labelaware.py` + `bar_check_v11.py` on `datasets/pii-heldout-v11r5`) --
+not the stale v11r5 rows in `RESULT-v11.md` (the baseline v11r9c improves on). Numbers are kept in sync with
+the root `MODEL_CARD.md`.

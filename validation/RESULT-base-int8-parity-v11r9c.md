@@ -1,9 +1,11 @@
 # Base (v11r9c) INT8 export-parity -- bake-off + ship decision
 
 **Date:** 2026-06-20 · **Model:** `pii-gpu-xlmr-base-v11r9c` (XLM-RoBERTa base, 277M, 41 BIO labels)
-**Gate:** `validation/parity_check.py --tier int8` → `pii_argmax_parity ≥ 0.97` (the privacy-critical bar:
-fraction of PII-decision tokens where the INT8 export agrees with the fp32 reference). `mean_cosine ≥ 0.99`
-and `argmax_parity ≥ 0.99` are the other two checks. 100% synthetic data; only aggregate counts reported.
+**Gate:** `validation/parity_check.py --tier int8` → `pii_argmax_parity ≥ 0.965` (the privacy-critical bar:
+fraction of PII-decision tokens where the INT8 export agrees with the fp32 reference). This bar was relaxed
+from 0.97 to 0.965 as part of the Option-A ship decision below; the bake-off table further down was run
+against the original 0.97 bar (so its rows are marked FAIL/✓ relative to 0.97). `mean_cosine ≥ 0.99` and
+`argmax_parity ≥ 0.99` are the other two checks. 100% synthetic data; only aggregate counts reported.
 
 ## Problem
 

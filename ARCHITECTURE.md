@@ -14,7 +14,7 @@ The wire formats supported today are Anthropic `/v1/messages`, OpenAI-compatible
 `/v1/chat/completions` (routing Codex, Hermes, Pi, omp, opencode, and other OpenAI-compatible clients via openai_adapter.py),
 and OpenAI `/v1/responses` (the API the current Codex CLI speaks, via responses_adapter.py) -- all through the same
 redact/rehydrate contract. The egress-proxy code now lives in this repo under `appliance/`; the GPU NER
-gate service it calls is version-controlled under `gate/` and deployed on the GPU host (F6 closed; drift-guarded by `deploy/check-gate-drift.sh`). Tool-specific wiring is documented in `docs/ADAPTERS.md`. Point any tool at the gateway with:
+gate service it calls is version-controlled under `gate/` and deployed on the GPU host (drift-guarded by `deploy/check-gate-drift.sh`). Tool-specific wiring is documented in `docs/ADAPTERS.md`. Point any tool at the gateway with:
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:8011
@@ -469,7 +469,7 @@ Underneath the NER suite sit two deterministic layers (in the deployed appliance
 - **Deterministic secrets layer** (gitleaks-style patterns + Shannon-entropy backstop with
   UUID/git-SHA/sequential FP filters).
 
-**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift (F6 closed). The pipeline described in this document is that of the deployed appliance.
+**Repo scope vs deployed appliance.** This repository contains the detection library and CLI (`gate/privacy_gate.py`: Tier-0 regex+Luhn floor, NER tier wrappers, merge, redact/rehydrate), the training code, the validation code, and the egress proxy (`appliance/`: the `:8011` always-on gateway, SSE stream rehydration, the AES-GCM session/project entity map, the known-entity backstop, and the deterministic secrets/entropy layer). The GPU NER gate service (`gate/gate_service_gpu.py`) is now version-controlled here too; the running instance is deployed on the GPU host, with `deploy/check-gate-drift.sh` guarding host-vs-repo drift. The pipeline described in this document is that of the deployed appliance.
 
 ### 20 labels
 
@@ -589,7 +589,7 @@ Charts: `./charts/fig1, fig3, fig5` (png).
 
 ## Status
 
-- **Track A appliance is built**, running as a **systemd service**, and **verified end-to-end**: a
+- **appliance is built**, running as a **systemd service**, and **verified end-to-end**: a
   real Claude Code session through the proxy redacts and rehydrates transparently.
 - **Not yet published.**
-- The workbench UI is **built**. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`. (Both the egress-proxy code under `appliance/` and the GPU NER gate service under `gate/` are now version-controlled -- F6 closed; `deploy/check-gate-drift.sh` guards host vs repo drift.)
+- The workbench UI is **built**. Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions`, and OpenAI `/v1/responses` adapters are live; CLI wiring for Codex, Hermes, Pi, omp, and opencode is documented in `docs/ADAPTERS.md`. (Both the egress-proxy code under `appliance/` and the GPU NER gate service under `gate/` are now version-controlled; `deploy/check-gate-drift.sh` guards host vs repo drift.)

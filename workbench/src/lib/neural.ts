@@ -72,14 +72,32 @@ function ensureLoaded(): Promise<void> {
       wasm.numThreads = 1
     }
     const progress_callback = (p: NeuralProgress) => progressCb?.(p)
-    tok = (await AutoTokenizer.from_pretrained(MODEL_ID, { progress_callback })) as unknown as Tokenizer
-    const m = (await AutoModelForTokenClassification.from_pretrained(MODEL_ID, {
-      dtype: 'int8', // -> onnx/model_int8.onnx (the parity-gated deployed quantization)
-      device: 'wasm',
-      progress_callback,
-    })) as unknown as Model
-    model = m
-    id2label = m.config.id2label
+    // The model weights are a single ~278 MB file served with no content-length. On a COLD cache Chrome
+    // can abort the cache write (ERR_CACHE_WRITE_FAILURE -- the entry exceeds its per-entry disk-cache
+    // cap) and truncate the stream, so the FIRST from_pretrained throws while the bytes are still warming.
+    // A re-fetch then reliably succeeds. Without a retry the first "Deep detect" click silently degrades to
+    // Tier-0 and looks like "nothing was detected"; the user has to click again. Retry transparently here.
+    const ATTEMPTS = 4
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      try {
+        tok = (await AutoTokenizer.from_pretrained(MODEL_ID, { progress_callback })) as unknown as Tokenizer
+        const m = (await AutoModelForTokenClassification.from_pretrained(MODEL_ID, {
+          dtype: 'int8', // -> onnx/model_int8.onnx (the parity-gated deployed quantization)
+          device: 'wasm',
+          progress_callback,
+        })) as unknown as Model
+        model = m
+        id2label = m.config.id2label
+        return
+      } catch (e) {
+        lastErr = e
+        tok = null
+        model = null
+        if (attempt < ATTEMPTS) await new Promise((r) => setTimeout(r, 700 * attempt))
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error('on-device model failed to load')
   })()
   // Reset on failure so a "retry" actually re-attempts instead of re-returning the rejected promise.
   readyPromise.catch(() => {

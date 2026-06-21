@@ -4,7 +4,7 @@
 
 - **Use cloud SOTA, keep your data home.** No 256GB GPU rig required -- filter the private data out, let the cloud model work on placeholders, get the real values back transparently.
 - **Hand the AI a key it can use but never sees.** Your tool works with real data the whole time; the cloud model only ever receives `<PERSON_003>` and `<SECRET_001>`.
-- **A hard secret floor.** Deterministic detection (regex + Luhn + entropy) for secrets, payment cards, IBANs, and government IDs -- the model-independent guarantee, on every request, in every mode.
+- **A hard secret floor.** Deterministic detection (regex + Luhn + entropy) for secrets, payment cards, IBANs, and government IDs -- model-independent and always on, running on every request in every mode (including `Off`). It is cue-/shape-anchored rather than omniscient (see Limitations), but for these structured categories it does not depend on the model.
 - **Local and bilingual.** Detection runs on-device, so no detection call ever leaves your machine -- trained for French-Quebec + English, where generic English-first detectors fall short.
 - **Watch it work.** A loopback-only console shows, per request, each real value -> the placeholder the cloud sees, and each placeholder -> your real value on the reply.
 
@@ -178,6 +178,7 @@ State plainly:
 - Bare long transaction-reference digit runs adjacent to letters can be missed.
 - French and English only by design. Multilingual is an explicit future axis, not v1.
 - Secret detection covers keyword-cued assignments (English and French -- `motdepasse`/`mdp`/`jeton`/`clé`), known provider key shapes, connection strings, and an AWS-secret-shaped entropy backstop. A novel **opaque** token with no keyword cue and no recognizable shape (e.g. a bare high-entropy bearer value) can pass -- the entropy backstop is deliberately false-positive-filtered so it does not nuke ordinary code.
+- The CVV / PIN / short-numeric-secret floor is **cue-anchored**: a value force-redacts when it sits under a recognized key (`cvv`, `password`, `pin`, `account_pin`, `ssn`, ... -- as text *or* a native JSON number) or beside a text cue (`cvv: 834`, `"cvv": 834`, `NIP 4821`). A bare 3-4 digit number with no key and no cue is intentionally left alone -- redacting every short number would be unusable -- so such values rely on a recognized field name/cue or the NER tier.
 - Identifier coverage targets **Canadian / Québec** formats (SIN, RAMQ, NEQ, postal codes, ...). Foreign formats (e.g. US ZIP codes, Brazilian CPF) are not specifically detected.
 - Recall is below 100%. The deterministic Tier-0 layer is the reliable floor for the catastrophic categories (secrets/API keys, payment cards via Luhn, IBAN, SIN/government IDs, emails, IP addresses, file paths); the NER tiers raise coverage on top of it.
 - **Address and Organization have no deterministic Tier-0 floor** -- they rely entirely on the NER model. The GPU/large `v11r9c` revision now covers them well on the synthetic held-out corpus (organization 1.00, address 0.95), but this is model-dependent, not a hard guarantee like the Tier-0 categories. The CPU/base `v11r9c` tier now also carries this augmentation (address ~0.93); organization coverage may still trail the large tier, so use the large tier when organization recall matters.

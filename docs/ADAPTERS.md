@@ -21,18 +21,30 @@ tailnet or another trusted interface with `GATEWAY_HOST`, replace `127.0.0.1` wi
 
 All three routes run the SAME redact-on-egress / rehydrate-on-response contract.
 
-## The privacy guarantee
+## What gets redacted
 
-EVERY user-supplied text field in a request is redacted before egress. The extractor walks
-the request schema and isolates free-text / user-data fields (system prompt, message
-content, tool-result text/JSON, Anthropic `tool_use.input`, Anthropic document text sources,
-OpenAI Responses `input`, `instructions`, `prompt.variables`, agentic item text, JSON argument
-values including native numeric leaves, and tool schema descriptions/literal values), then redacts
-in place. Routing IDs, tool/function names, schema property names, images / audio, binary file
-bytes, and the `model` field are not free text and are left structural. A once-identified entity is also re-masked anywhere it reappears later in
-the session via the known-entity backstop, so a value the model misses in a new context
-still cannot leak. If the proxy is unreachable, your CLI simply cannot reach the upstream
--- it fails closed, it does not fall back to a raw direct call.
+EVERY user-supplied text field in a request is *scanned* before egress, and detected PII and
+secrets are masked in place. The extractor walks the request schema and isolates free-text /
+user-data fields (system prompt, message content, tool-result text/JSON, Anthropic
+`tool_use.input`, Anthropic document text sources, OpenAI Responses `input`, `instructions`,
+`prompt.variables`, agentic item text, JSON argument values including native numeric leaves
+under sensitive keys, and tool schema descriptions/literal values). Routing IDs, tool/function
+names, schema property names, images / audio, binary file bytes, and the `model` field are not
+free text and are left structural.
+
+Two tiers do the detecting, and they are not equally strong -- be honest about which is which:
+
+- **The deterministic Tier-0 floor** (secrets/API keys, payment cards via Luhn, IBANs, bank
+  accounts, government/tax IDs, emails, IPs) is the hard, model-independent part: it runs on
+  every request in every mode, including `Off`, and is the layer you can rely on.
+- **The neural tier** raises coverage for free-text PII (names, addresses, organizations) that
+  has no deterministic signature. It is high-recall but model-dependent -- detection is not
+  perfect, so treat free-text PII as best-effort *on top of* the floor, not a hard guarantee.
+
+A once-identified entity is also re-masked anywhere it reappears later in the session via the
+known-entity backstop, so a value the model misses in a new context still cannot leak. If the
+proxy is unreachable, your CLI simply cannot reach the upstream -- it fails closed, it does not
+fall back to a raw direct call.
 
 ## How to verify redaction is happening
 

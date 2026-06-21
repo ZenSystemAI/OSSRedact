@@ -41,7 +41,9 @@ def test_settings_page_renders(monkeypatch, tmp_path):
     c = _local_client(monkeypatch, tmp_path)
     r = c.get('/')
     assert r.status_code == 200
-    assert 'Do-not-redact dictionary' in r.text
+    assert 'Do-not-redact' in r.text
+    assert 'Always-redact' in r.text    # denylist tab wired
+    assert 'Redaction mode' in r.text   # mode switch present
     assert 'never' in r.text.lower()  # the secrets-never-exempt warning is present
 
 

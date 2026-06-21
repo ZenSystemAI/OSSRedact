@@ -132,6 +132,31 @@ def test_rc1_bare_digits_without_cue_not_redacted():
     assert not any(s['label'] == 'card_expiry' for s in pg.tier0_spans('the meeting is 08/27'))
 
 
+# ---- RC7: JSON-quoted numeric secrets pasted as TEXT (confirmed live leak 2026-06-21) -------------------
+def test_rc7_json_quoted_cvv_and_expiry_caught():
+    # a CVV/expiry pasted inside JSON text -- the "key": separator must not break the cue match
+    for t, v in [('{"cvv": 834}', '834'), ('{"cvv":"401"}', '401'),
+                 ('config = {"security_code": 720, "x": 1}', '720')]:
+        assert any(s['label'] == 'card_cvv' and pg._normseps(t)[s['start']:s['end']] == v
+                   for s in pg.tier0_spans(t)), t
+    assert any(s['label'] == 'card_expiry' and '08/27' in pg._normseps('{"expiry": "08/27"}')[s['start']:s['end']]
+               for s in pg.tier0_spans('{"expiry": "08/27"}'))
+
+
+def test_rc7_pin_passcode_otp_nip_caught():
+    for t, v in [('{"pin": 5571}', '5571'), ('PIN: 1234', '1234'), ('NIP 4821', '4821'),
+                 ('otp 991823', '991823'), ('passcode: 84217', '84217'),
+                 ('{"account_pin": 5571}', '5571'), ('one-time code 553201', '553201')]:
+        assert any(s['label'] == 'password' and pg._normseps(t)[s['start']:s['end']] == v
+                   for s in pg.tier0_spans(t)), t
+
+
+def test_rc7_num_secret_no_false_positive():
+    # word-boundary cues: 'pinned'/'spinning'/'shipping' and bare numbers must NOT fire
+    for t in ['pinned 5 items', 'spinning at 4500 rpm', 'shipping 250 units', 'there were 5571 rows']:
+        assert not any(s['rule'] == 'tier0:num_secret' for s in pg.tier0_spans(t)), t
+
+
 # ---- RC6: NFD-normalized denylist term still matched -----------------------------------------------------
 def test_rc6_nfd_denylist_term_caught():
     pat = dl.compile_denylist(['café-secret', 'Bluebird'])

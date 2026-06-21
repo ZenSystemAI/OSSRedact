@@ -656,7 +656,9 @@ export default function App() {
               </span>
               <button className="btn btn-ghost" onClick={runDeepAll} disabled={busy}>
                 {loadPct != null
-                  ? `Loading model ${loadPct}%`
+                  ? loadPct > 0
+                    ? `Loading model ${loadPct}%`
+                    : 'Loading model…'
                   : batchProgress
                     ? `Detecting ${batchProgress.done}/${batchProgress.total}…`
                     : 'Deep detect all'}

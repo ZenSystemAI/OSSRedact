@@ -257,11 +257,22 @@ def separated_card_spans(text: str):
 # Cue words are CVV-SPECIFIC: cvv/cvc(+2), 'security code' (a real CVV synonym -- kept; the rare 'security code
 # 401' HTTP-status collision is accepted over-redaction), card-verification, FR code-de-securite / cryptogramme.
 # DROPPED 'cid' (correlation/customer/container id -- a ubiquitous dev abbreviation that mis-fired) and bare 'sec code'.
-_CVV_RE = re.compile(r'(?i)(?:cvv2?|cvc2?|security\s*code|card\s*verification(?:\s*(?:code|value))?|'
-                     r'code\s*de\s*s[eé]curit[eé]|cryptogramme(?:\s*visuel)?)\s*(?:no\.?|num(?:[ée]ro)?|#)?\s*[:=#-]?\s*(\d{3,4})(?!\d)')
+# The cue->value separator tolerates a JSON closing-quote on the key and an optional quote on the value
+# (`["']?`), so a CVV/expiry pasted as JSON TEXT in a prompt ("cvv": 834, "expiry": "08/27") is caught --
+# not just the bare prose form (cvv: 834). Without it the quote between key and ':' broke the match and the
+# value leaked verbatim (confirmed live 2026-06-21). Structural JSON keys are force-redacted separately.
+_QSEP = r'\s*(?:no\.?|num(?:[ée]ro)?|#)?\s*["\']?\s*[:=#-]?\s*["\']?\s*'
+_CVV_RE = re.compile(r'(?i)(?:cvv2?|cvc2?|security[\s_]*code|card[\s_]*verification(?:[\s_]*(?:code|value))?|'
+                     r'code\s*de\s*s[eé]curit[eé]|cryptogramme(?:\s*visuel)?)' + _QSEP + r'(\d{3,4})(?!\d)')
 _EXPIRY_RE = re.compile(r'(?i)(?:exp(?:iry|ires?|iration)?|exp\.?\s*date|valid\s*thru|valid\s*through|good\s*thru|'
-                        r'valable\s*jusqu.?(?:au)?|[ée]ch[ée]ance|date\s*d.?expiration)\s*[:=#-]?\s*'
+                        r'valable\s*jusqu.?(?:au)?|[ée]ch[ée]ance|date\s*d.?expiration)\s*["\']?\s*[:=#-]?\s*["\']?\s*'
                         r'((?:0[1-9]|1[0-2])\s*[/\-]\s*(?:\d{4}|\d{2}))(?!\d)')
+# PIN / passcode / OTP numeric secrets (EN + FR 'NIP'). Cue-anchored with WORD boundaries so 'pinned'/'spinning'
+# never fire, and the same JSON-quote-tolerant separator so "pin": 5571 (pasted JSON) is caught, not just
+# 'pin 5571'. 3-8 digits. Emits the enforced FLOOR_LABEL 'password'. A bare cue-less number stays the NER's job.
+_NUM_SECRET_RE = re.compile(r'(?i)(?:(?:\b\w+_)?pin\b|\bnip\b|\bpasscode\b|\bpass[\s_]*code\b|\botp\b|'
+                            r'\bone[\s_-]?time[\s_]*(?:code|password|passcode|pin)\b|\baccess[\s_]*code\b)'
+                            + _QSEP + r'(\d{3,8})(?!\d)')
 
 def card_aux_spans(text: str):
     out = []
@@ -272,6 +283,9 @@ def card_aux_spans(text: str):
     for m in _EXPIRY_RE.finditer(t):
         out.append({'start': m.start(1), 'end': m.end(1), 'label': 'card_expiry', 'tier': 0,
                     'conf': 0.9, 'rule': 'tier0:expiry'})
+    for m in _NUM_SECRET_RE.finditer(t):
+        out.append({'start': m.start(1), 'end': m.end(1), 'label': 'password', 'tier': 0,
+                    'conf': 0.9, 'rule': 'tier0:num_secret'})
     return out
 
 

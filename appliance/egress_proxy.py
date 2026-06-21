@@ -770,7 +770,8 @@ def substitute(text, spans, emap, ctx):
 _SECRET_KEY_RE = re.compile(
     r'(?i)(?:^|[_\-.])(?:passw(?:or)?d|pwd|secret|secret[_-]?key|api[_-]?key|apikey|access[_-]?key|'
     r'access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|authorization|client[_-]?secret|'
-    r'private[_-]?key|motdepasse|mot[_\-.]?de[_\-.]?passe|mdp|jeton)(?:$|[_\-.])')
+    r'private[_-]?key|motdepasse|mot[_\-.]?de[_\-.]?passe|mdp|jeton|'
+    r'pin|account[_-]?pin|card[_-]?pin|nip|passcode|pass[_-]?code|otp)(?:$|[_\-.])')
 
 
 def _is_secret_key(k):
@@ -786,9 +787,19 @@ _CARD_KEY_RE = re.compile(
     r'card[_-]?expir(?:y|ation)?|exp[_-]?date|expir(?:y|ation)|card[_-]?exp)(?:$|[_\-.])')
 
 
+# Identity key NAMES: a value (numeric OR string) under these is a government ID / birth date even with no text
+# cue -- e.g. tool args {"ssn": 123456789} or {"dob": "1980-04-12"}. The key is the only signal the text floor
+# never sees. Boundary-anchored on key separators so 'using'/'business'/'canvas' never match the segments.
+_GOVID_KEY_RE = re.compile(r'(?i)(?:^|[_\-.])(?:ssn|sin|nas|social[_-]?security(?:[_-]?(?:number|no))?|'
+                           r'national[_-]?id|numero[_-]?assurance[_-]?sociale)(?:$|[_\-.])')
+_DOB_KEY_RE = re.compile(r'(?i)(?:^|[_\-.])(?:dob|date[_-]?of[_-]?birth|birth[_-]?date|birthdate|'
+                         r'date[_-]?de[_-]?naissance)(?:$|[_\-.])')
+
+
 def _sensitive_key_label(k):
     """Return the hard-FLOOR label for a sensitive-NAMED key (so its value is force-redacted regardless of the
-    value's own shape), or None. Secret credentials -> 'secret'; card components -> card_cvv/card_expiry/payment_card."""
+    value's own shape), or None. Secret credentials -> 'secret'; card components -> card_cvv/card_expiry/payment_card;
+    gov-ID keys -> 'government_id'; birth-date keys -> 'date_of_birth'."""
     if not isinstance(k, str):
         return None
     if _SECRET_KEY_RE.search(k):
@@ -800,6 +811,10 @@ def _sensitive_key_label(k):
         if 'exp' in kl:
             return 'card_expiry'
         return 'payment_card'
+    if _GOVID_KEY_RE.search(k):
+        return 'government_id'
+    if _DOB_KEY_RE.search(k):
+        return 'date_of_birth'
     return None
 
 
@@ -821,7 +836,15 @@ def force_redact_secret_keys(node, emap):
     if isinstance(node, dict):
         for k, v in list(node.items()):
             lab = _sensitive_key_label(k)
-            if isinstance(v, str) and v.strip() and lab and not _PH_TOKEN_RE.search(v):
+            if lab and isinstance(v, (int, float)) and not isinstance(v, bool):
+                # A NUMERIC value under a sensitive key -- {"cvv": 834}, {"card_number": 4539148803436467},
+                # {"password": 12345678}, {"ssn": 123456789}. JSON numbers carry no text cue and the str-only
+                # path below skipped them, so the digits shipped to the upstream verbatim (the A1 tool-args leak).
+                # Coerce to str and force-redact to the key's floor label.
+                ph, _ = emap.placeholder_for(str(v), lab)
+                node[k] = ph
+                n += 1
+            elif isinstance(v, str) and v.strip() and lab and not _PH_TOKEN_RE.search(v):
                 ph, _ = emap.placeholder_for(v, lab)
                 node[k] = ph
                 n += 1
@@ -1871,22 +1894,61 @@ _SETTINGS_HTML = """<!doctype html>
            background:var(--ink); color:#fff; padding:9px 16px; border-radius:999px; font-size:13px;
            transition:opacity .18s,transform .18s; pointer-events:none; }
   .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  /* mode switch + always-on floor banner */
+  .modebar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:0 0 12px; }
+  .modelabel { font-size:13px; font-weight:600; color:var(--muted); }
+  .seg { display:inline-flex; background:#eef0f2; border:1px solid var(--line); border-radius:10px; padding:3px; gap:2px; }
+  .seg-b { appearance:none; border:0; background:none; color:var(--muted); font:600 13px/1 system-ui,sans-serif;
+           padding:7px 14px; border-radius:8px; cursor:pointer; }
+  .seg-b[aria-pressed=true] { background:#fff; color:var(--teal-d); box-shadow:0 1px 2px rgba(0,0,0,.1); }
+  .seg-b.off[aria-pressed=true] { color:var(--danger); }
+  .seg-b:focus-visible { outline:3px solid rgba(13,148,136,.35); outline-offset:1px; }
+  .modehint { font-size:12.5px; color:var(--muted); flex-basis:100%; margin:-4px 0 0; }
+  .floorbanner { background:#ecfdf5; border:1px solid var(--teal-100); color:#115e59; border-radius:10px;
+                 padding:9px 12px; font-size:12.5px; line-height:1.5; margin:0 0 18px; display:flex; gap:8px; align-items:flex-start; }
+  .floorbanner b { color:#134e4a; }
+  .floorbanner .lk { flex-shrink:0; width:15px; height:15px; margin-top:1px; }
+  .note.deny { background:#fff7ed; border-color:#fed7aa; color:#9a3412; }
+  .note.deny b { color:#7c2d12; }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
 </style></head>
 <body><div class="wrap"><div class="card">
   <h1>OSSRedact <span class="dot">·</span> Local console</h1>
+  <div class="modebar">
+    <span class="modelabel">Redaction mode</span>
+    <div class="seg" role="group" aria-label="Redaction mode">
+      <button class="seg-b" id="mode-privacy" data-mode="privacy" type="button" aria-pressed="false">Privacy</button>
+      <button class="seg-b" id="mode-coding" data-mode="coding" type="button" aria-pressed="false">Coding</button>
+      <button class="seg-b off" id="mode-off" data-mode="off" type="button" aria-pressed="false">Off</button>
+    </div>
+    <span class="modehint" id="modehint"></span>
+  </div>
+  <div class="floorbanner">
+    <svg class="lk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+    <span><b>Floor always on.</b> Secrets, passwords, API keys, payment cards, IBANs, bank accounts and government / tax IDs are redacted in <b>every</b> mode, including Off.</span>
+  </div>
   <div class="tabs" role="tablist" aria-label="Console sections">
-    <button class="tab" id="tab-dict" role="tab" aria-selected="true" aria-controls="panel-dict">Do-not-redact dictionary</button>
+    <button class="tab" id="tab-allow" role="tab" aria-selected="true" aria-controls="panel-allow">Do-not-redact</button>
+    <button class="tab" id="tab-deny" role="tab" aria-selected="false" aria-controls="panel-deny">Always-redact</button>
     <button class="tab" id="tab-live" role="tab" aria-selected="false" aria-controls="panel-live">Live activity <span class="live" id="livedot"></span></button>
   </div>
 
-  <section class="panel" id="panel-dict" role="tabpanel" aria-labelledby="tab-dict">
+  <section class="panel" id="panel-allow" role="tabpanel" aria-labelledby="tab-allow">
     <p class="sub">Your own known-safe values -- your name, your email, your file paths -- that the gate should let through instead of redacting.</p>
     <div class="note"><b>These values reach the model verbatim.</b> Secrets, passwords, API keys, payment cards, IBANs, bank accounts and government / tax IDs are <b>never</b> exempt, even if listed.</div>
-    <form id="f"><input id="v" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+    <form id="f-allow"><input id="v-allow" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
           placeholder="add a name, email, or path…" aria-label="value to allowlist"><button class="add" type="submit">Add</button></form>
-    <ul id="list" aria-live="polite"></ul>
-    <div class="status"><span class="dotled"></span><span id="count">…</span><span class="path" id="path"></span></div>
+    <ul id="list-allow" aria-live="polite"></ul>
+    <div class="status"><span class="dotled"></span><span id="count-allow">…</span><span class="path" id="path-allow"></span></div>
+  </section>
+
+  <section class="panel" id="panel-deny" role="tabpanel" aria-labelledby="tab-deny" hidden>
+    <p class="sub">Your own must-mask terms -- internal codenames, client names, hostnames -- redacted everywhere they appear, even when no detector flags them.</p>
+    <div class="note deny"><b>These terms are always redacted.</b> Matched case-insensitively on word boundaries. This only ADDS redaction -- it can never weaken the floor or release anything.</div>
+    <form id="f-deny"><input id="v-deny" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+          placeholder="add a codename, client, or hostname…" aria-label="term to always redact"><button class="add" type="submit">Add</button></form>
+    <ul id="list-deny" aria-live="polite"></ul>
+    <div class="status"><span class="dotled"></span><span id="count-deny">…</span><span class="path" id="path-deny"></span></div>
   </section>
 
   <section class="panel" id="panel-live" role="tabpanel" aria-labelledby="tab-live" hidden>
@@ -1912,42 +1974,62 @@ const $ = s => document.querySelector(s);
 function toast(t){ const e=$('#toast'); e.textContent=t; e.classList.add('show'); clearTimeout(e._t); e._t=setTimeout(()=>e.classList.remove('show'),1400); }
 function el(tag, cls, txt){ const e=document.createElement(tag); if(cls) e.className=cls; if(txt!=null) e.textContent=txt; return e; }
 
-/* ---- tabs ---- */
-const tabs=[$('#tab-dict'),$('#tab-live')];
+/* ---- tabs (roving tablist, N tabs) ---- */
+const TABS=['allow','deny','live'];
+const tabEls=TABS.map(k=>$('#tab-'+k));
 function selectTab(which){
-  const liveOn = which==='live';
-  $('#tab-live').setAttribute('aria-selected', liveOn?'true':'false');
-  $('#tab-dict').setAttribute('aria-selected', liveOn?'false':'true');
-  $('#panel-live').hidden = !liveOn; $('#panel-dict').hidden = liveOn;
-  if(liveOn && !window._streamStarted) startStream();
-  location.hash = liveOn ? 'live' : 'dictionary';
+  TABS.forEach(k=>{ const on=k===which;
+    $('#tab-'+k).setAttribute('aria-selected', on?'true':'false');
+    $('#panel-'+k).hidden=!on; });
+  if(which==='live' && !window._streamStarted) startStream();
+  location.hash=which;
 }
-$('#tab-dict').onclick=()=>selectTab('dict'); $('#tab-live').onclick=()=>selectTab('live');
-tabs.forEach((t,i)=>t.addEventListener('keydown',e=>{ if(e.key==='ArrowRight'||e.key==='ArrowLeft'){ e.preventDefault(); const n=tabs[(i+(e.key==='ArrowRight'?1:1+tabs.length-2))%tabs.length]; n.focus(); n.click(); }}));
+tabEls.forEach((t,i)=>{
+  t.onclick=()=>selectTab(TABS[i]);
+  t.addEventListener('keydown',e=>{ if(e.key==='ArrowRight'||e.key==='ArrowLeft'){ e.preventDefault();
+    const dir=e.key==='ArrowRight'?1:-1; const n=tabEls[(i+dir+tabEls.length)%tabEls.length]; n.focus(); n.click(); }});
+});
+const _h=(location.hash||'').replace('#','');
+selectTab(TABS.includes(_h)?_h:'allow');
 
-/* ---- dictionary ---- */
-let values = [];
-function render(){
-  const ul=$('#list');
-  if(!values.length){ ul.innerHTML='<div class="empty">No values yet. Add your name, email, or a path above.</div>'; }
-  else { ul.innerHTML=''; values.forEach((v,i)=>{ const li=el('li');
-    li.appendChild(el('span','val',v));
-    const b=el('button','rm','×'); b.type='button'; b.title='Remove'; b.setAttribute('aria-label','Remove '+v);
-    b.onclick=()=>{ values.splice(i,1); save(); }; li.appendChild(b); ul.appendChild(li); }); }
+/* ---- dictionaries (allowlist + denylist share one implementation) ---- */
+function makeDict(opts){
+  let values=[];
+  const list=$('#list-'+opts.key), countEl=$('#count-'+opts.key), pathEl=$('#path-'+opts.key);
+  function render(){
+    if(!values.length){ list.innerHTML='<div class="empty">'+opts.empty+'</div>'; return; }
+    list.innerHTML=''; values.forEach(v=>{ const li=el('li'); li.appendChild(el('span','val',v));
+      const b=el('button','rm','×'); b.type='button'; b.title='Remove'; b.setAttribute('aria-label','Remove '+v);
+      b.onclick=()=>{ values=values.filter(x=>x!==v); save(); }; li.appendChild(b); list.appendChild(li); });
+  }
+  function setCount(d,extra){ countEl.textContent=(d.active_total||0)+' '+opts.noun+((d.active_total===1)?'':'s')+' active in the gate'+(extra||''); }
+  async function load(){ const r=await fetch(opts.endpoint); const d=await r.json();
+    values=d.values||[]; render(); setCount(d, d.config_values?(' (+'+d.config_values+' from config)'):''); pathEl.textContent=d.path||''; }
+  async function save(){ render();
+    const r=await fetch(opts.endpoint,{method:'POST',headers:{'content-type':'application/json','x-ossredact-control':'1'},body:JSON.stringify({values})});
+    const d=await r.json(); if(d.ok){ values=d.values; render(); setCount(d,''); toast('Saved -- live in the gate'); }
+    else { toast('Error: '+(d.error||'save failed')); load(); } }
+  $('#f-'+opts.key).addEventListener('submit',e=>{ e.preventDefault(); const i=$('#v-'+opts.key); const t=i.value.trim();
+    if(!t) return; if(!values.some(x=>x.toLowerCase()===t.toLowerCase())){ values.push(t); save(); } i.value=''; i.focus(); });
+  load();
 }
-async function load(){ const r=await fetch('/api/allowlist'); const d=await r.json();
-  values=d.values||[]; render();
-  const extra=d.config_values?(' (+'+d.config_values+' from config)'):'';
-  $('#count').textContent=(d.active_total||0)+' value'+((d.active_total===1)?'':'s')+' active in the gate'+extra;
-  $('#path').textContent=d.path||''; }
-async function save(){ render();
-  const r=await fetch('/api/allowlist',{method:'POST',headers:{'content-type':'application/json','x-ossredact-control':'1'},body:JSON.stringify({values})});
-  const d=await r.json(); if(d.ok){ values=d.values; render();
-    $('#count').textContent=(d.active_total||0)+' value'+((d.active_total===1)?'':'s')+' active in the gate'; toast('Saved -- live in the gate'); }
-  else { toast('Error: '+(d.error||'save failed')); load(); } }
-$('#f').addEventListener('submit',e=>{ e.preventDefault(); const i=$('#v'); const t=i.value.trim();
-  if(!t) return; if(!values.some(x=>x.toLowerCase()===t.toLowerCase())){ values.push(t); save(); } i.value=''; i.focus(); });
-load();
+makeDict({key:'allow', endpoint:'/api/allowlist', noun:'value', empty:'No values yet. Add your name, email, or a path above.'});
+makeDict({key:'deny', endpoint:'/api/denylist', noun:'term', empty:'No terms yet. Add a codename, client name, or hostname above.'});
+
+/* ---- redaction mode (privacy | coding | off) ---- */
+const MODE_HINT={ privacy:'Redacts all detected PII and secrets.',
+  coding:'Redacts PII, but lets organization & tech names through so coding agents keep context.',
+  off:'Soft PII passes through. The floor still redacts secrets, cards, bank / IBAN and government IDs.' };
+const MODE_KEYS=['privacy','coding','off']; let curMode=null;
+function paintMode(m){ curMode=m; MODE_KEYS.forEach(k=>$('#mode-'+k).setAttribute('aria-pressed', k===m?'true':'false')); $('#modehint').textContent=MODE_HINT[m]||''; }
+async function loadMode(){ try{ const d=await (await fetch('/api/settings')).json(); paintMode(d.mode||'privacy'); }catch(_){ } }
+async function setMode(m){ if(m===curMode) return;
+  if(m==='off' && !confirm('Turn redaction OFF? Soft PII (names, emails, phones, addresses) will pass through to the model. Secrets, cards, bank / IBAN and government IDs stay protected by the always-on floor.')) return;
+  const prev=curMode; paintMode(m);
+  const r=await fetch('/api/settings',{method:'POST',headers:{'content-type':'application/json','x-ossredact-control':'1'},body:JSON.stringify({mode:m})});
+  const d=await r.json(); if(d.ok){ toast('Mode: '+m); } else { toast('Error: '+(d.error||'failed')); paintMode(prev); } }
+MODE_KEYS.forEach(k=>$('#mode-'+k).onclick=()=>setMode(k));
+loadMode();
 
 /* ---- live activity ---- */
 const LABEL_HUE={person:200,name:200,email:265,phone:25,phone_number:25,address:140,organization:300,

@@ -56,7 +56,13 @@ export default function Toolbar(p: Props) {
             boxShadow: p.gate?.ok ? '0 0 8px var(--color-success)' : 'none',
           }}
         />
-        {p.loadPct != null ? `Loading model ${p.loadPct}%` : p.busy ? 'Detecting…' : 'Deep detect'}
+        {p.loadPct != null
+          ? p.loadPct > 0
+            ? `Loading model ${p.loadPct}%`
+            : 'Loading model…'
+          : p.busy
+            ? 'Detecting…'
+            : 'Deep detect'}
       </button>
 
       <button className="btn btn-ghost" onClick={p.onClearDetections} disabled={p.busy || p.totalCount === 0}>

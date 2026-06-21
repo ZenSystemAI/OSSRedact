@@ -140,7 +140,7 @@ def test_settings_page_has_both_tabs_and_stream_wiring(monkeypatch):
     c = TestClient(egress_proxy.app)
     r = c.get('/')
     assert r.status_code == 200
-    assert 'Live activity' in r.text and 'Do-not-redact dictionary' in r.text
+    assert 'Live activity' in r.text and 'Do-not-redact' in r.text and 'Always-redact' in r.text
     assert "EventSource('/api/stream')" in r.text
 
 

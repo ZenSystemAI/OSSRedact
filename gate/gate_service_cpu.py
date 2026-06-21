@@ -45,7 +45,7 @@ if not os.path.isdir(MODEL_DIR) or not any(f.endswith('.onnx') for f in os.listd
         f"  hf download ZenSystemAI/ossredact-pii-base --local-dir {MODEL_DIR}\n"
         f"or set CPU_GATE_MODEL to an existing INT8 ONNX model directory.\n")
 gate = PrivacyGate(None)
-gate.npu = NPUTier(MODEL_DIR)  # duck-typed neural tier: xlm-r-base v11r5 int8 on CPU (onnxruntime)
+gate.npu = NPUTier(MODEL_DIR)  # duck-typed neural tier: xlm-r-base v11r9c int8 on CPU (onnxruntime)
 _warm = gate.detect('warmup Jean Tremblay NAS 046 454 286 compte 006-02761-1234567 courriel a@b.ca')
 print(f'CPU gate ready ({len(_warm)} warmup spans)', flush=True)
 

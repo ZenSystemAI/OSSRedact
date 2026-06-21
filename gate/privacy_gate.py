@@ -13,7 +13,7 @@ Reversible redaction: typed placeholders + a local map. detect() -> spans; redac
 rehydrate() reverses. No external deps required for tiers 0-1 (onnxruntime + transformers tokenizer only).
 """
 from __future__ import annotations
-import re, json
+import re, json, unicodedata
 from collections import defaultdict
 
 # ---------------- Tier 0: thin validated floor (checksum/format-exact catastrophic shapes only) ----------------
@@ -25,9 +25,9 @@ EMAIL_RE = re.compile(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b')
 # UUID (8-4-4-4-12 hex) = connection/session/request IDs (e.g. Flinks login id). Never occurs by accident
 # in natural text, so it is a deterministic catch at ~1.0 confidence, independent of the model threshold.
 UUID_RE = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
-# IBAN: 2-letter country + 2 check digits + 11-30 alphanumerics (internal single spaces allowed). Validated
+# IBAN: 2-letter country + 2 check digits + 11-30 alphanumerics (internal spaces/hyphens allowed). Validated
 # by the ISO 7064 mod-97 checksum (_iban_ok), so a match is a near-certain real IBAN with no precision risk.
-IBAN_RE = re.compile(r'\b([A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30})\b')
+IBAN_RE = re.compile(r'\b([A-Z]{2}\d{2}(?:[A-Z0-9]{11,30}|(?:[ -][A-Z0-9]{2,4}){3,8}))\b', re.I)
 # Shape-specific numeric candidates. EXACT digit counts (with optional single space/dash separators between
 # digits, matching the real 4-4-4-4 / 4-6-5 / 3-3-3 groupings) so a candidate can NEVER bridge two adjacent
 # numbers across a separator (a generic greedy digit-run would swallow "card<space>SIN" into one blob and
@@ -66,8 +66,50 @@ def _normdash(s: str) -> str:
 _SPACE_RE = re.compile('[            　]')
 def _normspace(s: str) -> str:
     return _SPACE_RE.sub(' ', s)
+# Unicode DIGIT homoglyphs that aren't ASCII 0-9 (SUPERSCRIPT/SUBSCRIPT/circled = category No, which \d never
+# matches): map every single-codepoint digit-valued char to its ASCII digit so "card ⁴¹¹¹..." engages the
+# digit floor. LENGTH-PRESERVING; also folds non-ASCII Nd (fullwidth, Arabic-Indic) to ASCII for an exact Luhn.
+def _normdigits(s: str) -> str:
+    if s.isascii():
+        return s
+    out = []
+    for ch in s:
+        if '0' <= ch <= '9':
+            out.append(ch); continue
+        try:
+            out.append(str(unicodedata.digit(ch)))
+        except (ValueError, TypeError):
+            out.append(ch)
+    return ''.join(out)
+
 def _normseps(s: str) -> str:
-    return _normspace(_normdash(s))
+    return _normdigits(_normspace(_normdash(s)))
+
+# Zero-width / format (Unicode category Cf) + control (Cc) + soft-hyphen interleaving INVISIBLY breaks every
+# Tier-0 number/identifier regex: "4<U+200B>1<U+200B>1<U+200B>1..." has the digit-run separators a human and
+# the upstream LLM never see, so the deterministic floor returns n_spans=0 and the real card/IBAN/SIN ships raw
+# in EVERY mode incl 'off' (the floor is supposed to be un-bypassable). Two codepoint classes do this:
+#   Cf (format)  -- ZWSP/ZWNJ/ZWJ/WORD-JOINER/BOM/soft-hyphen (U+200B.., U+00AD)
+#   Cc (control) -- TAB/LF/VT/FF/CR (U+0009-000D) and the C0/C1 separators (FS/GS/RS/US U+001C-001F)
+# _normseps only maps Zs spaces + dashes, never these. Fix: strip BOTH classes to a clean copy, re-run the
+# Tier-0 scan there, and map each span back onto the ORIGINAL offsets so the mask covers the value AND the
+# interleaved invisibles. (Soft hyphen U+00AD is category Cf; ZWSP/ZWNJ/ZWJ/WORD-JOINER/BOM are too; TAB/CR/LF
+# and the C0 separators are Cc -- a single category-membership test covers them all.)
+_INVISIBLE_CATS = ('Cf', 'Cc')
+
+def _has_format_chars(s: str) -> bool:
+    return any(unicodedata.category(ch) in _INVISIBLE_CATS for ch in s)
+
+def _strip_format_chars(text: str):
+    """Return (clean, idx_map): clean has every Cf/Cc codepoint removed; idx_map[i] = original index of
+    clean[i], with a trailing sentinel idx_map[len(clean)] = len(text) so an end offset always maps."""
+    chars, idx_map = [], []
+    for i, ch in enumerate(text):
+        if unicodedata.category(ch) in _INVISIBLE_CATS:
+            continue
+        chars.append(ch); idx_map.append(i)
+    idx_map.append(len(text))
+    return ''.join(chars), idx_map
 
 def _luhn_ok(digits: str) -> bool:
     s = 0
@@ -82,7 +124,7 @@ def _luhn_ok(digits: str) -> bool:
 def _iban_ok(s: str) -> bool:
     """ISO 7064 mod-97 IBAN checksum: strip spaces, move the first 4 chars to the end, map letters A-Z to
     10-35, then the integer value mod 97 must equal 1. A pass is a near-certain real IBAN (no FP risk)."""
-    s = re.sub(r'\s', '', s).upper()
+    s = re.sub(r'[\s-]', '', s).upper()
     if not re.fullmatch(r'[A-Z]{2}\d{2}[A-Z0-9]+', s):
         return False
     s2 = s[4:] + s[:4]
@@ -91,6 +133,22 @@ def _iban_ok(s: str) -> bool:
         return int(digits) % 97 == 1
     except ValueError:
         return False
+
+def _valid_iban_candidate(raw: str):
+    """Return the checksum-valid prefix of an IBAN candidate, trimming only trailing separated groups.
+
+    The regex is case-insensitive so a prose word after a grouped IBAN can look like one more group
+    (for example "... 32 fin"). Try the full candidate first, then drop separator-delimited tail groups.
+    """
+    candidate = raw
+    while candidate:
+        if _iban_ok(candidate):
+            return candidate
+        cut = max(candidate.rfind(' '), candidate.rfind('-'))
+        if cut <= 4:
+            break
+        candidate = candidate[:cut]
+    return None
 
 def validated_floor(text: str):
     """The thin never-leak floor: emit ONLY checksum/format-exact catastrophic shapes (email, UUID,
@@ -106,8 +164,9 @@ def validated_floor(text: str):
     for m in UUID_RE.finditer(t):
         add(m.start(), m.end(), 'sensitive_account_id', 0.99, 'floor:uuid')
     for m in IBAN_RE.finditer(t):
-        if _iban_ok(m.group(1)):
-            add(m.start(1), m.end(1), 'iban', 0.99, 'floor:iban', validator='mod97_ok')
+        iban = _valid_iban_candidate(m.group(1))
+        if iban:
+            add(m.start(1), m.start(1) + len(iban), 'iban', 0.99, 'floor:iban', validator='mod97_ok')
     for m in _CARD_CAND_RE.finditer(t):
         digits = re.sub(r'\D', '', m.group(1))
         if len(digits) in (15, 16) and _luhn_ok(digits):
@@ -119,7 +178,194 @@ def validated_floor(text: str):
             if _BN_PROGRAM_SUFFIX_RE.match(t[e0:e0 + 12]) and not _SIN_CUE_RE.search(t[max(0, s0 - 40):s0]):
                 continue  # Business Number (GST/QST), not a SIN, and no SIN cue forces emission -- Finding A
             add(s0, e0, 'government_id', 0.9, 'floor:sin', validator='luhn_ok')
+    spans += glued_digit_spans(t)       # Luhn-valid 9-digit SIN glued to letters (no cue; Luhn-precise)
+    spans += separated_card_spans(t)    # dot/space/dash-grouped Luhn card + dotted SSN (sep DIGIT_RUN rejects)
+    spans += card_aux_spans(t)          # cue-anchored card_cvv + card_expiry (no standalone Tier-0 before)
+    # Zero-width/format-char obfuscation resistance: if the ORIGINAL carries Cf codepoints, re-scan a stripped
+    # copy and map the spans back. clean has no Cf chars, so validated_floor(clean) cannot re-enter this branch.
+    if _has_format_chars(text):
+        clean, idx_map = _strip_format_chars(text)
+        if clean and clean != text:
+            for s in validated_floor(clean):
+                a, b = idx_map[s['start']], idx_map[s['end'] - 1] + 1
+                spans.append({**s, 'start': a, 'end': b, 'rule': (s.get('rule') or 'tier0') + '+cf'})
     return spans
+
+
+# Glued NON-checksum digit-run floor. DIGIT_RUN_RE rejects digit runs glued to letters (precision for code).
+# A confirmed leak was a 9-digit SIN glued to a word ("JaneDoe046454286"). The naive fix (promote ANY 9-19
+# digit run glued to a letter) over-redacts real coding traffic badly -- translateY(123456789px), seed1234567890,
+# unix timestamps createdAt1700000000 (FP audit). So glued promotion is PRECISION-GATED:
+#   - 9 digits + LUHN-valid -> government_id. Canadian SINs carry a Luhn check digit, so this catches the real
+#     SIN ("046454286" passes Luhn) while rejecting code numbers ("123456789" fails Luhn). No cue needed.
+#   - everything else glued (incl. non-Luhn SSN, 10-19 account runs) is left to context_cued_id_spans, which
+#     fires ONLY when a financial/identity cue is adjacent (its _LONG_ID_RE now covers 9-19 digits). A bank
+#     account glued to a NON-cue word relies on the neural tier -- accepted residual vs. nuking every code id.
+# Luhn cards stay with glued_checksum_spans. Letter-adjacency REQUIRED.
+_GLUED_DIGIT_RE = re.compile(r'(?<!\d)(\d{9})(?!\d)')
+
+def glued_digit_spans(text: str):
+    out = []
+    t = _normseps(text)
+    for m in _GLUED_DIGIT_RE.finditer(t):
+        s, e, digits = m.start(1), m.end(1), m.group(1)
+        left = t[s - 1] if s > 0 else ' '
+        right = t[e] if e < len(t) else ' '
+        if not (left.isalpha() or right.isalpha()):
+            continue                                  # clean boundary -> already owned by DIGIT_RUN_RE
+        if _luhn_ok(digits):                          # Luhn-valid 9-digit glued to a word = a SIN, not a code id
+            # Business Number suppression (mirrors validated_floor's _SIN_CAND_RE path): a glued RT/RP/RC...
+            # program-account suffix ("046454286RT0001") is a public GST/QST registration, not a personal SIN.
+            # Suppress UNLESS a SIN cue forces emission (never-leak override). A clean SIN glued to a non-suffix
+            # word ("JaneDoe046454286") is unaffected and still emits.
+            if _BN_PROGRAM_SUFFIX_RE.match(t[e:e + 12]) and not _SIN_CUE_RE.search(t[max(0, s - 40):s]):
+                continue
+            out.append({'start': s, 'end': e, 'label': 'government_id', 'tier': 0, 'conf': 0.8,
+                        'rule': 'tier0:digit_glued', 'validator': 'luhn_ok'})
+    return out
+
+
+# Separator-tolerant payment card: DIGIT_RUN_RE / glued_checksum reject '.'-separated groups (a confirmed leak:
+# "4111.1111.1111.1111") and percent-encoded spaces ("4111%201111%201111%201111"). A 4-4-4-4 (or amex 4-6-5)
+# grouping joined by '.', '-', space, or the literal "%20" whose digits are a Luhn-valid 15/16-run is a card
+# with near-zero FP (Luhn-gated). Space/dash forms re-emit harmlessly (merged).
+_CARD_SEP = r'(?:[ .\-]|%20)'
+_SEP_CARD_RE = re.compile(r'(?<![\d.])(\d{4}(?:' + _CARD_SEP + r'\d{4}){3}|\d{4}' + _CARD_SEP + r'\d{6}' + _CARD_SEP + r'\d{5})(?![\d.])')
+# US SSN written with dot separators ("123.45.6789"): a 3-2-4 digit grouping joined by dots. The boundary
+# rejects longer dotted sequences (IPs/versions never group 3-2-4). government_id floor.
+_DOT_SSN_RE = re.compile(r'(?<![\d.])(\d{3}\.\d{2}\.\d{4})(?![\d.])')
+
+def separated_card_spans(text: str):
+    out = []
+    t = _normseps(text)
+    for m in _SEP_CARD_RE.finditer(t):
+        digits = re.sub(r'\D', '', m.group(1).replace('%20', ' '))   # decode %20 before digit extraction (its 2,0 are not card digits)
+        if len(digits) in (15, 16) and _luhn_ok(digits):
+            out.append({'start': m.start(1), 'end': m.end(1), 'label': 'payment_card', 'tier': 0,
+                        'conf': 0.95, 'rule': 'tier0:card_sep', 'validator': 'luhn_ok'})
+    for m in _DOT_SSN_RE.finditer(t):
+        out.append({'start': m.start(1), 'end': m.end(1), 'label': 'government_id', 'tier': 0,
+                    'conf': 0.8, 'rule': 'tier0:ssn_dotted'})
+    return out
+
+
+# card_cvv + card_expiry are FLOOR_LABELS but had NO deterministic Tier-0 regex -- they fired only when the
+# neural tier happened to tag them, so a bare CVV ("security code 123", "cvc: 123") or a short expiry
+# ("expiry 08/27", "exp 12/2026") leaked verbatim in privacy AND off mode, even alongside a redacted card (a
+# false sense the whole card block is protected). Both are CUE-ANCHORED so a stray 3-digit number or a generic
+# date never blanket-redacts: a card-verification / expiry keyword (EN+FR) must sit immediately before.
+# Cue words are CVV-SPECIFIC: cvv/cvc(+2), 'security code' (a real CVV synonym -- kept; the rare 'security code
+# 401' HTTP-status collision is accepted over-redaction), card-verification, FR code-de-securite / cryptogramme.
+# DROPPED 'cid' (correlation/customer/container id -- a ubiquitous dev abbreviation that mis-fired) and bare 'sec code'.
+_CVV_RE = re.compile(r'(?i)(?:cvv2?|cvc2?|security\s*code|card\s*verification(?:\s*(?:code|value))?|'
+                     r'code\s*de\s*s[eé]curit[eé]|cryptogramme(?:\s*visuel)?)\s*(?:no\.?|num(?:[ée]ro)?|#)?\s*[:=#-]?\s*(\d{3,4})(?!\d)')
+_EXPIRY_RE = re.compile(r'(?i)(?:exp(?:iry|ires?|iration)?|exp\.?\s*date|valid\s*thru|valid\s*through|good\s*thru|'
+                        r'valable\s*jusqu.?(?:au)?|[ée]ch[ée]ance|date\s*d.?expiration)\s*[:=#-]?\s*'
+                        r'((?:0[1-9]|1[0-2])\s*[/\-]\s*(?:\d{4}|\d{2}))(?!\d)')
+
+def card_aux_spans(text: str):
+    out = []
+    t = _normseps(text)
+    for m in _CVV_RE.finditer(t):
+        out.append({'start': m.start(1), 'end': m.end(1), 'label': 'card_cvv', 'tier': 0,
+                    'conf': 0.9, 'rule': 'tier0:cvv'})
+    for m in _EXPIRY_RE.finditer(t):
+        out.append({'start': m.start(1), 'end': m.end(1), 'label': 'card_expiry', 'tier': 0,
+                    'conf': 0.9, 'rule': 'tier0:expiry'})
+    return out
+
+
+# ---- Tier-0 person backstop: deterministic where a strong CUE exists ----
+# Person names have NO checksum/regex floor, so the NER owns them -- EXCEPT the RFC5322 mailbox form
+# "Display Name <addr@domain>" (email From/To/Cc headers, git Author/Signed-off-by lines), where the email
+# adjacency destabilizes the NER span (it truncates or drops the name -- measured 4/25 real-world name forms).
+# There the '<email>' / header cue IS deterministic, so we hard-guarantee the preceding name. Cue-LESS prose
+# names stay the model's job (the NER catches those well). Offsets index the _normseps copy = original text.
+_EMAIL_ANCHOR_RE = re.compile(r'<[ \t]*[\w.+-]+@[\w-]+\.[\w.-]+[ \t]*>')
+_HDR_CUE_RE = re.compile(
+    r'(?im)^[ \t]*(?:from|to|cc|bcc|reply-to|sender|author|co-authored-by|signed-off-by|owner|'
+    r'titulaire|propri[ée]taire|attn|attention)[ \t]*:[ \t]*')
+# a name token: unicode letters with internal apostrophe / hyphen / period, NO digits
+_NAME_TOKEN_RE = re.compile(r"[^\W\d_]+(?:['’.\-][^\W\d_]+)*", re.UNICODE)
+_NAME_PARTICLES = {'van', 'von', 'de', 'der', 'den', 'del', 'della', 'di', 'da', 'du', 'la', 'le',
+                   'el', 'bin', 'ibn', 'al', 'dos', 'das', 'do', 'of', 'and'}
+_NAME_ROLE_DENY = {'support', 'sales', 'billing', 'info', 'admin', 'noreply', 'no-reply', 'notifications',
+                   'notification', 'team', 'contact', 'hello', 'help', 'marketing', 'security', 'abuse',
+                   'postmaster', 'mailer-daemon', 'do-not-reply', 'donotreply', 'newsletter', 'accounts',
+                   'service', 'services', 'sender', 'recipient', 'no_reply'}
+
+def _name_shaped(s: str) -> bool:
+    """True if s looks like a personal name (1-5 capitalized alpha tokens, lowercase particles allowed,
+    no digits, not a role/distribution-list word). Permissive on purpose: a cue-anchored over-mask of a
+    display name is privacy-safe; a missed name is a leak."""
+    s = s.strip().strip('"').strip()
+    words = s.split()
+    if not (2 <= len(s) <= 60) or not (1 <= len(words) <= 5) or any(c.isdigit() for c in s):
+        return False
+    if s.lower() in _NAME_ROLE_DENY or all(w.lower() in _NAME_ROLE_DENY for w in words):
+        return False
+    has_cap = False
+    for w in words:
+        core = w.replace('-', '').replace("'", '').replace('’', '').replace('.', '')
+        if not core or not all(c.isalpha() for c in core):
+            return False
+        if w[0].isupper():
+            has_cap = True
+        elif w.lower() not in _NAME_PARTICLES:
+            return False
+    return has_cap
+
+def _is_name_tok(tok: str) -> bool:
+    return (tok[:1].isupper() or tok.lower() in _NAME_PARTICLES) and tok.lower() not in _NAME_ROLE_DENY
+
+def _name_run_before(t: str, end: int):
+    """Maximal run of contiguous name-shaped tokens ending right before index `end` (the '<' of an email).
+    Only whitespace/quotes may sit between tokens (and between the last token and `end`)."""
+    toks = [(m.group(0), m.start(), m.end()) for m in _NAME_TOKEN_RE.finditer(t[:end])]
+    if not toks or t[toks[-1][2]:end].strip(' \t"\'’') != '':
+        return None
+    chosen, nxt = [], end
+    for tok, s, e in reversed(toks):
+        if t[e:nxt].strip(' \t"\'’') != '' or not _is_name_tok(tok):
+            break
+        chosen.append((s, e)); nxt = s
+        if len(chosen) >= 5:
+            break
+    while chosen and t[chosen[-1][0]:chosen[-1][1]].lower() in _NAME_PARTICLES:  # don't start on a particle
+        chosen.pop()
+    return (chosen[-1][0], chosen[0][1]) if chosen else None
+
+def _name_run_after(t: str, start: int, stop: int):
+    """Maximal run of contiguous name-shaped tokens beginning at `start` (just past a header cue)."""
+    toks = [(m.group(0), m.start(), m.end()) for m in _NAME_TOKEN_RE.finditer(t, start, stop)]
+    chosen, prev = [], start
+    for tok, s, e in toks:
+        if t[prev:s].strip(' \t"\'’') != '' or not _is_name_tok(tok):
+            break
+        chosen.append((s, e)); prev = e
+        if len(chosen) >= 5:
+            break
+    while chosen and t[chosen[0][0]:chosen[0][1]].lower() in _NAME_PARTICLES:
+        chosen.pop(0)
+    return (chosen[0][0], chosen[-1][1]) if chosen else None
+
+def cue_name_spans(text: str):
+    """Deterministic person spans for the cue-bearing forms the NER wobbles on: the name immediately
+    before an <email> anchor (RFC5322 mailbox / git-author), and the name right after a
+    From:/To:/Author:/owner: header cue. Offsets index the _normseps copy = the original text."""
+    spans, t, seen = [], _normseps(text), set()
+    def emit(rng):
+        if rng and rng not in seen and _name_shaped(t[rng[0]:rng[1]]):
+            seen.add(rng)
+            spans.append({'start': rng[0], 'end': rng[1], 'label': 'person', 'tier': 0,
+                          'conf': 0.95, 'rule': 'floor:cue_name'})
+    for m in _EMAIL_ANCHOR_RE.finditer(t):           # "<name> <email>"
+        emit(_name_run_before(t, m.start()))
+    for m in _HDR_CUE_RE.finditer(t):                # "From:/Author:/owner: <name>"
+        le = t.find('\n', m.end())
+        emit(_name_run_after(t, m.end(), len(t) if le == -1 else le))
+    return spans
+
 
 # ---------------- Tier 1: NPU INT8 ONNX ----------------
 class NPUTier:
@@ -196,7 +442,18 @@ class GPUTier:
         return [s for s in out if s['conf'] >= min_score]
 
 # ---------------- merge + redact ----------------
-def merge_spans(spans):
+# The deterministic HARD FLOOR: credential + money/government/identity labels. Single source of truth for
+# merge stickiness below (and mirrored by the egress FLOOR_NEVER_EXEMPT guards). A floor label must never be
+# downgraded to a soft label by an overlapping higher-confidence neural guess.
+FLOOR_LABELS = frozenset({
+    'secret', 'password', 'api_key', 'access_token',                  # credentials
+    'payment_card', 'card_cvv', 'card_expiry',                        # cards
+    'sensitive_account_id', 'bank_account', 'iban', 'routing_number', # bank / account
+    'government_id', 'tax_id', 'date_of_birth',                       # government / identity
+})
+
+
+def merge_spans(spans, sticky=FLOOR_LABELS):
     # CONNECTED-COMPONENT UNION. A privacy gate must never leave a PII fragment exposed between two
     # overlapping detections. Greedy drop-the-loser does exactly that: model emits "21" inside a date, or a
     # spurious "password" on a UUID partially overlaps "21 mai 2026" -> whichever is dropped, half the date
@@ -204,11 +461,18 @@ def merge_spans(spans):
     # cluster's PRIMARY label is the highest-confidence (then longest) member's (used for the placeholder),
     # but ALL distinct member labels are recorded in 'labels' so a category filter / audit is not lied to.
     # The union text is what gets masked and stored for rehydration. Over-redaction is the safe error.
+    #
+    # FLOOR STICKINESS: a deterministic hard-floor label (credentials, cards, bank/IBAN, government/tax IDs,
+    # DOB) must NEVER be downgraded to a soft neural label just because an overlapping guess scored higher --
+    # the egress floor guards key off the post-merge primary LABEL, so a relabeled floor value would lose its
+    # protection and leak. If any cluster member carries a floor label, the primary stays the highest-conf
+    # FLOOR member's (the soft label is still recorded in 'labels'). Strictly safer: floor only ever wins.
     if not spans:
         return []
     spans = sorted(spans, key=lambda s: (s['start'], -(s['end'] - s['start'])))
     out = []
     for s in spans:
+        floor = s['label'] in sticky
         if out and s['start'] < out[-1]['end']:  # overlaps the current cluster
             cur = out[-1]
             cur['members'] = cur.get('members', 1) + 1
@@ -218,12 +482,24 @@ def merge_spans(spans):
                 cur['label'] = s['label']; cur['tier'] = s['tier']; cur['_bc'], cur['_bl'] = cand
                 cur['rule'] = s.get('rule'); cur['validator'] = s.get('validator')
                 cur['cue'] = s.get('cue'); cur['subtype'] = s.get('subtype')
+            if floor and s['conf'] > cur.get('_fc', -1.0):  # remember the strongest floor member
+                cur['_floor'] = s; cur['_fc'] = s['conf']
             cur['end'] = max(cur['end'], s['end'])
             cur['conf'] = max(cur['conf'], s['conf'])
         else:
-            out.append({**s, '_bc': s['conf'], '_bl': s['end'] - s['start'], 'members': 1,
-                        '_labels': {s['label']}})
+            nc = {**s, '_bc': s['conf'], '_bl': s['end'] - s['start'], 'members': 1,
+                  '_labels': {s['label']}}
+            if floor:
+                nc['_floor'] = s; nc['_fc'] = s['conf']
+            out.append(nc)
     for m in out:
+        fl = m.pop('_floor', None); m.pop('_fc', None)
+        if fl is not None and m['label'] not in sticky:
+            # a floor value got out-scored by an overlapping soft guess -> restore the floor member as the
+            # cluster's primary so the egress floor guards see a floor label (the soft label stays in 'labels').
+            m['label'] = fl['label']; m['tier'] = fl['tier']
+            m['rule'] = fl.get('rule'); m['validator'] = fl.get('validator')
+            m['cue'] = fl.get('cue'); m['subtype'] = fl.get('subtype')
         m.pop('_bc', None); m.pop('_bl', None)
         labset = m.pop('_labels', None)
         if labset and len(labset) > 1:
@@ -278,7 +554,7 @@ _PLACEHOLDER_TOKEN_RE = re.compile(r'<[A-Z][A-Z0-9_]*_\d{3,}>')
 # Minimum value length to sweep -- below this a value is too generic to mask globally without spurious
 # matches (and tiny tokens are rarely uniquely-identifying on their own). Mirrors the egress proxy len>=4.
 _MIN_SWEEP_LEN = 4
-_CASE_SENSITIVE_LABELS = {'password', 'secret', 'username', 'access_token', 'api_key', 'file_path'}
+_CASE_SENSITIVE_LABELS = {'password', 'secret', 'username', 'person', 'name', 'access_token', 'api_key', 'file_path'}
 
 
 def _case_sensitive_label(label):
@@ -301,7 +577,7 @@ def _build_known_re(values, ignore_case=True):
     has the same limitation; the JS twin uses \\p{M}. Acceptable: over-masking is the safe error here anyway.
     By default this is compiled IGNORECASE (Codex HIGH-1): ordinary known values must be masked regardless of
     case, else "John" detected once leaks as "JOHN"/"john" elsewhere. Case-significant labels use an exact-case
-    companion regex so credentials and paths that differ only by case stay lossless."""
+    companion regex so case-significant values that differ only by case stay lossless."""
     vals = [v for v in values if v and len(v) >= _MIN_SWEEP_LEN]
     if not vals:
         return None
@@ -323,8 +599,8 @@ def _sweep_known(text, known_re, value_to_placeholder, protected_placeholders=No
     is the safe error; rehydrate() restores every occurrence regardless of which pass inserted it."""
     if known_re is None:
         return text, 0
-    # Ordinary PII resolves case-insensitively. Case-significant labels resolve by exact text so two credentials
-    # that differ only by case never collapse to one placeholder during the repeated-value sweep.
+    # Ordinary PII resolves case-insensitively. Case-significant labels resolve by exact text so values that
+    # differ only by case never collapse to one placeholder during the repeated-value sweep.
     if case_sensitive:
         lookup = dict(value_to_placeholder)
         lookup_key = lambda s: s
@@ -368,7 +644,7 @@ class PrivacyGate:
         # Phase 2.2: the casenorm second pass (re-run on a Title-cased copy to recover ALL-CAPS) was removed.
         # The model is trained on ALL-CAPS in Phase 3, so it owns case-robustness; the double pass only added
         # latency and merge noise.
-        spans = validated_floor(text)
+        spans = validated_floor(text) + cue_name_spans(text)
         if self.npu:
             spans += self.npu.spans(text, min_score)
         return post_merge_address(merge_spans(spans), text)
@@ -386,9 +662,9 @@ class PrivacyGate:
         # /redact stats -- matter downstream; the recomputed members/labels are not consumed on the redact path).
         spans = merge_spans(spans)
         mapping = {}; counters = defaultdict(int); out = []; last = 0
-        # Dedup placeholders by label + value. Ordinary PII keeps casefold dedup so "Jane"/"JANE" and
-        # case-variant emails share a stable placeholder. Case-significant labels (credentials and paths) keep
-        # exact-case values distinct so rehydrate is lossless for "AbC123" vs "abc123".
+        # Dedup placeholders by label + value. Ordinary non-name PII keeps casefold dedup so case-variant
+        # emails share a stable placeholder. Case-significant labels keep exact-case values distinct so
+        # rehydrate is lossless for "AbC123" vs "abc123" and "Nadia" vs "nadia".
         seen = {}
         label_by_ph = {}
         for s in spans:
@@ -407,8 +683,8 @@ class PrivacyGate:
         redacted = ''.join(out)
         # Finding C backstop: after the positional pass, sweep the redacted text for any repeated occurrence of
         # an already-known value the detector missed at OTHER positions, masking it with its EXISTING placeholder.
-        # Ordinary PII sweeps case-insensitively. Credentials/paths sweep exact-case only to preserve lossless
-        # rehydration when two distinct known values differ only by case.
+        # Ordinary non-name PII sweeps case-insensitively. Case-significant labels sweep exact-case only to
+        # preserve lossless rehydration when two distinct known values differ only by case.
         exact_v2p = {v: ph for ph, v in mapping.items() if _case_sensitive_label(label_by_ph.get(ph, ''))}
         ci_v2p = {v: ph for ph, v in mapping.items() if not _case_sensitive_label(label_by_ph.get(ph, ''))}
         protected = set(mapping.keys())
@@ -466,7 +742,7 @@ def show(gate, s, min_score=0.5):
 if __name__ == '__main__':
     import argparse, sys
     ap = argparse.ArgumentParser()
-    ap.add_argument('--model', default='models/pii-xlmr-quebec')
+    ap.add_argument('--model', default='models/ossredact-pii-quebec')
     ap.add_argument('--eval', default='')
     ap.add_argument('--text', default='', help='redact this string and exit')
     ap.add_argument('--repl', action='store_true', help='load model once, then redact each line of stdin')

@@ -10,12 +10,24 @@ The detection/redaction itself is SHARED: the /v1/chat/completions route in egre
 redact_body() it uses for Anthropic, passing extract_text_fields_openai as the field extractor. This module
 adds only the OpenAI <-> placeholder schema translation (request fields, response, and SSE stream).
 
-Self-contained ON PURPOSE: the small pure helpers below (rehydrate_text / _rehydrate_json /
-rehydrate_json_string / split_safe / Field) MIRROR the identical ones in egress_proxy.py. Duplicated so this
-module imports nothing heavy (no fastapi/httpx/the NPU stack) and stays unit-testable in isolation. If you
-change the placeholder grammar or the JSON-safe rehydration in egress_proxy.py, mirror it here.
+Mostly self-contained on purpose: the small pure helpers below (rehydrate_text / _rehydrate_json /
+rehydrate_json_string / split_safe / Field) MIRROR the identical ones in egress_proxy.py. Request-side
+tool-call argument extraction reuses the Responses adapter's pure JSON walkers so prior assistant tool-call
+history is parsed at value/key granularity instead of scanned as a hard-to-detect JSON blob. If you change the
+placeholder grammar or the JSON-safe rehydration in egress_proxy.py, mirror it here.
 """
 import json, re
+
+import responses_adapter
+
+# Free-text block-type aliases (mirror egress_proxy.py): only `text` was recognized, so an `input_text` /
+# `output_text` block or a bare-string content element extracted ZERO fields -> whole body forwarded UNSCANNED.
+_TEXT_BLOCK_TYPES = ('text', 'input_text', 'output_text')
+# `image_url` is the Chat Completions image part ({type:'image_url', image_url:{url:'data:...'|'https://...'}}).
+# It is opaque binary like `image`/`input_image`: recursing into it surfaced the data-URI / URL string for
+# PII scanning, an incoherent boundary that could over-rewrite an image blob or a routing URL. Treat it as
+# binary and skip it (matching the documented "image/audio/binary bytes are out of scope" contract).
+_BINARY_BLOCK_TYPES = ('image', 'input_image', 'image_url', 'document', 'redacted_thinking')
 
 # matches the tail of a partial placeholder still being streamed (e.g. "<EMAIL_00" before its ">" arrives).
 # A label may carry INTERNAL underscores (gate-form labels such as PHONE_NUMBER / SENSITIVE_ACCOUNT_ID ->
@@ -47,22 +59,86 @@ def extract_text_fields_openai(body):
     """messages[].content is a string OR a list of parts ({type:'text',text:...} plus image/audio parts we
     never touch). Roles are mapped to the SAME kind vocabulary redact_body expects so the prose heuristic +
     session derivation behave exactly as on the Anthropic path: system->'system', tool->'tool_result',
-    everything else->'message'. Tool/function SCHEMAS (body['tools']) and prior-turn tool_call arguments are
-    left untouched -- parity with the Anthropic path, which never redacts tool_use input/schemas (the
-    known-entity backstop in redact_body re-catches any known value that reappears in a text field)."""
+    developer->'system', everything else->'message'. Prior-turn assistant tool_call arguments are model-visible
+    conversation history after local rehydration, so they are parsed and redacted on the next outbound request.
+    Tool/function SCHEMAS are walked structurally: descriptions and enum/const literal values are scanned,
+    while function names, property names, routing ids, and other schema structure stay untouched."""
     fields = []
+    claimed = set()
+    notes = []
     for msg in (body.get('messages') or []):
         if not isinstance(msg, dict):
             continue
         role = msg.get('role')
-        kind = 'system' if role == 'system' else 'tool_result' if role == 'tool' else 'message'
+        kind = 'system' if role in ('system', 'developer') else 'tool_result' if role == 'tool' else 'message'
         c = msg.get('content')
         if isinstance(c, str):
             fields.append(Field(msg, 'content', kind))
         elif isinstance(c, list):
-            for blk in c:
-                if isinstance(blk, dict) and blk.get('type') == 'text' and isinstance(blk.get('text'), str):
-                    fields.append(Field(blk, 'text', kind))
+            for idx, blk in enumerate(c):
+                if isinstance(blk, str):
+                    if blk.strip():       # array-of-strings content (C2)
+                        fields.append(Field(c, idx, kind))
+                elif isinstance(blk, dict):
+                    if blk.get('type') in _TEXT_BLOCK_TYPES and isinstance(blk.get('text'), str):  # text/input_text/output_text (C1)
+                        fields.append(Field(blk, 'text', kind))
+                    elif blk.get('type') not in _BINARY_BLOCK_TYPES:
+                        responses_adapter._recurse_collect(blk, kind, fields, notes, claimed, struct_scope=False)
+        # The optional participant `name` on user/assistant/system/developer messages is free-form developer-set
+        # metadata that can carry PII (a real customer name, an email-shaped handle) -- it was forwarded RAW to
+        # api.openai.com (a leak). Scan it as user data. EXCLUDE role 'function'/'tool': there `name` is the tool
+        # identifier the API routes the call on and MUST reach upstream verbatim, so it is never redacted.
+        nm = msg.get('name')
+        if isinstance(nm, str) and nm and role not in ('function', 'tool'):
+            fields.append(Field(msg, 'name', kind))
+        for tc in (msg.get('tool_calls') or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get('function')
+            if isinstance(fn, dict):
+                if isinstance(fn.get('arguments'), str):
+                    responses_adapter._surface_json_args(fn, 'arguments', 'tool_result', fields, claimed)
+                elif isinstance(fn.get('arguments'), (dict, list)):
+                    responses_adapter._recurse_collect(
+                        fn['arguments'], 'tool_result', fields, notes, claimed, struct_scope=False)
+        fc = msg.get('function_call')
+        if isinstance(fc, dict):
+            if isinstance(fc.get('arguments'), str):
+                responses_adapter._surface_json_args(fc, 'arguments', 'tool_result', fields, claimed)
+            elif isinstance(fc.get('arguments'), (dict, list)):
+                responses_adapter._recurse_collect(
+                    fc['arguments'], 'tool_result', fields, notes, claimed, struct_scope=False)
+    tools = body.get('tools')
+    if isinstance(tools, list):
+        responses_adapter._recurse_collect(tools, 'tool_result', fields, notes, claimed)
+    functions = body.get('functions')
+    if isinstance(functions, list):
+        responses_adapter._recurse_collect(functions, 'tool_result', fields, notes, claimed)
+    # top-level `metadata`: the Chat Completions API round-trips a developer-defined map of up to 16 arbitrary
+    # string key/value pairs -- the SAME free-form user-data shape the Responses path redacts. It was forwarded
+    # RAW here (adapter-parity leak): a metadata value (or PII used as a key) reached api.openai.com un-redacted.
+    # Walk it as user data (struct_scope=False) exactly like extract_text_fields_responses does.
+    metadata = body.get('metadata')
+    if isinstance(metadata, dict):
+        responses_adapter._recurse_collect(metadata, 'tool_result', fields, notes, claimed, struct_scope=False)
+    # response_format.json_schema: schema descriptions + enum/const LITERALS can carry PII (parity with the
+    # Responses adapter, which walks text.format). struct_scope=True scans descriptions/literals, not property names.
+    rf = body.get('response_format')
+    if isinstance(rf, dict):
+        responses_adapter._recurse_collect(rf, 'tool_result', fields, notes, claimed)
+    # prediction.content (speculative decoding): developer-supplied predicted output -- free-form, can carry PII.
+    pred = body.get('prediction')
+    if isinstance(pred, dict):
+        pc = pred.get('content')
+        if isinstance(pc, str):
+            fields.append(Field(pred, 'content', 'message'))
+        elif isinstance(pc, list):
+            responses_adapter._recurse_collect(pc, 'tool_result', fields, notes, claimed, struct_scope=False)
+    # top-level `user`: an end-user identifier. Meant to be opaque, but a caller may set it to an email/handle;
+    # scan it so a PII value is redacted (an opaque hash simply yields no spans).
+    user = body.get('user')
+    if isinstance(user, str) and user:
+        fields.append(Field(body, 'user', 'message'))
     return fields
 
 
@@ -179,30 +255,12 @@ def split_safe(carry):
 # Non-streaming response rehydration.
 # ---------------------------------------------------------------------------
 def rehydrate_openai_response(obj, replay):
-    """Walk choices[].message: content (str or content-part list) + tool_calls[].function.arguments (JSON
-    string) + legacy function_call.arguments -> swap placeholders back to real values."""
+    """Blanket-rehydrate the response once, with JSON-safe handling for tool-call argument strings."""
     if not replay:
         return obj
-    for ch in (obj.get('choices') or []):
-        if not isinstance(ch, dict):
-            continue
-        msg = ch.get('message')
-        if not isinstance(msg, dict):
-            continue
-        c = msg.get('content')
-        if isinstance(c, str):
-            msg['content'] = rehydrate_text(c, replay)
-        elif isinstance(c, list):
-            msg['content'] = _rehydrate_json(c, replay)
-        for tc in (msg.get('tool_calls') or []):
-            if isinstance(tc, dict):
-                fn = tc.get('function')
-                if isinstance(fn, dict) and isinstance(fn.get('arguments'), str):
-                    fn['arguments'] = rehydrate_json_string(fn['arguments'], replay)
-        fc = msg.get('function_call')
-        if isinstance(fc, dict) and isinstance(fc.get('arguments'), str):
-            fc['arguments'] = rehydrate_json_string(fc['arguments'], replay)
-    return obj
+    if not isinstance(obj, (dict, list)):
+        return obj
+    return responses_adapter._rehydrate_recursive(obj, replay)
 
 
 # ---------------------------------------------------------------------------

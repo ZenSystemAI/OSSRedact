@@ -17,7 +17,7 @@ selected on this val (eval_loss), so absolute numbers are mildly optimistic; the
 import os, sys, json, collections
 
 GATE_DIR = os.environ.get('GATE_DIR', os.path.expanduser('~/.ossredact/gate'))
-MODEL_DIR = os.environ.get('GPU_GATE_MODEL', os.path.expanduser('~/.ossredact/models/pii-xlmr-large'))
+MODEL_DIR = os.environ.get('GPU_GATE_MODEL', os.path.expanduser('~/.ossredact/models/ossredact-pii-large'))
 # VAL is env-configurable so the same harness scores any scheme: LABELS auto-derives from the sibling
 # labels.json, so pointing GPU_GATE_VAL at the v9remap val loads the 20-label scheme automatically.
 VAL = os.environ.get('GPU_GATE_VAL', 'datasets/pii-merged/val.jsonl')

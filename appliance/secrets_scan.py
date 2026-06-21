@@ -12,6 +12,7 @@ filters/heuristic.py + high_entropy_strings.py (Apache-2.0).
 """
 import re
 from math import log2
+from privacy_gate import _has_format_chars, _strip_format_chars  # zero-width/format-char resistance (shared)
 
 # ---- high-precision provider patterns (low FP; always fire). (name, regex, group|None) ----
 _P = []
@@ -21,22 +22,42 @@ def _add(name, pat, group=None, flags=0):
     _P.append((name, re.compile(pat, flags), group))
 
 
-_add('aws_access_key', r'\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ABIA|ACCA)[0-9A-Z]{16}\b')
-_add('gcp_api_key', r'\bAIza[0-9A-Za-z_\-]{35}\b')
-_add('github_token', r'\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b')
-_add('github_pat', r'\bgithub_pat_[0-9A-Za-z_]{22,}\b')
-_add('slack_token', r'\bxox[baprs]-[0-9A-Za-z-]{10,}\b')
+_add('aws_access_key', r'(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ABIA|ACCA)[0-9A-Z]{16,}')  # AKIA prefix self-anchors; glue-safe
+# GCP key charset includes `_` and `-`, so `\b` boundaries fail when the key is glued after/before an
+# underscore (var_AIza..._suffix). Anchor on alphanumeric-only boundaries instead: `_ - " '` etc. are valid
+# delimiters, so the fixed 39-char key is caught even inside an identifier.
+_add('gcp_api_key', r'(?<![A-Za-z0-9])AIza[0-9A-Za-z_\-]{35}(?![A-Za-z0-9])')
+_add('github_token', r'(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36,}')  # ghp_ prefix self-anchors; glue-safe
+_add('github_pat', r'github_pat_[0-9A-Za-z_]{22,}')
+_add('slack_token', r'xox[baprs]-[0-9A-Za-z-]{10,}')
 _add('slack_webhook', r'https://hooks\.slack\.com/services/[A-Za-z0-9/]{20,}')
 _add('stripe_key', r'\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b')
 _add('openai_key', r'\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}\b')
 _add('anthropic_key', r'\bsk-ant-[A-Za-z0-9_\-]{20,}\b')
-_add('google_oauth', r'\bya29\.[0-9A-Za-z_\-]{20,}\b')
-_add('jwt', r'\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b')
-_add('private_key_block', r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----'
-                          r'[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----')
-# connection string with embedded credentials -> flag the password group(1)
+_add('google_oauth', r'ya29\.[0-9A-Za-z_\-]{20,}')
+# Twilio API key (secret): SK + 32 hex. AC (account SID) is not secret, so only SK is flagged.
+_add('twilio_key', r'(?<![A-Za-z0-9])SK[0-9a-f]{32}(?![A-Za-z0-9])')
+# npm automation/access token (npm_ + 36 base62). Alphanumeric-only boundaries so it is caught when glued
+# after an underscore (//registry.npmjs.org/:_authToken=npm_...) which the generic_assign rule may not bound.
+_add('npm_token', r'(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])')
+# PyPI upload token: always 'pypi-' + 'AgEI...' macaroon, long base64url.
+_add('pypi_token', r'(?<![A-Za-z0-9])pypi-AgEI[A-Za-z0-9_\-]{30,}')
+_add('jwt', r'eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}')
+_add('private_key_block', r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----'
+                          r'[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----')
+# connection string with embedded credentials -> flag the password group(1). The password may itself contain
+# '@' (P@ssw0rd) -- the OLD [^\s@/]{3,} stopped at the first '@' and leaked the tail. Allow '@' in the password
+# and anchor on the LAST '@' before a hostname (greedy + backtrack to the rightmost @host).
 _add('conn_string', r'(?i)\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp|ftp|https?)://'
-                    r'[^\s:@/]+:([^\s@/]{3,})@', 1)
+                    r'[^\s:@/]+:([^\s/]{3,})@[\w.\-]+', 1)
+# header / SPACE-delimited credential: `Authorization: Bearer <opaque>`, `Basic <b64>`, `Token <x>`,
+# `apikey <x>`, `jeton <x>`. The generic_assign rule needs `=`/`:`, so opaque tokens in HTTP-header / curl / log
+# form (the canonical leak shape) slip through. Keyword-gated + 16+ continuous opaque chars so ordinary prose
+# after the word ("api key generation", "bearer of bad news") -- whose next token is short or has spaces --
+# cannot trip it. Value charset covers base64url / base64 / JWT (`. + / = _ -`).
+_add('auth_space_secret',
+     r'(?i)(?<![A-Za-z])(?:bearer|basic|token|api[_-]?key|access[_-]?key|secret|jeton)\s+'
+     r'([A-Za-z0-9_\-./+=]{16,})', 1)
 # generic assignment: secret-ish key = value -> flag the value group(2).
 # The keyword may sit inside a snake_case / SCREAMING_SNAKE / dotted identifier (JWT_SECRET, AWS_ACCESS_KEY_ID,
 # app.apiKey), so allow leading prefix segments and trailing suffix segments around the cue instead of a bare
@@ -44,7 +65,10 @@ _add('conn_string', r'(?i)\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis
 # value-shape gated (8+ opaque chars, benign-filtered) so it does not nuke ordinary `name = value` code.
 _add('generic_assign', r'(?i)(?<![A-Za-z])(?:[A-Za-z0-9]+[_\-.])*'
                        r'(api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key|'
-                       r'client[_-]?secret|auth[_-]?token|bearer|credential|private[_-]?key)'
+                       r'client[_-]?secret|auth[_-]?token|bearer|credential|private[_-]?key|'
+                       # French / Quebec credential keywords (this is an FR-first product): mot de passe, mdp,
+                       # jeton (token), cle/clef secrete/api
+                       r'motdepasse|mot[_\-.]?de[_\-.]?passe|mdp|jeton|cl[eé]f?[_\-.]?(?:api|secr[eè]te?))'
                        r'(?:[_\-.][A-Za-z0-9]+)*'
                        r'["\']?\s*[:=]\s*["\']?([^\s"\',;}{]{8,})', 2)
 
@@ -117,6 +141,16 @@ def secret_spans(text, entropy_backstop=True):
                 continue
             if shannon(tok) >= 4.2:
                 add(m.start(), m.end(), 'high_entropy')
+
+    # Zero-width/format-char obfuscation: an api_key/token interleaved with Cf codepoints ("sk<U+200B>-..."),
+    # invisible to a human and the upstream LLM, slips every regex above. Re-scan a Cf-stripped copy and map
+    # the span back onto the original offsets (covers the value + interleaved invisibles). clean has no Cf
+    # chars so this recursion runs the regex pass exactly once more, never re-entering this branch.
+    if _has_format_chars(text):
+        clean, idx_map = _strip_format_chars(text)
+        if clean and clean != text:
+            for s in secret_spans(clean, entropy_backstop=entropy_backstop):
+                add(idx_map[s['start']], idx_map[s['end'] - 1] + 1, s.get('subtype', 'secret') + '+cf', s.get('conf', 1.0))
 
     return spans
 

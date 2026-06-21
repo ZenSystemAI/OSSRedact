@@ -8,7 +8,8 @@ services live under `gate/`.
 - `gate_service_cpu.py` -- FastAPI CPU gate (onnxruntime INT8 on CPU). Same `/detect` `/redact`
   `/healthz` contract as the GPU gate; CPU-only (never touches a GPU). Byte-identical to
   `gate/gate_service_cpu.py`; CI enforces this via `gate/tests/test_deploy_gate_service_sync.py`.
-- `ossredact-gate-cpu.service` -- systemd unit (port 8011, `CUDA_VISIBLE_DEVICES=` to stay off GPUs).
+- `ossredact-gate-cpu.service` -- systemd unit (loopback gate port 8001, `CUDA_VISIBLE_DEVICES=` to stay off GPUs).
+- `ossredact-egress.service` -- systemd unit for the public client-facing proxy on loopback port 8011.
 - `export_quantize_v11_cpu.py` -- exports an xlm-r fp32 checkpoint to ONNX, then **dynamic**
   (weights-only) INT8. Set `MDIR` / `CALIB` to your model + calibration set.
 
@@ -31,25 +32,31 @@ CUDA_VISIBLE_DEVICES= .venv/bin/python deploy/export_quantize_v11_cpu.py
 CUDA_VISIBLE_DEVICES= .venv/bin/python validation/parity_check.py \
   --ref <fp32-model-dir> --exported <model-dir-with-model.int8.onnx> \
   --corpus <held-out.jsonl> --max-len 512 --device cpu --tier int8
-#    INT8 reference (v11r5 base): cosine 0.998, PII-argmax 0.981; end-task recall -0.56pp vs fp32
+#    INT8 (shipped v11r9c base, per-channel): cosine 0.997, PII-argmax 0.967; bar is 0.965 because
+#    v11r9c's org/address augmentation sharpened the boundaries (validation/RESULT-base-int8-parity-v11r9c.md)
 
 # 3. DEPLOY (the CPU tier runs as a sidecar alongside the proxy)
 #    copy the model dir (model.int8.onnx + config.json + tokenizer) + gate_service_cpu.py
-#    + privacy_gate.py to the host, install the unit, start it:
-sudo cp deploy/ossredact-gate-cpu.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now ossredact-gate-cpu.service
+#    + privacy_gate.py + appliance/ to the host, install the units, start them:
+sudo cp deploy/ossredact-gate-cpu.service deploy/ossredact-egress.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ossredact-gate-cpu.service
+sudo systemctl enable --now ossredact-egress.service
+curl -s http://127.0.0.1:8001/healthz
 curl -s http://127.0.0.1:8011/healthz
 ```
 
 ## Swapping detection tiers
 A running gate can be repointed from one tier to another with a systemd drop-in:
-`ossredact-gate.service.d/v11int8.conf` repoints `ExecStart` to `gate_service_cpu.py` and sets
-`CPU_GATE_PORT` so the egress proxy port is unchanged. The base unit is preserved, so rollback is
-removing the drop-in + `daemon-reload` + restart. For a model this small, CPU INT8 detect latency
+`ossredact-gate.service.d/v11int8.conf` is kept as a legacy example for repointing a base gate unit to
+`gate_service_cpu.py`. The public install path uses `ossredact-gate-cpu.service` directly and sets
+`CPU_GATE_PORT=8001`, matching the egress proxy's `GATEWAY_GATE_URL` default. For a model this small, CPU INT8 detect latency
 (~42ms) beats an Intel-NPU OpenVINO tier (~112ms) -- the OpenVINO dispatch overhead dominates.
 
 ## Notes
 - `NPUTier(model_dir)` loads `model_dir/model.int8.onnx` + the tokenizer + `config.json` from the
   same dir via the onnxruntime CPUExecutionProvider.
+- Services bind `127.0.0.1` by default. Set `CPU_GATE_HOST` or `GATEWAY_HOST` explicitly only when you intend to
+  expose a service on a tailnet or another trusted interface.
 - The full appliance proxy lives under `appliance/`; the gate service files are under `gate/`,
   with `deploy/check-gate-drift.sh` for host-vs-repo drift checks.

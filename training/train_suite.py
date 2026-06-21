@@ -22,7 +22,11 @@ CANON = []; BIO = []; label2id = {}; id2label = {}
 # not eval_loss, because leak-direction errors on these are the costly ones.
 CATASTROPHIC = {"government_id", "payment_card", "card_cvv", "card_expiry", "secret", "password",
                 "account_number", "iban", "sensitive_account_id", "email", "person", "date_of_birth",
-                "tax_id"}
+                "tax_id",
+                # v11r7: org + address are no-floor categories the firewall stress test (2026-06-18) found
+                # leaking badly (org 8/10, address 4/8). Add them so cat_f1 (the checkpoint-selection metric)
+                # rewards fixing them, the way `person` drove the v11r6 name fix. Inference is unaffected.
+                "organization", "address"}
 
 def load_labels(labels_path):
     global CANON, BIO, label2id, id2label
@@ -117,11 +121,11 @@ def main():
     targs = TrainingArguments(
         output_dir=args.out, num_train_epochs=args.epochs, per_device_train_batch_size=args.bs,
         per_device_eval_batch_size=32, learning_rate=args.lr, weight_decay=0.01, warmup_ratio=0.05,
-        fp16=True, logging_steps=100, eval_strategy='epoch', save_strategy='epoch', save_total_limit=1,
+        fp16=True, logging_steps=100, eval_strategy='epoch', save_strategy='epoch', save_total_limit=4,
         report_to=[], seed=42, load_best_model_at_end=True,
         metric_for_best_model='cat_f1', greater_is_better=True)
     trainer = Trainer(model=model, args=targs, train_dataset=train_ds, eval_dataset=val_ds,
-                      data_collator=collator, tokenizer=tok,
+                      data_collator=collator, processing_class=tok,   # `tokenizer=` removed in transformers 5.x; processing_class works on >=4.46
                       compute_metrics=compute_metrics,
                       preprocess_logits_for_metrics=preprocess_logits_for_metrics)
     trainer.train(); trainer.save_model(args.out); tok.save_pretrained(args.out)

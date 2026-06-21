@@ -9,13 +9,14 @@ be rebuilt from the repo alone.
 
 | File | Role | Port / service |
 |---|---|---|
-| `egress_proxy.py` | The egress proxy: redacts PII + secrets on the outbound request, rehydrates placeholders on the response. Serves `/v1/messages` (Anthropic), `/v1/chat/completions` (OpenAI, via `openai_adapter.py`), and `/v1/responses` (OpenAI Responses, via `responses_adapter.py`). | binds `:8011`; systemd service `ossredact-egress` |
+| `egress_proxy.py` | The egress proxy: redacts PII + secrets on the outbound request, rehydrates placeholders on the response. Serves `/v1/messages` (Anthropic), `/v1/chat/completions` (OpenAI, via `openai_adapter.py`), and `/v1/responses` (OpenAI Responses, via `responses_adapter.py`). | binds `127.0.0.1:8011` by default; systemd service `ossredact-egress` |
 | `openai_adapter.py` | OpenAI chat-completions schema translation (request fields, response, SSE stream) for Codex / omp / any OpenAI-compatible client. Pure stdlib (`json`, `re` only). | imported by `egress_proxy.py` |
 | `responses_adapter.py` | OpenAI Responses-API schema translation (request fields, response, SSE stream) for current Codex CLI. Pure stdlib (`base64`, `binascii`, `json`, `re` only). | imported by `egress_proxy.py` |
+| `client_compat_adapter.py` | Pure compatibility matrix and setup snippets for Codex plan/API-key paths, opencode, Hermes, Pi, and omp. No auth-store reads or network I/O. | tested directly |
 | `entity_map.py` | AES-GCM 256-bit session entity map at rest (value <-> placeholder), TTL'd + size-capped. | imported by `egress_proxy.py` |
 | `secrets_scan.py` | Always-on deterministic (regex) secrets detector; a hard import of the proxy. No model. | imported by `egress_proxy.py` |
 | `privacy_gate.py` | The appliance detector the proxy imports (`tier0_spans`, `context_cued_id_spans`, `merge_spans`, `post_merge_address`, `explain`). See "Two privacy_gate.py copies" below. | imported by `egress_proxy.py` and `gate_service.py` |
-| `gate_service.py` | An OpenVINO / Intel-NPU neural gate (`DEVICE='NPU'`, OpenVINO FP16 IR) -- an alternate detection tier. | binds `:8001`; exposes `/detect` + `/redact` |
+| `gate_service.py` | An OpenVINO / Intel-NPU neural gate (`DEVICE='NPU'`, OpenVINO FP16 IR) -- an alternate detection tier. | binds `127.0.0.1:8001` by default; exposes `/detect` + `/redact` |
 | `gateway-config.example.yaml` | Policy schema (upstream URLs, TTLs, category toggles). Example only; the live `gateway-config.yaml` is gitignored. | mtime-watched live (no restart on policy edits) |
 
 ## Detection tiers
@@ -57,7 +58,9 @@ All config is env-vars-with-defaults read at process start; no secrets in any of
 | `GATEWAY_OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream |
 | `GATEWAY_APPLIANCE_DIR` | directory containing the running file | module import root for sibling appliance files |
 | `GATEWAY_GATE_URL` | `http://127.0.0.1:8001` | the neural gate (`/detect`) |
+| `GATEWAY_HOST` | `127.0.0.1` | proxy listen host; set explicitly for a tailnet/LAN bind |
 | `GATEWAY_NPU_MODEL_DIR` | `<GATEWAY_APPLIANCE_DIR>/model` | NPU model directory |
+| `GATEWAY_NPU_HOST` | `127.0.0.1` | NPU gate listen host; set explicitly for a trusted interface bind |
 | `GATEWAY_NPU_CACHE_DIR` | `<GATEWAY_APPLIANCE_DIR>/.ovcache` | OpenVINO compiled-model cache |
 | `GATEWAY_PORT` | `8011` | proxy listen port |
 | `GATEWAY_CONFIG` | `~/.ossredact/gateway-config.yaml` | live policy file (mtime-watched) |

@@ -151,7 +151,7 @@ export default function Inspector({ span, text, placeholder, spans, onToggle, on
         <div className="eyebrow mb-1.5" style={{ fontSize: 10 }}>
           Original value (local only)
         </div>
-        <div className="mono" style={{ fontSize: 13, color: '#fff', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
+        <div className="mono" style={{ fontSize: 13, color: 'var(--color-text)', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
           {value}
         </div>
       </div>

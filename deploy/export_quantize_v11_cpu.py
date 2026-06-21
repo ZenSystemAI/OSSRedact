@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Export pii-gpu-xlmr-base-v11r5 -> fp32 ONNX -> static-calibrated INT8 (embedding Gather kept
-fp32) for a CPU tier. Adapted from export_quantize_npu.py (export) + static_quant_cpu.py
-(static-no-embed = the recall-preserving variant). Quantizes directly from the raw fp32 ONNX
+"""Export the base PII model -> fp32 ONNX -> dynamic per-channel INT8 (weights-only) for the CPU +
+in-browser tier. Adapted from export_quantize_npu.py. Quantizes directly from the raw fp32 ONNX
 (quant_pre_process is skipped -- it corrupts xlm-r shapes). CPU-only; never touches card 4.
-100% synthetic calibration data (v11r5 train rows).
+Static QDQ activation quantization was the damage source on this architecture (~0.84 cosine), so the
+recipe is weights-only dynamic + per_channel (see validation/RESULT-base-int8-parity-v11r9c.md). The
+shipped base revision is v11r9c. 100% synthetic calibration data.
 """
 import json
+import os
 from pathlib import Path
 import numpy as np
 import torch
@@ -15,7 +17,9 @@ from onnxruntime.quantization import (quantize_dynamic, quantize_static, QuantTy
                                       CalibrationDataReader, CalibrationMethod, QuantFormat)
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 
-MDIR = Path('models/pii-xlmr-base')
+# Model dir is env-overridable so the same recipe can export any revision
+# (e.g. OSSREDACT_EXPORT_MODEL_DIR=models/pii-gpu-xlmr-base-v11r9c -- the shipped base).
+MDIR = Path(os.environ.get('OSSREDACT_EXPORT_MODEL_DIR', 'models/pii-gpu-xlmr-base-v11r9c'))
 FP32 = MDIR / 'model.onnx'
 INT8 = MDIR / 'model.int8.onnx'  # dynamic (weights-only) int8 -- the proven v6/v7 recipe
 CALIB = 'datasets/pii-merged/train.jsonl'
@@ -74,8 +78,18 @@ def main():
         # quantization was the damage source (per-tensor/per-channel/no-embed all gave the
         # same ~0.84 cosine / 0.15 PII parity). This is the recipe that produced the deployed
         # v6/v7 int8 models. parity_check.py is the gate.
-        print('DYNAMIC INT8 quantization (weights-only) ...', flush=True)
-        quantize_dynamic(str(FP32), str(INT8), weight_type=QuantType.QInt8)
+        #
+        # per_channel=True: a 2026-06-20 bake-off (validation/RESULT-base-int8-parity-v11r9c.md)
+        # measured five weights-only variants on the v11r9c base against the OOD heldout. Per-channel
+        # weight scales are the best dynamic recipe (pii_argmax 0.9638 -> 0.9679, ~free on size);
+        # excluding the classifier head does NOTHING (the quant damage is spread across the encoder,
+        # not the decision layer). The v11r9c base is genuinely more quant-sensitive than v11r5
+        # (the org/address augmentation sharpened decision boundaries), so dynamic int8 lands at
+        # pii_argmax 0.967; the int8 parity bar is 0.965 and v11r9c per-channel int8 SHIPS (Option A,
+        # validation/RESULT-base-int8-parity-v11r9c.md -- int8 is the WASM-native in-browser format;
+        # fp16 needs WebGPU and is NOT a broad-reach substitute).
+        print('DYNAMIC INT8 quantization (weights-only, per-channel) ...', flush=True)
+        quantize_dynamic(str(FP32), str(INT8), weight_type=QuantType.QInt8, per_channel=True)
         print('dynamic int8 ->', INT8, flush=True)
     else:
         print('int8 exists ->', INT8, flush=True)

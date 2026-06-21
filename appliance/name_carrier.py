@@ -49,14 +49,17 @@ async def carrier_person_spans(detect_fn, value):
 
     `detect_fn(text)` is the egress `_detect_neural`-shaped coroutine: returns a list of span
     dicts (offsets relative to `text`), or None if the gate is unreachable. Returns person spans
-    in `value` coordinates (rule tagged `gpu:carrier`), or [] -- never raises, never returns None.
+    in `value` coordinates (rule tagged `gpu:carrier`), [] when the gate was healthy and found no person, or
+    None when the carrier scan itself could not reach the gate.
 
     The caller is expected to have already checked `name_shaped(value)` and that the bare scan
     found no person, but this function is safe to call unconditionally. Only spans landing inside
     the value region are kept (the carrier scaffold words are never emitted as PII)."""
     carrier = CARRIER_PREFIX + value + CARRIER_SUFFIX
     spans = await detect_fn(carrier)
-    if not spans:                       # [] or None (gate error) -> nothing recovered
+    if spans is None:
+        return None
+    if not spans:
         return []
     p = len(CARRIER_PREFIX)
     vlen = len(value)

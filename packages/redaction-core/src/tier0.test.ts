@@ -3,7 +3,7 @@
 // Luhn and mod-97 values are standard public test vectors.
 
 import { describe, it, expect } from 'vitest'
-import { tier0Spans, luhnOk, ibanOk, normSpace, normDash } from './tier0'
+import { tier0Spans, cueNameSpans, luhnOk, ibanOk, nameShaped, normSpace, normDash, hasFormatChars } from './tier0'
 import { mergeSpans } from './redaction'
 
 // Helper: extract (label, substring) pairs from tier0Spans
@@ -102,6 +102,27 @@ describe('tier0Spans', () => {
     expect([...found].some((e) => e.startsWith('email:') && e.includes('test.user+tag@example.org'))).toBe(true)
   })
 
+  it('detects accented (non-ASCII) email local-parts -- the offline leak the ASCII \\w regex missed', () => {
+    // françoise.bélisle (cedilla + accent mid-run) and a LEADING accented char (élise) on a
+    // multi-level .qc.ca domain. The old /\\b[\\w.+-]+@/ matched only the ASCII tail, leaving the accented
+    // prefix literal in the outbound text -- a real PII leak on exactly the French/Quebec market.
+    const text = 'Ecrire a françoise.bélisle@example.org et élise@courriel.qc.ca'
+    const found = lset(text)
+    expect([...found].some((e) => e.startsWith('email:') && e.includes('françoise.bélisle@example.org'))).toBe(true)
+    expect([...found].some((e) => e.startsWith('email:') && e.includes('élise@courriel.qc.ca'))).toBe(true)
+  })
+
+  it('email scan stays linear on a long punctuation run (no O(n^2) main-thread block)', () => {
+    // The Unicode email local-part class includes '.' and '-', so without a left boundary the global scan
+    // re-attempts at every char of a long dotted/dashed line (PDF leader, markdown rule) -- O(n^2), seconds
+    // on the unchunked in-browser floor. The leading lookbehind prunes those starts. 100k chars must be fast.
+    const t0 = performance.now()
+    tier0Spans('.'.repeat(100000))
+    tier0Spans('-'.repeat(100000))
+    tier0Spans('a'.repeat(100000) + '@')
+    expect(performance.now() - t0).toBeLessThan(250)
+  })
+
   it('detects phone number in North American format', () => {
     const text = 'Appelez au (514) 555-0199 pour de laide.'
     const found = lset(text)
@@ -166,6 +187,46 @@ describe('tier0Spans', () => {
   })
 })
 
+describe('cueNameSpans', () => {
+  it('detects cue-anchored personal names beside mailbox/header forms', () => {
+    const cases = [
+      ['From: Olivier Tremblay <o.tremblay@example.org>', 'Olivier Tremblay'],
+      ['Co-authored-by: Hassan El-Amrani <hassan@example.org>', 'Hassan El-Amrani'],
+      ['Reply-To: Bjørn Halvorsen <bjorn@example.org>', 'Bjørn Halvorsen'],
+      ['Attn: Jean-Philippe Gagnon-Roy', 'Jean-Philippe Gagnon-Roy'],
+    ] as const
+
+    for (const [text, expected] of cases) {
+      const names = cueNameSpans(text).map((s) => text.slice(s.start, s.end))
+      expect(names).toContain(expected)
+    }
+  })
+
+  it('rejects role mailboxes and lowercase non-name fragments', () => {
+    const cases = [
+      'Support <support@example.org>',
+      'To: Marketing Team <mkt@example.org>',
+      'no-reply <noreply@example.org>',
+      'Email bob@example.org please',
+      'the value is foo <bar@example.org>',
+    ]
+
+    for (const text of cases) expect(cueNameSpans(text)).toEqual([])
+  })
+
+  it('exposes the same cue-name spans through tier0Spans', () => {
+    const text = 'From: Olivier Tremblay <o.tremblay@example.org>'
+    const spans = labeledSpans(text)
+    expect(spans.some((s) => s.label === 'person' && s.sub === 'Olivier Tremblay')).toBe(true)
+  })
+
+  it('keeps nameShaped conservative for role names', () => {
+    expect(nameShaped('Olivier Tremblay')).toBe(true)
+    expect(nameShaped('Support')).toBe(false)
+    expect(nameShaped('Marketing Team')).toBe(false)
+  })
+})
+
 // -------------------------
 // ibanOk -- mod-97 checksum validator
 // -------------------------
@@ -180,6 +241,11 @@ describe('ibanOk', () => {
 
   it('returns true for a valid IBAN with internal spaces (spaced form)', () => {
     expect(ibanOk('GB82 WEST 1234 5698 7654 32')).toBe(true)
+  })
+
+  it('returns true for lowercase and hyphen-separated valid IBANs', () => {
+    expect(ibanOk('gb82west12345698765432')).toBe(true)
+    expect(ibanOk('GB82-WEST-1234-5698-7654-32')).toBe(true)
   })
 
   it('returns false for a short string that cannot be an IBAN', () => {
@@ -198,6 +264,17 @@ describe('tier0Spans IBAN', () => {
     expect(ibanSpan).toBeDefined()
     expect(ibanSpan!.sub).toBe('GB82WEST12345698765432')
     expect(ibanSpan!.validator).toBe('mod97_ok')
+  })
+
+  it('emits iban spans for lowercase and hyphen-separated valid IBANs', () => {
+    for (const iban of ['gb82west12345698765432', 'GB82-WEST-1234-5698-7654-32']) {
+      const text = `solde IBAN ${iban} fin`
+      const spans = labeledSpans(text)
+      const ibanSpan = spans.find((s) => s.label === 'iban')
+      expect(ibanSpan).toBeDefined()
+      expect(ibanSpan!.sub).toBe(iban)
+      expect(ibanSpan!.validator).toBe('mod97_ok')
+    }
   })
 
   it('does NOT emit an iban span for a mod-97-invalid lookalike', () => {
@@ -266,8 +343,11 @@ describe('tier0Spans Quebec IDs', () => {
 
   it('does not emit SAAQ licence without a cue', () => {
     const spans = labeledSpans('A123456789012')
-    expect(spans).toHaveLength(0)
+    // No SAAQ-specific span without a cue. The round-2 glued-digit floor is precision-gated to a Luhn-valid
+    // 9-digit run only (mirrors privacy_gate.py glued_digit_spans), so a 12-digit code run glued to a leading
+    // 'A' is no longer over-redacted as a generic account id -- it must NOT be labeled a SAAQ licence either.
     expect(spans.some((s) => s.subtype === 'saaq_licence')).toBe(false)
+    expect(spans.some((s) => s.rule === 'tier0:digit_glued')).toBe(false)
   })
 
   it('emits a cue-gated NEQ span when a NEQ cue is present', () => {
@@ -308,5 +388,213 @@ describe('tier0Spans Business Number suppression', () => {
     const gov = labeledSpans('NAS 046454286').find((s) => s.label === 'government_id')
     expect(gov).toBeDefined()
     expect(gov!.sub.replace(/\D/g, '')).toBe('046454286')
+  })
+})
+
+// -------------------------
+// Glued NON-checksum digit-run floor (port of privacy_gate.py glued_digit_spans)
+// All values are synthetic; 046454286 is the public SIN Luhn test vector.
+// -------------------------
+describe('tier0Spans glued digit-run floor', () => {
+  it('catches a Luhn-valid 9-digit SIN glued to a name as government_id (no cue needed)', () => {
+    const spans = labeledSpans('JaneDoe046454286')
+    const hit = spans.find((s) => s.rule === 'tier0:digit_glued')
+    expect(hit).toBeDefined()
+    expect(hit!.label).toBe('government_id')
+    expect(hit!.conf).toBe(0.8)
+    expect(hit!.validator).toBe('luhn_ok')
+    expect(hit!.sub).toBe('046454286')
+  })
+
+  it('does NOT over-redact a long non-cue account run glued to letters (round-2 precision gate)', () => {
+    // Round-2 dropped the old 10-19 no-cue glued path: a 12-digit run glued to a word is left to the neural
+    // tier / cue-gated path, so coding traffic is not nuked. Mirrors privacy_gate.py glued_digit_spans.
+    const spans = labeledSpans('foo000123456789')
+    expect(spans.some((s) => s.rule === 'tier0:digit_glued')).toBe(false)
+  })
+
+  it('does NOT fire on a non-Luhn 9-digit code id glued to letters (translateY(123456789px))', () => {
+    // 123456789 fails Luhn -> a code identifier, not a SIN. Must stay clean so CSS/transform code survives.
+    expect(labeledSpans('translateY(123456789px)').some((s) => s.rule === 'tier0:digit_glued')).toBe(false)
+    expect(labeledSpans('seed1234567890').some((s) => s.rule === 'tier0:digit_glued')).toBe(false)
+  })
+
+  it('catches a Luhn-valid 9-digit run glued after a SIN cue (still government_id)', () => {
+    const spans = labeledSpans('NAS:client046454286')
+    const hit = spans.find((s) => s.rule === 'tier0:digit_glued')
+    expect(hit).toBeDefined()
+    expect(hit!.label).toBe('government_id')
+    expect(hit!.conf).toBe(0.8)
+  })
+
+  it('does NOT fire on a clean-boundary run (owned by DIGIT_RUN_RE, not the glued floor)', () => {
+    // A space-separated 12-digit run has clean boundaries on both sides -> no letter-adjacency.
+    const spans = labeledSpans('value 000123456789 here')
+    expect(spans.some((s) => s.rule === 'tier0:digit_glued')).toBe(false)
+  })
+})
+
+// -------------------------
+// Cue-anchored card_cvv + card_expiry (port of privacy_gate.py card_aux_spans)
+// -------------------------
+describe('tier0Spans card aux (CVV + expiry)', () => {
+  it('catches a cue-anchored CVV (EN keyword)', () => {
+    for (const text of ['security code 123', 'cvc: 123', 'CVV 4567']) {
+      const hit = labeledSpans(text).find((s) => s.label === 'card_cvv')
+      expect(hit, text).toBeDefined()
+      expect(/^\d{3,4}$/.test(hit!.sub), `${text} -> ${hit!.sub}`).toBe(true)
+    }
+  })
+
+  it('catches a French CVV cue (cryptogramme)', () => {
+    const hit = labeledSpans('cryptogramme visuel 321').find((s) => s.label === 'card_cvv')
+    expect(hit).toBeDefined()
+    expect(hit!.sub).toBe('321')
+  })
+
+  it('catches a cue-anchored expiry (MM/YY and MM/YYYY)', () => {
+    const a = labeledSpans('expiry 08/27').find((s) => s.label === 'card_expiry')
+    expect(a).toBeDefined()
+    expect(a!.sub).toBe('08/27')
+    const b = labeledSpans('exp 12/2026').find((s) => s.label === 'card_expiry')
+    expect(b).toBeDefined()
+    expect(b!.sub).toBe('12/2026')
+  })
+
+  it('does NOT blanket-redact a bare 3-digit number or a generic date (cue required)', () => {
+    expect(labeledSpans('the answer is 123').some((s) => s.label === 'card_cvv')).toBe(false)
+    // a bare MM/YY with no expiry cue should not be a card_expiry
+    expect(labeledSpans('see section 08/27 below').some((s) => s.label === 'card_expiry')).toBe(false)
+  })
+
+  it('offset test: the CVV span indexes exactly the digit group in the original text', () => {
+    const text = 'card verification code 4567 ok'
+    const hit = tier0Spans(text).find((s) => s.label === 'card_cvv')
+    expect(hit).toBeDefined()
+    expect(text.slice(hit!.start, hit!.end)).toBe('4567')
+  })
+})
+
+// -------------------------
+// Separator-tolerant card + dotted SSN (port of privacy_gate.py separated_card_spans)
+// 4111111111111111 is the public Visa Luhn test card; 123.45.6789 a synthetic dotted SSN.
+// -------------------------
+describe('tier0Spans separated card + dotted SSN', () => {
+  it('catches a dot-separated Luhn-valid payment card (tier0:card_sep)', () => {
+    const hit = labeledSpans('pay 4111.1111.1111.1111 now').find((s) => s.rule === 'tier0:card_sep')
+    expect(hit).toBeDefined()
+    expect(hit!.label).toBe('payment_card')
+    expect(hit!.validator).toBe('luhn_ok')
+    expect(hit!.sub).toBe('4111.1111.1111.1111')
+  })
+
+  it('catches a hyphen-separated Luhn-valid payment card', () => {
+    const hit = labeledSpans('card 4111-1111-1111-1111 end').find((s) => s.rule === 'tier0:card_sep')
+    expect(hit).toBeDefined()
+    expect(hit!.label).toBe('payment_card')
+  })
+
+  it('does NOT emit card_sep for a dot-grouped 16-run that fails Luhn', () => {
+    expect(labeledSpans('4111.1111.1111.1112').some((s) => s.rule === 'tier0:card_sep')).toBe(false)
+  })
+
+  it('catches a dot-separated SSN as government_id (tier0:ssn_dotted)', () => {
+    const hit = labeledSpans('ssn 123.45.6789 ok').find((s) => s.rule === 'tier0:ssn_dotted')
+    expect(hit).toBeDefined()
+    expect(hit!.label).toBe('government_id')
+    expect(hit!.sub).toBe('123.45.6789')
+  })
+
+  it('does NOT treat a longer dotted sequence (version/IP-like) as a dotted SSN', () => {
+    expect(labeledSpans('build 123.45.6789.1').some((s) => s.rule === 'tier0:ssn_dotted')).toBe(false)
+  })
+})
+
+// -------------------------
+// Control-char (Cc) digit-separator obfuscation resistance (round-2 Cf+Cc strip)
+// TAB is already neutralized by normSpace; the C0 separators (FS/GS/RS/US U+001C-001F) are NOT, so a
+// US-separated (U+001F) card exercises the new Cc branch of the +cf re-scan specifically.
+// -------------------------
+describe('tier0Spans control-char (Cc) resistance', () => {
+  const US = '' // UNIT SEPARATOR (category Cc), not covered by normSpace
+
+  it('catches a US-control-separated payment card via the +cf re-scan', () => {
+    const text = 'card ' + '4111111111111111'.split('').join(US) + ' end'
+    const card = tier0Spans(text).find((s) => s.label === 'payment_card')
+    expect(card).toBeDefined()
+    expect(card!.rule.endsWith('+cf')).toBe(true)
+    expect(text.slice(card!.start, card!.end).replace(/[^0-9]/g, '')).toBe('4111111111111111')
+  })
+
+  it('also catches a TAB-separated payment card (normSpace path)', () => {
+    const text = 'card ' + '4111111111111111'.split('').join('\t') + ' end'
+    const card = tier0Spans(text).find((s) => s.label === 'payment_card')
+    expect(card).toBeDefined()
+    expect(text.slice(card!.start, card!.end).replace(/[^0-9]/g, '')).toBe('4111111111111111')
+  })
+
+  it('hasFormatChars is true for TAB + C0-control (Cc) and ZWSP (Cf)', () => {
+    expect(hasFormatChars('a\tb')).toBe(true)
+    expect(hasFormatChars('a' + US + 'b')).toBe(true)
+    expect(hasFormatChars('a​b')).toBe(true)
+    expect(hasFormatChars('plain text')).toBe(false)
+  })
+})
+
+// -------------------------
+// Zero-width / Unicode format-char (Cf) obfuscation resistance
+// (port of privacy_gate.py _has_format_chars / _strip_format_chars + the tier0_spans +cf re-scan)
+// All values are synthetic; 4111111111111111 is the public Visa Luhn test card, GB82WEST...32 the ISO IBAN
+// test vector, 046454286 the public SIN Luhn vector. ZW is a literal zero-width space (U+200B).
+// -------------------------
+describe('tier0Spans zero-width / format-char resistance', () => {
+  const ZW = '​'
+
+  it('catches a zero-width-interleaved payment card', () => {
+    const text = 'card ' + '4111111111111111'.split('').join(ZW) + ' end'
+    const card = tier0Spans(text).find((s) => s.label === 'payment_card')
+    expect(card).toBeDefined()
+    expect(card!.rule.endsWith('+cf')).toBe(true)
+    // the span maps back onto the ORIGINAL text and covers the digits (with the interleaved invisibles)
+    expect(text.slice(card!.start, card!.end).replace(/[^0-9]/g, '')).toBe('4111111111111111')
+  })
+
+  it('catches a zero-width-interleaved IBAN', () => {
+    const text = 'IBAN ' + 'GB82WEST12345698765432'.split('').join(ZW) + ' fin'
+    const iban = tier0Spans(text).find((s) => s.label === 'iban')
+    expect(iban).toBeDefined()
+    expect(iban!.rule.endsWith('+cf')).toBe(true)
+    expect(text.slice(iban!.start, iban!.end).replace(new RegExp(ZW, 'g'), '')).toBe('GB82WEST12345698765432')
+  })
+
+  it('catches a zero-width-interleaved 9-digit government id (SIN cue)', () => {
+    const text = 'NAS ' + '046454286'.split('').join(ZW)
+    const gov = tier0Spans(text).find((s) => s.label === 'government_id')
+    expect(gov).toBeDefined()
+    expect(gov!.rule.endsWith('+cf')).toBe(true)
+    expect(text.slice(gov!.start, gov!.end).replace(/[^0-9]/g, '')).toBe('046454286')
+  })
+
+  it('does not crash and adds no +cf spans when no format chars are present', () => {
+    const spans = tier0Spans('Card: 4539148803436467')
+    expect(spans.some((s) => s.rule.endsWith('+cf'))).toBe(false)
+    expect(spans.some((s) => s.label === 'payment_card')).toBe(true)
+  })
+})
+
+describe('Unicode No-digit + percent-encoded card homoglyphs (parity with privacy_gate _normdigits / _SEP_CARD_RE %20)', () => {
+  const sup = (d: string) =>
+    [...d].map((c) => ('⁰¹²³⁴⁵⁶⁷⁸⁹'[Number(c)])).join('')
+  it('catches a superscript-digit Luhn card (category No, which \\d misses)', () => {
+    const card = sup('4111111111111111')
+    const spans = tier0Spans('card ' + card)
+    expect(spans.some((s) => s.label === 'payment_card')).toBe(true)
+  })
+  it('catches a %20-separated Luhn card (URL-encoded spaces)', () => {
+    const spans = tier0Spans('card=4111%201111%201111%201111')
+    expect(spans.some((s) => s.label === 'payment_card' && s.rule === 'tier0:card_sep')).toBe(true)
+  })
+  it('does not over-redact a non-Luhn %20 / dotted group', () => {
+    expect(tier0Spans('id 1234.5678.9012.3456').some((s) => s.rule === 'tier0:card_sep')).toBe(false)
   })
 })

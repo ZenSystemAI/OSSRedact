@@ -1,8 +1,8 @@
-"""SHARED catastrophic-shape parity vectors -- the gate (thin floor) leg.
+"""SHARED deterministic parity vectors -- the gate (thin floor) leg.
 
 The floors are TIERED (thin on the GPU-paired gate, thick on offline/client), but the SAFETY
 CORE must be byte-identical on EVERY surface: email, UUID, mod-97 IBAN, Luhn card, Luhn SIN with
-Business-Number suppression + SIN-cue override. This suite, its appliance twin
+Business-Number suppression + SIN-cue override, and cue-anchored mailbox/header person names. This suite, its appliance twin
 (appliance/tests/test_appliance_parity_vectors.py) and its TS twin (packages/redaction-core/src/parity.test.ts)
 all load the SAME validation/parity_vectors.json and assert the SAME spans, so if any future edit
 drifts the safety core on ANY one surface, exactly one of the three suites goes red.
@@ -24,7 +24,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from privacy_gate import validated_floor  # noqa: E402
+from privacy_gate import cue_name_spans, validated_floor  # noqa: E402
 
 _VECTORS_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'validation', 'parity_vectors.json')
 with open(_VECTORS_PATH, encoding='utf-8') as _f:
@@ -33,7 +33,7 @@ with open(_VECTORS_PATH, encoding='utf-8') as _f:
 
 def _spans(text):
     # (label, substring) pairs as the floor reports them, offsets indexing the ORIGINAL text.
-    return [(s['label'], text[s['start']:s['end']]) for s in validated_floor(text)]
+    return [(s['label'], text[s['start']:s['end']]) for s in validated_floor(text) + cue_name_spans(text)]
 
 
 def _has(spans, label, value, digits_only=False):

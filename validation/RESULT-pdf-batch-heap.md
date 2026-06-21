@@ -2,6 +2,7 @@
 
 > **PII-free.** Aggregate memory numbers only. The corpus is 14 PUBLIC sample PDFs from
 > `datasets/scaffolds/` (government forms, bank/credit statement guides) -- no personal data.
+> Rerun 2026-06-18 against current `master` after the PDF coverage-rescan and lazy-load changes.
 
 ## Why this run exists
 
@@ -15,6 +16,9 @@ ran headless). This run measures it in a real browser before promising large-PDF
 
 - Real browser: system Google Chrome 149, headless, launched isolated via Playwright (`--enable-precise-memory-info`
   + `--js-flags=--expose-gc`). No source edits; no MCP-browser collision.
+- Gate-down: Playwright intercepted `/gate/*` in the tab and returned a local 503, and the measurement drove only
+  `loadFile()` plus `renderRedactedPdf(bytes, pages, [], [])`. No `deepDetect`, no `/detect`, no appliance proxy,
+  no GPU gate.
 - Drives the **exact production functions** from the running workbench origin (`http://localhost:5180`):
   `loadFile()` (intake, holds N `LoadedDoc`s with bytes+pages, mirroring `handleLoadBatch`), then a lazy
   loop of `renderRedactedPdf(bytes, pages, [], [])` per file, **retaining each output blob** exactly like
@@ -23,39 +27,41 @@ ran headless). This run measures it in a real browser before promising large-PDF
 - Sampled `performance.memory.usedJSHeapSize` before/after each render, and **after a forced GC** (`window.gc()`)
   per file to read the true post-collection trough.
 - Corpus: 14 PDFs, **245 pages total**, largest single doc **94 pages** (a worst-case multi-page form).
-- Reproduce: `/tmp/heap_measure.js` (Playwright) against `npm run dev` (workbench, :5180) + a CORS static
-  server over `datasets/scaffolds/` (:8099). Both kept out of the repo.
+- Reproduce: `/tmp/ossredact_heap_measure_current.cjs` (Playwright) against `npm run dev` (workbench, :5180)
+  + a CORS static server over `datasets/scaffolds/` (:8109). Both kept out of the repo.
 
 ## Result
 
 | | JS heap (usedJSHeapSize) |
 |---|---|
 | baseline (empty app, post-GC) | **8.6 MB** |
-| after intake of all 14 PDFs (held in `docs[]`) | ~31 MB |
-| **peak during the whole batch** | **139.7 MB** -- transient, during the 94-page doc only |
+| after intake of all 14 PDFs (held in `docs[]`) | **31.7 MB** |
+| **peak during the whole batch** | **159.1 MB** -- transient, during the 94-page doc only |
 | done (after full 14-file batch, post-GC) | **32.6 MB** (net +24 MB over baseline) |
-| retained output blobs (sum of all 14 redacted PDFs) | 81 MB -- **native-backed, NOT in the JS heap** |
+| retained output blobs (sum of all 14 redacted PDFs) | **81.1 MB** -- native-backed, NOT in the JS heap |
 
 Per-file post-GC trough (over the 8.6 MB baseline), in batch order:
 
 ```
 file:   0    1    2    3    4    5    6    7    8    9   10   11   12   13
 pages:  1    1    6    6   36   18    2   43   12    5   16    3    2   94
-trough:+25  +25  +29  +31 +62  +35  +26  +52  +33  +30  +40  +28  +27 +104  (MB over baseline)
+trough:+25  +25  +29  +31  +24  +35  +26  +52  +33  +30  +40  +28  +27 +104  (MB over baseline)
 ```
 
 ## Conclusions
 
-1. **No heap blowup; heap returns to baseline between files -- CONFIRMED.** The post-GC trough does NOT
-   climb with batch position: file 12 (near the end) troughs at +27 MB, essentially identical to file 0
-   (+25 MB). Raster canvases and the per-file pdf-lib document are freed each iteration; nothing
-   accumulates across files. The lazy one-at-a-time design holds empirically.
+1. **No heap blowup; heap returns to the running baseline between files -- CONFIRMED.** The post-GC trough
+   does NOT climb with batch position: file 12 (near the end, after 13 retained input docs and 42 MB of
+   retained output blobs) troughs at +27 MB over the empty-app baseline, essentially identical to file 0
+   (+25 MB). The final post-loop GC is 32.6 MB. Raster canvases and the per-file pdf-lib document are freed
+   each iteration; nothing accumulates across files. The lazy one-at-a-time design holds empirically.
 2. **Peak is governed by the LARGEST SINGLE document's page count, not by batch size N.** A 1-page PDF adds
-   ~2.7 MB; the 94-page PDF transiently peaked the JS heap at 139.7 MB (pdf-lib's output document
-   accumulating all 94 embedded JPEGs + the ~41 MB output byte array before `save()`), then dropped back.
+   ~2.7 MB; the 94-page PDF transiently peaked the JS heap at 159.1 MB while sampled during render, then
+   was 139.7 MB immediately after render (pdf-lib's output document accumulating all 94 embedded JPEGs +
+   the ~41 MB output byte array before `save()`), then dropped back.
    So a "10-15 PDF batch" is safe regardless of count -- the only scaling lever is the biggest individual
    file. For typical statements/reports (1-40 pages) the single-file peak stays under ~85 MB.
-3. **Output blobs are native-backed and outside the JS heap.** `done` JS heap is 32.6 MB while 81 MB of
+3. **Output blobs are native-backed and outside the JS heap.** `done` JS heap is 32.6 MB while 81.1 MB of
    redacted output blobs are held in the zip set -- they accumulate linearly (expected for a zip) without
    pressuring the JS heap.
 4. **Linear, bounded input retention.** Holding 14 input byte buffers adds ~24 MB JS heap (the `done`

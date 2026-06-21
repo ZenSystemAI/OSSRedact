@@ -1,8 +1,8 @@
-// The OPTIONAL deep tier -- now running FULLY IN-BROWSER (zero egress). Previously this fetched a local
-// network gate (a GPU appliance ran Tier-0 + neural XLM-R + union merge). That path made
-// text leave the browser; here the same pipeline runs client-side via transformers.js, so deep detect
-// makes ZERO network requests after the one-time model download. The workbench is still fully functional
-// without the model (client-side Tier-0 in tier0.ts); the neural tier is opt-in.
+// The OPTIONAL deep tier has two local providers:
+// 1. On-prem/install workbench: call the local OSSRedact gate through the same-origin /gate proxy.
+// 2. Hosted website demo: if /gate is absent, run the base INT8 model in-browser via transformers.js.
+// Neither provider calls a cloud detector. The local gate path sends text only to the user's own appliance;
+// the browser path keeps text in the tab after self-hosted model assets are loaded.
 
 import type { RawSpan } from './types'
 import { mergeSpans, tier0Spans } from '@ossredact/core'
@@ -15,26 +15,116 @@ import {
   type NeuralPhase,
 } from './neural'
 
-export type GateHealth = { ok: boolean; model?: string; uptime_s?: number }
+export type DeepProvider = 'gateway' | 'browser'
+type ProviderConfig = DeepProvider | 'auto'
+export type GateHealth = { ok: boolean; provider?: DeepProvider; model?: string; uptime_s?: number }
 
-// "Health" now means: can this browser run the on-device model, and is it loaded yet. No network call.
-export async function gateHealth(): Promise<GateHealth> {
+function configuredProvider(): ProviderConfig {
+  const raw = import.meta.env.VITE_OSSREDACT_DEEP_PROVIDER
+  return raw === 'gateway' || raw === 'browser' ? raw : 'auto'
+}
+
+async function gatewayHealth(signal?: AbortSignal): Promise<GateHealth> {
+  try {
+    const res = await fetch('/gate/healthz', { signal })
+    if (!res.ok) return { ok: false, provider: 'gateway' }
+    const d = await res.json()
+    return { ok: d.status === 'ok', provider: 'gateway', model: d.model, uptime_s: d.uptime_s }
+  } catch {
+    return { ok: false, provider: 'gateway' }
+  }
+}
+
+function browserHealth(): GateHealth {
   return {
     ok: neuralStatus() === 'ready',
+    provider: 'browser',
     model: neuralSupported() ? 'xlm-r base INT8 (on-device)' : undefined,
   }
 }
 
-export { loadNeural, neuralSupported, neuralStatus }
+export async function gateHealth(signal?: AbortSignal): Promise<GateHealth> {
+  const configured = configuredProvider()
+  if (configured === 'gateway') return gatewayHealth(signal)
+  if (configured === 'browser') return browserHealth()
+  const gateway = await gatewayHealth(signal)
+  return gateway.ok ? gateway : browserHealth()
+}
+
+export async function selectDeepProvider(signal?: AbortSignal): Promise<DeepProvider> {
+  const configured = configuredProvider()
+  if (configured === 'gateway' || configured === 'browser') return configured
+  const gateway = await gatewayHealth(signal)
+  return gateway.ok ? 'gateway' : 'browser'
+}
+
+export async function prepareDeepDetect(onProgress?: (p: NeuralProgress) => void, signal?: AbortSignal): Promise<DeepProvider> {
+  const provider = await selectDeepProvider(signal)
+  if (provider === 'browser') await loadNeural(onProgress)
+  return provider
+}
+
+export function deepProviderLabel(provider: DeepProvider): string {
+  return provider === 'gateway' ? 'local gate' : 'browser model'
+}
+
 export type { NeuralProgress, NeuralPhase }
 
-// In-browser deep detect: Tier-0 (deterministic) UNION neural (XLM-R INT8), then mergeSpans collapses
-// chunk-overlap duplicates and resolves Tier-0/neural overlaps by confidence -- the same RawSpan[]
-// contract the appliance used to return, but nothing leaves the browser. `signal` lets the batch loop
-// abort between the (long) neural pass and the rest.
-export async function deepDetect(text: string, minScore = 0.5, signal?: AbortSignal): Promise<RawSpan[]> {
+type WireSpan = {
+  start: number
+  end: number
+  label: string
+  tier: number
+  conf: number
+  rule?: string
+  validator?: string
+  cue?: string
+  subtype?: string
+  members?: number
+}
+
+async function gatewayDetect(text: string, minScore: number, signal?: AbortSignal): Promise<RawSpan[]> {
+  const res = await fetch('/gate/detect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, min_score: minScore }),
+    signal,
+  })
+  if (!res.ok) throw new Error(`appliance returned ${res.status}`)
+  const data = (await res.json()) as { spans?: WireSpan[] }
+  // Merge the LOCAL deterministic Tier-0 floor with the gateway spans, mirroring browserDetect below.
+  // Without this the gateway path silently drops the high-recall numeric floor, so bare account
+  // numbers in documents (e.g. bank statements) that the GPU NER misses would leak unredacted.
+  const gatewaySpans = (data.spans ?? []).map((s) => ({
+    start: s.start,
+    end: s.end,
+    label: s.label,
+    tier: s.tier,
+    conf: s.conf,
+    rule: s.rule ?? (s.tier === 0 ? 'tier0' : 'npu'),
+    validator: s.validator,
+    cue: s.cue,
+    subtype: s.subtype,
+    members: s.members,
+  }))
+  return mergeSpans([...tier0Spans(text), ...gatewaySpans])
+}
+
+async function browserDetect(text: string, minScore: number, signal?: AbortSignal): Promise<RawSpan[]> {
   if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
   const neural = await detectNeural(text, minScore)
   if (signal?.aborted) throw new DOMException('aborted', 'AbortError')
   return mergeSpans([...tier0Spans(text), ...neural])
+}
+
+export async function deepDetect(
+  text: string,
+  minScore = 0.5,
+  signal?: AbortSignal,
+  provider?: DeepProvider,
+): Promise<RawSpan[]> {
+  const selected = provider ?? await selectDeepProvider(signal)
+  return selected === 'gateway'
+    ? gatewayDetect(text, minScore, signal)
+    : browserDetect(text, minScore, signal)
 }

@@ -224,8 +224,8 @@ describe('buildEntityMap carry-in (shared index)', () => {
     expect(r.placeholderOf.get('e')).toBe('<EMAIL_001>')
   })
 
-  it('dedup is case/whitespace-normalized but never merges distinct values', () => {
-    const t1 = '  marie   tremblay '
+  it('dedup is whitespace-normalized but never merges distinct values', () => {
+    const t1 = '  Marie   Tremblay '
     const t2 = 'Marie Tremblay'
     const t3 = 'Marie Gagnon'
     const s1: Span[] = [span(0, t1.length, 'person')]
@@ -236,8 +236,28 @@ describe('buildEntityMap carry-in (shared index)', () => {
     const a = buildEntityMap(t1, s1, idx).placeholderOf.get('1')
     const b = buildEntityMap(t2, s2, idx).placeholderOf.get('2')
     const c = buildEntityMap(t3, s3, idx).placeholderOf.get('3')
-    expect(a).toBe(b) // case + whitespace only -> same placeholder
+    expect(a).toBe(b) // whitespace only -> same placeholder
     expect(c).not.toBe(a) // a different person stays distinct
+  })
+
+  it('person case variants stay distinct and preserve lowercase paths and usernames', () => {
+    const t = "I'm Nadia; open /home/nadia/dev/x and log in as nadia."
+    const p = t.indexOf('Nadia')
+    const spans: Span[] = [span(p, p + 'Nadia'.length, 'person')]
+    spans[0].id = 'person'
+    const { map } = buildEntityMap(t, spans)
+    const out = redactedText(t, spans)
+    expect(out).toContain('<PERSON_001>')
+    expect(out).toContain('/home/nadia/dev/x')
+    expect(out).toContain('as nadia')
+    expect(rehydrate(out, map)).toBe(t)
+
+    const idx = newPlaceholderIndex()
+    const upper = [span(0, 'Nadia'.length, 'person')]
+    const lower = [span(0, 'nadia'.length, 'person')]
+    upper[0].id = 'upper'; lower[0].id = 'lower'
+    expect(buildEntityMap('Nadia', upper, idx).placeholderOf.get('upper')).toBe('<PERSON_001>')
+    expect(buildEntityMap('nadia', lower, idx).placeholderOf.get('lower')).toBe('<PERSON_002>')
   })
 
   it('case-sensitive password variants stay distinct and round-trip losslessly', () => {
@@ -437,13 +457,22 @@ describe('batch text vs office sweep stay leak-equivalent', () => {
       kept: [],
     },
     {
-      name: 'regular label is case-insensitive: a lower-case repeat is also swept',
-      text: 'Owner Marie Tremblay; cc marie tremblay on file.',
+      name: 'email label is case-insensitive: a lower-case repeat is also swept',
+      text: 'Owner Marie@Example.test; cc marie@example.test on file.',
       spans: [],
       placeholderOf: new Map(),
-      sharedMap: { '<PERSON_001>': 'Marie Tremblay' },
-      gone: ['Marie Tremblay', 'marie tremblay'],
+      sharedMap: { '<EMAIL_001>': 'Marie@Example.test' },
+      gone: ['Marie@Example.test', 'marie@example.test'],
       kept: [],
+    },
+    {
+      name: 'person label is exact-case: lowercase path and username tokens are preserved',
+      text: 'Owner Nadia; path /home/nadia/dev/x and user nadia.',
+      spans: [],
+      placeholderOf: new Map(),
+      sharedMap: { '<PERSON_001>': 'Nadia' },
+      gone: ['Owner Nadia'],
+      kept: ['/home/nadia/dev/x', 'user nadia'],
     },
     {
       name: 'credential label is case-sensitive: a different-case token is left intact',
@@ -560,13 +589,13 @@ describe('sweepKnownValues + redactedText repeated-value hardening', () => {
     expect(rehydrate(out, map)).toBe(text)
   })
 
-  it('uses exact-case sweep for case-sensitive credentials', () => {
+  it('uses exact-case sweep for credentials and person values', () => {
     const out = sweepKnownValues('again abc123xy and Jane Roy and JANE ROY', {
       '<PASSWORD_001>': 'AbC123xy',
       '<PASSWORD_002>': 'abc123xy',
       '<PERSON_001>': 'Jane Roy',
     })
-    expect(out).toBe('again <PASSWORD_002> and <PERSON_001> and <PERSON_001>')
+    expect(out).toBe('again <PASSWORD_002> and <PERSON_001> and JANE ROY')
   })
 })
 

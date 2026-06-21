@@ -41,11 +41,13 @@ export default function Rehydrate() {
   const [noMatch, setNoMatch] = useState(false)
   const docRef = useRef<HTMLInputElement>(null)
   const mapRef = useRef<HTMLInputElement>(null)
+  const matchSeq = useRef(0)
 
   // On docFile pick: try to auto-match a locally-stored map by exact redacted-body fingerprint. Hit ->
   // one-click restore (no .json). Miss -> reveal the manual map picker. PDF / unreadable -> reveal the
   // manual picker too (it will error clearly).
   async function tryAutoMatch(file: File) {
+    const seq = ++matchSeq.current
     setMatched(null)
     setNoMatch(false)
     setStatus({ kind: 'idle', msg: '' })
@@ -54,9 +56,11 @@ export default function Rehydrate() {
       const present = findPlaceholders(body)
       const fpExact = await sha256Hex(body)
       const rec = await matchByFingerprint(fpExact, present)
+      if (seq !== matchSeq.current) return
       if (rec) setMatched(rec)
       else setNoMatch(true)
     } catch {
+      if (seq !== matchSeq.current) return
       // pdf or load failure: fall back to the manual path (the run() below surfaces the precise error)
       setNoMatch(true)
     }
@@ -72,14 +76,22 @@ export default function Rehydrate() {
       // matchByFingerprint already enforces this, but re-check here so a wrong-map restore can never slip
       // through (defence in depth -- do not partial-restore from the wrong map).
       const body = await readBody(docFile)
-      const unresolvable = findPlaceholders(body).filter((ph) => !(ph in matched.map))
+      const present = findPlaceholders(body)
+      const rec = await matchByFingerprint(await sha256Hex(body), present)
+      if (!rec || rec.id !== matched.id) {
+        setMatched(null)
+        setNoMatch(true)
+        setStatus({ kind: 'err', msg: 'The saved map on this device no longer matches this file. Upload the entity-map .json instead.' })
+        return
+      }
+      const unresolvable = present.filter((ph) => !(ph in rec.map))
       if (unresolvable.length) {
         setMatched(null)
         setNoMatch(true)
         setStatus({ kind: 'err', msg: 'The saved map on this device does not resolve every placeholder. Upload the entity-map .json instead.' })
         return
       }
-      const { blob, filename, restored } = await rehydrateFile(docFile, matched.map)
+      const { blob, filename, restored } = await rehydrateFile(docFile, rec.map)
       downloadBlob(filename, blob)
       setStatus({
         kind: 'ok',

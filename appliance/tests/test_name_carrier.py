@@ -51,11 +51,11 @@ def test_carrier_returns_empty_on_no_person():
     assert _run(carrier_person_spans(_mock([]), 'Priya McCallum')) == []
 
 
-def test_carrier_returns_empty_on_gate_error_none():
-    # detect_fn returns None when the gate is unreachable -> never raise, recover nothing
+def test_carrier_returns_none_on_gate_error_none():
+    # detect_fn returns None when the gate is unreachable -> caller can mark degraded/fail closed
     async def _none(text):
         return None
-    assert _run(carrier_person_spans(_none, 'Priya McCallum')) == []
+    assert _run(carrier_person_spans(_none, 'Priya McCallum')) is None
 
 
 def test_carrier_ignores_non_person_labels():

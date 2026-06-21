@@ -9,7 +9,7 @@ import type { Span, RegionBox, EntityMap } from './lib/types'
 import { tier0Spans } from './lib/tier0'
 import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
 import { labelTier, type Tier } from './lib/labels'
-import { deepDetect, gateHealth, loadNeural, neuralSupported, neuralStatus, type GateHealth } from './lib/gate'
+import { deepDetect, deepProviderLabel, gateHealth, prepareDeepDetect, type DeepProvider, type GateHealth } from './lib/gate'
 import { verifyDocx } from './lib/docx'
 import { verifyXlsx } from './lib/xlsx'
 import { download, downloadBlob, findPlaceholders, survivingValues, type LoadedDoc } from './lib/formats'
@@ -29,7 +29,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [gate, setGate] = useState<GateHealth | null>(null)
-  // On-device model download progress (0..100) while the one-time ~300 MB fetch is in flight; null otherwise.
+  // Browser-model download progress (0..100) while the one-time ~300 MB fetch is in flight; null otherwise.
   const [loadPct, setLoadPct] = useState<number | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   // Redaction-filter preference: labels the reviewer chose NOT to redact. Persists across re-detection so a
@@ -162,18 +162,19 @@ export default function App() {
     setSpans((prev) => combineWithManual(prev, fresh))
   }, [doc, mutedLabels])
 
-  // Ensure the on-device neural model is loaded, surfacing the one-time ~300 MB download as a % so the
-  // button can show progress. Idempotent (loadNeural shares one promise); a no-op once ready. Throws if
-  // the browser can't run WASM or the fetch fails -- the caller degrades to Tier-0.
-  const ensureModel = useCallback(async () => {
-    if (neuralStatus() === 'ready') return
-    if (!neuralSupported()) throw new Error('this browser cannot run the on-device model')
-    setLoadPct(0)
-    flash('Loading the on-device model -- one-time ~300 MB download, then it runs offline (wifi off).')
+  // Pick the deep-detect provider. On-prem installs use /gate when reachable; the hosted website demo
+  // falls back to the in-browser model and surfaces the one-time model download as progress.
+  const ensureDeepProvider = useCallback(async (signal?: AbortSignal): Promise<DeepProvider> => {
+    let announcedBrowserLoad = false
     try {
-      await loadNeural((p) => {
+      return await prepareDeepDetect((p) => {
+        if (!announcedBrowserLoad) {
+          announcedBrowserLoad = true
+          setLoadPct(0)
+          flash('Loading the browser model -- one-time ~300 MB download, then it runs offline.')
+        }
         if (typeof p.progress === 'number') setLoadPct(Math.min(100, Math.round(p.progress)))
-      })
+      }, signal)
     } finally {
       setLoadPct(null)
     }
@@ -183,23 +184,23 @@ export default function App() {
     if (!doc) return
     setBusy(true)
     try {
-      await ensureModel()
-      const raw = await deepDetect(doc.text)
+      const provider = await ensureDeepProvider()
+      const raw = await deepDetect(doc.text, 0.5, undefined, provider)
       const fresh = toSpans(raw, 'neural', mutedLabels)
       setSpans((prev) => combineWithManual(prev, fresh))
-      setGate((g) => ({ ...(g ?? {}), ok: true }))
-      flash(`On-device model found ${fresh.length} spans (Tier-0 + neural) -- 0 bytes left this machine`)
+      setGate((g) => ({ ...(g ?? {}), ok: true, provider }))
+      flash(`${deepProviderLabel(provider)} found ${fresh.length} spans (Tier-0 + neural)`)
     } catch (e) {
       setGate((g) => ({ ...(g ?? {}), ok: false }))
-      flash(`On-device model unavailable -- using local Tier-0 only. (${e instanceof Error ? e.message : e})`)
+      flash(`Deep detect unavailable -- using local Tier-0 only. (${e instanceof Error ? e.message : e})`)
     } finally {
       setBusy(false)
     }
-  }, [doc, ensureModel, flash, mutedLabels])
+  }, [doc, ensureDeepProvider, flash, mutedLabels])
 
-  // Batch "Deep detect all": iterate entries SEQUENTIALLY (one /gate/detect at a time -- never a parallel
-  // flood) with a cancellable AbortSignal and per-file progress. On gate failure for an entry, mark it
-  // Tier-0-only and CONTINUE -- the batch never hard-fails because the gate is down (mirrors runDeep's
+  // Batch "Deep detect all": iterate entries SEQUENTIALLY (never a parallel model/proxy flood) with a
+  // cancellable AbortSignal and per-file progress. On provider failure for an entry, mark it Tier-0-only
+  // and CONTINUE -- the batch never hard-fails because deep detect is down (mirrors runDeep's
   // single-file degrade). The live active entry's spans are flushed back into the batch first so its
   // existing manual work is preserved, then every entry is detected from its own saved spans.
   const runDeepAll = useCallback(async () => {
@@ -210,13 +211,13 @@ export default function App() {
     // snapshot of entries with the live active entry's spans flushed in (so manual work on it is kept)
     const work = batch.map((e) => (e.id === activeId ? { ...e, spans, regions } : e))
     setBatchProgress({ done: 0, total: work.length })
-    // Load the on-device model ONCE up front (the ~300 MB fetch should not repeat per file). If it can't
-    // load, every entry degrades to Tier-0 below without re-attempting the download each iteration.
-    let modelOk = true
+    // Select the deep provider ONCE up front: local /gate for installs, browser model for the hosted demo.
+    // If selection/load fails, every entry degrades to Tier-0 without retrying on every file.
+    let provider: DeepProvider | null = null
     try {
-      await ensureModel()
+      provider = await ensureDeepProvider(ac.signal)
     } catch {
-      modelOk = false
+      provider = null
     }
     let gateOk: boolean | null = null
     let degraded = 0
@@ -225,15 +226,15 @@ export default function App() {
       if (ac.signal.aborted) break
       const e = work[i]
       try {
-        if (!modelOk) throw new Error('model unavailable')
-        const raw = await deepDetect(e.doc.text, 0.5, ac.signal)
+        if (!provider) throw new Error('deep detect unavailable')
+        const raw = await deepDetect(e.doc.text, 0.5, ac.signal, provider)
         const fresh = toSpans(raw, 'neural', mutedLabels)
         updated.push({ ...e, spans: combineWithManual(e.spans, fresh), status: 'detected' })
         gateOk = true
       } catch (err) {
         if (ac.signal.aborted) break
-        // model unavailable for this entry: keep its Tier-0 spans, mark it, continue
-        updated.push({ ...e, status: 'detected', error: 'Tier-0 only (model unavailable)' })
+        // deep provider unavailable for this entry: keep its Tier-0 spans, mark it, continue
+        updated.push({ ...e, status: 'detected', error: 'Tier-0 only (deep detect unavailable)' })
         degraded++
         gateOk = gateOk ?? false
       }
@@ -244,19 +245,19 @@ export default function App() {
     // re-mirror the active entry's (possibly updated) spans into the live single-doc state
     const activeUpdated = updated.find((u) => u.id === activeId)
     if (activeUpdated) setSpans(activeUpdated.spans)
-    if (gateOk) setGate((g) => ({ ...(g ?? {}), ok: true }))
+    if (gateOk) setGate((g) => ({ ...(g ?? {}), ok: true, ...(provider ? { provider } : {}) }))
     if (degraded === work.length) {
       setGate((g) => ({ ...(g ?? {}), ok: false }))
-      flash(`Neural gate unreachable -- all ${work.length} files use local Tier-0 only.`)
+      flash(`Deep detect unavailable -- all ${work.length} files use local Tier-0 only.`)
     } else if (degraded > 0) {
-      flash(`Deep detect done: ${work.length - degraded} via GPU, ${degraded} fell back to Tier-0.`)
+      flash(`Deep detect done: ${work.length - degraded} via ${provider ? deepProviderLabel(provider) : 'deep detect'}, ${degraded} fell back to Tier-0.`)
     } else if (!ac.signal.aborted) {
-      flash(`Deep detect done across ${work.length} files (Tier-0 + GPU).`)
+      flash(`Deep detect done across ${work.length} files (${provider ? deepProviderLabel(provider) : 'deep detect'}).`)
     }
     batchAbort.current = null
     setBatchProgress(null)
     setBusy(false)
-  }, [inBatch, batch, activeId, spans, regions, mutedLabels, flash])
+  }, [inBatch, batch, activeId, spans, regions, mutedLabels, flash, ensureDeepProvider])
 
   const cancelBatch = useCallback(() => {
     batchAbort.current?.abort()

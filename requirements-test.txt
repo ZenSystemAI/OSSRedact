@@ -9,9 +9,21 @@
 #
 # Runs:
 #   .venv-test/bin/python -m pytest gate/tests/test_validated_floor.py gate/tests/test_merge.py gate/tests/test_gate_regression.py -v
+#   .venv-test/bin/python -m pytest appliance/tests -v
 #   .venv-test/bin/python -m pytest validation/test_parity_check.py -v
 
 pytest==9.1.0
 numpy==2.4.6
 scipy==1.17.1
 cryptography==49.0.0
+
+# FastAPI TestClient stack -- required by the appliance redaction-critical tests (control CORS/CSRF guard,
+# floor hardening, secret-key force-redact, input-shape fail-open, settings/mode invariants, denylist,
+# live-view safety). These are TORCH-FREE: appliance/egress_proxy.py imports only the Tier-0 floor from
+# privacy_gate.py; the torch/onnxruntime/transformers NER tiers are imported lazily inside methods and are
+# never touched by the appliance tests. The tests were excluded from CI only because these deps were absent.
+fastapi==0.137.1
+httpx==0.28.1
+uvicorn==0.49.0
+pydantic==2.13.4
+PyYAML==6.0.3

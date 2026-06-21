@@ -1,8 +1,9 @@
-"""SHARED catastrophic-shape parity vectors -- the appliance (thick floor) leg.
+"""SHARED deterministic parity vectors -- the appliance (thick floor) leg.
 
 Twin of gate/tests/test_gate_parity_vectors.py and packages/redaction-core/src/parity.test.ts: all three
 load the SAME validation/parity_vectors.json and assert the SAME safety-core spans (email, UUID,
-mod-97 IBAN, Luhn card, Luhn SIN + Business-Number suppression + SIN-cue override). The floors are
+mod-97 IBAN, Luhn card, Luhn SIN + Business-Number suppression + SIN-cue override, and cue-anchored
+mailbox/header person names). The floors are
 TIERED -- the deployed appliance floor is THICK (it also emits phone/date/postal/ip/generic-digit-run,
 which the thin gate floor omits) -- so we assert by PRESENCE (label + value substring), never by exact
 span-set equality. The thick floor adds tiered-only spans (e.g. a generic sensitive_account_id over the
@@ -53,3 +54,43 @@ def test_safety_core_parity(case):
     for lab in case.get('suppress', []):
         assert not any(l == lab for l, _ in spans), (
             f"{case['id']}: label {lab!r} must be SUPPRESSED on the appliance floor but was emitted: {spans}")
+
+
+# --- Explicit superset guard: appliance floor ⊇ gate floor -----------------------------------------------
+# The deployed appliance runs a THICKER deterministic floor than the GPU-paired gate (gate leaves loose
+# shapes to its co-located neural tier). That divergence is INTENTIONAL only in one direction: the appliance
+# may catch MORE, never LESS. If a future edit makes the appliance floor miss a safety-core span the gate
+# floor still catches, that is a real under-redaction/leak -- this test makes that contract enforceable
+# (the README's "strict superset, not drift" claim). The gate floor is loaded under a unique module name so
+# it coexists with the appliance copy in one interpreter (both files share the bare name 'privacy_gate').
+_GATE_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'gate', 'privacy_gate.py')
+_gspec = importlib.util.spec_from_file_location('gate_privacy_gate', _GATE_PATH)
+_gmod = importlib.util.module_from_spec(_gspec)
+_gspec.loader.exec_module(_gmod)
+
+
+def _gate_spans(text):
+    return [(s['label'], text[s['start']:s['end']]) for s in _gmod.validated_floor(text) + _gmod.cue_name_spans(text)]
+
+
+def _covered(appliance_spans, label, value):
+    """True if some appliance span has this label and overlaps value (either substring contains the other),
+    digit-insensitively for numeric values so separator spacing never matters."""
+    dv = re.sub(r'\D', '', value)
+    for lab, sub in appliance_spans:
+        if lab != label:
+            continue
+        if value in sub or sub in value:
+            return True
+        if dv and dv in re.sub(r'\D', '', sub):
+            return True
+    return False
+
+
+@pytest.mark.parametrize('case', VECTORS, ids=[c['id'] for c in VECTORS])
+def test_appliance_floor_is_superset_of_gate_floor(case):
+    appliance_spans = _spans(case['text'])
+    for lab, sub in _gate_spans(case['text']):
+        assert _covered(appliance_spans, lab, sub), (
+            f"{case['id']}: gate floor emits {lab}={sub!r} but the appliance floor does not cover it -- the "
+            f"appliance under-redacts vs the gate (a LEAK direction). appliance spans: {appliance_spans}")

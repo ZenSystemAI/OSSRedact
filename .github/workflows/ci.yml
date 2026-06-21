@@ -19,7 +19,7 @@ jobs:
 
       - name: No em dash
         run: |
-          matches="$(git grep -n $'\u2014' -- . ':!ci-pdf-parser/private' || true)"
+          matches="$(git grep -n $'\u2014' -- . || true)"
           if [ -n "$matches" ]; then
             printf '%s\n' "$matches"
             echo "Em dash found; use -- instead." >&2
@@ -110,22 +110,37 @@ jobs:
       - name: Install test deps
         run: pip install -r requirements-test.txt
 
-      - name: Run torch-free gate + appliance tests
+      - name: Python dependency audit
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit -r requirements-test.txt --strict
+
+      # Two SEPARATE pytest invocations on purpose: gate/ and appliance/ both ship a module named
+      # `privacy_gate` (the gate's thin checksum-exact floor vs the appliance's thicker floor), so a single
+      # interpreter collides on sys.modules['privacy_gate'] and the second domain imports the wrong copy.
+      # Separate processes keep each domain importing its own file. All of these are torch-free: the FastAPI
+      # TestClient deps (fastapi/httpx/uvicorn/pydantic/pyyaml) are pinned in requirements-test.txt, and the
+      # torch/onnxruntime/transformers NER tiers are imported LAZILY inside privacy_gate.py methods only.
+      - name: Run torch-free gate tests
         run: |
           python -m pytest \
             gate/tests/test_validated_floor.py \
             gate/tests/test_merge.py \
             gate/tests/test_gate_regression.py \
             gate/tests/test_gate_parity_vectors.py \
+            gate/tests/test_cue_name.py \
             gate/tests/test_deploy_gate_service_sync.py \
             gate/tests/test_redact_sweep.py \
-            appliance/tests/test_appliance_floor.py \
-            appliance/tests/test_appliance_parity_vectors.py \
-            appliance/tests/test_egress_e2e.py \
-            appliance/tests/test_entity_map.py \
-            appliance/tests/test_name_carrier.py \
-            appliance/tests/test_responses_adapter.py \
+            training/gen/tests \
             training/tests/test_labeling.py \
             training/tests/test_remap_scheme.py \
             validation/test_parity_check.py \
             -v
+
+      # The FULL appliance suite, in its own process (see the collision note above). This is the
+      # redaction-critical regression net that public CI previously skipped: control CORS/CSRF guard, floor
+      # hardening (the 2026-06-20 bypass locks), secret-key force-redact, input-shape fail-open, settings/mode
+      # invariants, denylist, glued-checksum, IPv6 / US-ZIP, live-view safety. A PR that regresses any of these
+      # now fails public CI instead of being caught only by a local run.
+      - name: Run torch-free appliance tests
+        run: python -m pytest appliance/tests -v

@@ -6,6 +6,7 @@
 // so a document redacted here round-trips through the same entity map.
 
 import type { RawSpan, Span, EntityMap } from './types'
+import { PLACEHOLDER_CONTRACT_RE } from './placeholder'
 
 let _idCounter = 0
 export function newId(): string {
@@ -146,7 +147,7 @@ export function newPlaceholderIndex(): PlaceholderIndex {
   return { counters: {}, byKey: new Map(), map: {} }
 }
 
-const CASE_SENSITIVE_LABEL_KEYS = new Set(['password', 'secret', 'username', 'accesstoken', 'apikey', 'filepath'])
+const CASE_SENSITIVE_LABEL_KEYS = new Set(['password', 'secret', 'username', 'person', 'name', 'accesstoken', 'apikey', 'filepath'])
 
 function labelKey(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -157,11 +158,11 @@ function isCaseSensitiveLabel(label: string): boolean {
 }
 
 function labelFromPlaceholder(ph: string): string {
-  return /^<([A-Z][A-Z0-9_]*)_\d{3,}>$/.exec(ph)?.[1] ?? ''
+  return PLACEHOLDER_CONTRACT_RE.exec(ph)?.[1] ?? ''
 }
 
-// Dedup key: label + value normalized so trivially-different renderings of the SAME ordinary PII value
-// (case, surrounding whitespace) collapse to one placeholder. Case-significant labels skip the case fold.
+// Dedup key: label + value normalized so trivially-different renderings of the SAME ordinary non-name PII
+// value collapse to one placeholder. Case-significant labels skip the case fold.
 // Kept deliberately conservative -- trim + inner-whitespace-collapse -- so distinct values do not merge.
 function dedupKey(label: string, value: string): string {
   const compact = value.trim().replace(/\s+/g, ' ')
@@ -206,7 +207,7 @@ const RE_SPECIAL = /[.*+?^${}()|[\]\\]/g
 // A <LABEL_NNN> placeholder token (matches the buildEntityMap shape). These are inserted by the positional
 // pass and must be PRESERVED verbatim by the sweep -- never rewritten (else a value equal to a label-like
 // token, e.g. an org named "EMAIL", would corrupt "<EMAIL_001>"; Codex review 2026-06-17).
-const PLACEHOLDER_TOKEN_RE = /<[A-Z][A-Z0-9_]*_\d{3,}>/g
+const PLACEHOLDER_TOKEN_RE = /<[A-Z0-9_]+_\d{3,}>/g
 // Token characters for the boundary guard: letter, number, combining mark (decomposed accents), underscore
 // (so a value is not matched inside a `José` / `Live_Wire` compound). Hyphen/slash stay boundaries.
 const TOK = '[\\p{L}\\p{N}\\p{M}_]'

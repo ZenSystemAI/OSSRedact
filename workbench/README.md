@@ -20,6 +20,12 @@ npm test           # vitest (unit + round-trip)
 
 Node 20.19+ / 22.12+.
 
+Deep detect provider selection:
+
+- Default `auto`: use `/gate` when `GET /gate/healthz` is reachable, otherwise fall back to the browser model.
+- `OSSREDACT_GATE_URL=http://host:8001 npm run dev`: point the Vite `/gate` proxy at a specific local gate.
+- `VITE_OSSREDACT_DEEP_PROVIDER=gateway|browser`: force one provider for dev/build.
+
 ## What works today (MVP)
 
 - **Load**: `.txt`, `.md`, `.csv`, `.json`, `.log`, `.xml`, `.html`, plus `.docx`, `.xlsx`, and `.pdf` --
@@ -29,9 +35,10 @@ Node 20.19+ / 22.12+.
 - **Auto-detect (local, offline)**: a faithful TypeScript port of the appliance's Tier-0 deterministic
   detector -- email, phone, postal code, IP, UUID, dates, payment cards (Luhn), SIN, account/reference IDs,
   and Presidio-style context-cued IDs. Runs entirely in the browser; nothing is uploaded.
-- **Deep detect (on-device)** *(optional)*: calls the local appliance (`:8001`, via the Vite `/gate` proxy) to add
-  the neural tier (names, addresses, free-text PII). The only path where text leaves the browser -- and only
-  to your own local appliance, never to the cloud. The app is fully usable without it.
+- **Deep detect** *(optional)*: in an on-prem install, calls the local appliance (`:8001`, via the Vite
+  `/gate` proxy) to add the neural tier (names, addresses, free-text PII). In the hosted website demo, where
+  no local gate exists, it falls back to the self-hosted in-browser base model. Neither mode calls a cloud
+  detector; the app is fully usable without deep detect.
 - **Click-to-inspect**: every redaction shows *why* it was flagged -- recognizer/rule, tier, confidence, Luhn
   validator result, the context cue that promoted it, and how many raw spans merged into it. This is the
   appliance's `explain()` provenance schema rendered as a review UI (Law 25 audit trail).
@@ -65,7 +72,6 @@ comes back, the app hashes/scans it and auto-matches the stored map.
 ## Roadmap
 
 - `.pptx` (PowerPoint) format-preserving redaction.
-- In-browser neural detection (run the model in the tab via onnxruntime-web, zero install).
 - Tauri wrap for a double-click installer (this exact frontend, no rewrite).
 
 ## Architecture
@@ -74,7 +80,7 @@ comes back, the app hashes/scans it and auto-matches the stored map.
 src/lib/
   tier0.ts       client-side Tier-0 detector (port of privacy_gate.py tier0_spans)
   redaction.ts   union-merge, placeholder/entity-map, redacted-text, explain()
-  gate.ts        optional on-device deep-detect via the local appliance
+  gate.ts        optional deep-detect provider: local appliance first, browser model fallback
   mapStore.ts    on-device entity-map store (IndexedDB) for no-upload rehydration
   formats.ts     file loading (text + docx/xlsx/pdf) + round-trip rehydrate
   labels.ts      label display names (FR/EN) + colors

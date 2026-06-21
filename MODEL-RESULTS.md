@@ -3,13 +3,19 @@
 > All numbers MEASURED 2026-06-14 on-box, not estimated. Recall = leak-prevention (label-agnostic substring
 > match); clean_fp = over-redactions on negative rows. Source of truth for the launch benchmark tables/graphs.
 
-## v11 (CURRENT model): real-structure held-out, 5-round error-mine
+## v11r9c (current shipping) -- and the v11r5 baseline it improved on
 
-> MEASURED 2026-06-16 on pii-heldout-v11r5 (7498 synthetic rows, 0 train overlap, UNSEEN document structures).
-> 20-label scheme (training/labels_v20.json). The privacy metric is full-stack catastrophic DETECTION recall
-> (any detected span is redacted regardless of which label it gets -- an intra-catastrophic mislabel is still a
-> redaction, not a leak). Full per-label tables, the r1->r5 trajectory, and the labeled-vs-detection framing:
-> **validation/RESULT-v11.md**.
+> **CURRENT shipping revision: v11r9c** (both tiers, organization/address-hardened). Headline -- held-out
+> catastrophic FULL-stack DETECTION recall / overall labeled R / overall P / clean_fp:
+> GPU/large **0.9954 / 0.9882 / 0.9615 / 34**, CPU/base **0.9941 / 0.9777 / 0.9139 / 48**.
+> Source + per-label catastrophic-detection table: **validation/RESULT-v11r9c.md**.
+>
+> The table below is the earlier **v11r5** round (the initial v11 ship) that v11r9c improved on, retained as
+> the documented baseline. MEASURED 2026-06-16 on pii-heldout-v11r5 (7498 synthetic rows, 0 train overlap,
+> UNSEEN document structures). 20-label scheme (training/labels_v20.json). The privacy metric is full-stack
+> catastrophic DETECTION recall (any detected span is redacted regardless of which label it gets -- an
+> intra-catastrophic mislabel is still a redaction, not a leak). Full per-label tables, the r1->r5 trajectory,
+> and the labeled-vs-detection framing: **validation/RESULT-v11.md**.
 
 | pick | base | catastrophic FULL-stack DETECTION | overall labeled R | overall P | clean_fp |
 |------|------|-----------------------------------|-------------------|-----------|----------|
@@ -39,7 +45,8 @@ Latency p95 below is on the EVAL hardware (3090Ti for npu/gpu tiers, CPU for dis
 | p95 latency (eval HW) | ms | ~33 (CPU) | ~5 (GPU) | ~20 (GPU) |
 
 Key finding: **NPU base ≈ GPU large on recall** (0.955 caps-gate, identical) at ~4× lower latency, so NPU is the
-right always-on deployment tier. CPU distilbert trails by ~3pts recall (the cheapest/most-portable tier).
+right always-on deployment tier. CPU distilbert trailed by ~3pts recall here -- a cheaper, more-portable v6
+candidate that was NOT carried forward to v11 and is NOT shipped (kept in this archive as historical eval only).
 
 Deployment latency (measured on the actual Intel NPU via OpenVINO, earlier): ~34 ms / 256-tok window.
 Appliance end-to-end added latency (T8): clean fast-path 1.7 ms median; PII request 23.5 ms median.

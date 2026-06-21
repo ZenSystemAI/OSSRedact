@@ -1,0 +1,36 @@
+[package]
+name = "ossredact"
+version = "0.1.0"
+description = "OSSRedact -- tray-resident firewall console for the local egress daemon"
+authors = ["OSSRedact"]
+license = "MIT"
+edition = "2021"
+# Tauri 2 requires a reasonably recent toolchain; keep this in sync with CI.
+rust-version = "1.77.2"
+
+# The Rust binary and the Tauri library live in the same crate. `tauri build` invokes the
+# binary (main.rs), which simply calls into the library (lib.rs) so the app logic can also be
+# unit-tested and reused on mobile targets if ever needed.
+[lib]
+name = "ossredact_lib"
+# `staticlib`/`cdylib` are required for the (unused-today) mobile targets; `rlib` is the desktop bin.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Pinned to the Tauri 2 line. `tray-icon` enables the system-tray APIs used by lib.rs; `image-png`
+# lets the bundled tray PNG be decoded at runtime via tauri::image::Image::from_bytes.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+
+# Release profile: optimize the shipped installer binary for size + speed. These only affect
+# `tauri build` (release); dev builds keep fast incremental compilation.
+[profile.release]
+codegen-units = 1   # better optimization at the cost of compile time (one-shot installer build)
+lto = true          # link-time optimization
+opt-level = "s"     # optimize for binary size (a tray app does no heavy compute itself)
+panic = "abort"     # smaller binary; no unwinding needed for a desktop shell
+strip = true        # strip symbols from the release binary

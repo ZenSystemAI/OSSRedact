@@ -46,7 +46,7 @@ export default function Toolbar(p: Props) {
         Auto-detect
       </button>
 
-      <button className="btn btn-ghost" onClick={p.onDeepDetect} disabled={p.busy} title="Run the neural model (Tier-0 + XLM-R) right in your browser -- nothing leaves this machine">
+      <button className="btn btn-ghost" onClick={p.onDeepDetect} disabled={p.busy} title="Run deep detect with the local gate when available, otherwise the browser model">
         <span
           style={{
             width: 7,
@@ -56,7 +56,7 @@ export default function Toolbar(p: Props) {
             boxShadow: p.gate?.ok ? '0 0 8px var(--color-success)' : 'none',
           }}
         />
-        {p.loadPct != null ? `Loading model ${p.loadPct}%` : p.busy ? 'Detecting…' : 'Deep detect (on-device)'}
+        {p.loadPct != null ? `Loading model ${p.loadPct}%` : p.busy ? 'Detecting…' : 'Deep detect'}
       </button>
 
       <button className="btn btn-ghost" onClick={p.onClearDetections} disabled={p.busy || p.totalCount === 0}>

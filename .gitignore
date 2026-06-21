@@ -12,6 +12,8 @@ models/
 # Media / screenshots (promo + landing assets, not model/code IP)
 *.mp4
 *.png
+!charts/
+!charts/*.png
 
 # Python / venv / node
 __pycache__/
@@ -41,6 +43,10 @@ expenses-eval/
 maps/
 # model weights (singular dir on the host)
 model/
+# training output dir (trained model checkpoints, e.g. out/pii-gpu-xlmr-base-v11r9c)
+out/
+!extension/public/model/
+!extension/public/model/.gitkeep
 # int8 model weights
 model-v11r5-base-int8/
 # same-disk model backups
@@ -51,3 +57,16 @@ model.bak-*/
 private/
 # live host-specific config (commit gateway-config.example.yaml instead)
 gateway-config.yaml
+
+# local music-gen toolchain (ACE-Step, not part of the project)
+ACE-Step/
+.venv-music/
+
+# internal agent tooling + cross-model audit docs (never public)
+.agents/
+*PRELAUNCH-AUDIT*.md
+*PRELAUNCH-AUDIT*.MD
+
+# internal planning / handoff history + agent-conventions doc (kept local, excluded from the public snapshot)
+plans/
+AGENTS.md

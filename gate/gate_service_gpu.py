@@ -7,7 +7,7 @@ The GPU sibling of the CPU/NPU sidecar gate. SAME contract, so the egress proxy
   POST /redact  {text, mode='substitute'} -> {redacted_text, mapping(<LABEL_NNN>), stats{request_id,total_spans,by_category,by_rule,elapsed_ms}}
   GET  /healthz                    -> {status, model, device, uptime_s}
 
-Neural tier = xlm-r-LARGE fp16 (ZenSystemAI/pii-xlmr-large), the strongest tier of the SAME model family as the
+Neural tier = xlm-r-LARGE fp16 (ZenSystemAI/ossredact-pii-large), the strongest tier of the SAME model family as the
 always-on CPU/NPU (xlm-r-base) -- so identical labels + BIO decoding + case-norm second pass. Pinned to the GPU host
 3090 Ti via CUDA_VISIBLE_DEVICES=4 in the unit. Tier-0 regex/Luhn + context-cue + union merge + provenance
 are shared from privacy_gate.py (the provenance-complete superset, mirrored next to this file).
@@ -25,15 +25,21 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
-MODEL_DIR = os.environ.get('GPU_GATE_MODEL', os.path.expanduser('~/.ossredact/models/pii-xlmr-large'))
+MODEL_DIR = os.environ.get('GPU_GATE_MODEL', os.path.expanduser('~/.ossredact/models/ossredact-pii-large'))
 PORT = int(os.environ.get('GPU_GATE_PORT', '8001'))
-HOST = os.environ.get('GPU_GATE_HOST', '0.0.0.0')  # host-internal bind; gate behind your firewall (parity with the CPU/NPU gate)
+HOST = os.environ.get('GPU_GATE_HOST', '127.0.0.1')  # opt in to a tailnet/LAN bind with GPU_GATE_HOST
 CHUNK_CHARS = 600  # stay under the 256-token window even on dense tabular text (matches the egress proxy)
 CHUNK_OVERLAP = 80  # window overlap so a value straddling a boundary is caught in one window + union-merged
-MODEL_NAME = f'ZenSystemAI/{os.path.basename(MODEL_DIR)} (fp16, CUDA)'  # public HF repo id; version (v11r5/v11r6) ships as an HF revision tag, not in the id
+MODEL_NAME = f'ZenSystemAI/{os.path.basename(MODEL_DIR)} (fp16, CUDA)'  # public HF repo id; version (e.g. v11r9c) ships as an HF revision tag, not in the id
 START = time.time()
 
 print(f'loading GPU gate ({MODEL_DIR}) CVD={os.environ.get("CUDA_VISIBLE_DEVICES")} ...', flush=True)
+if not os.path.isdir(MODEL_DIR) or not any(f.endswith('.safetensors') or f.endswith('.bin') for f in os.listdir(MODEL_DIR)):
+    raise SystemExit(
+        f"\n[GPU gate] PII model weights not found at {MODEL_DIR}.\n"
+        f"Download them first (see QUICKSTART.md), e.g.:\n"
+        f"  hf download ZenSystemAI/ossredact-pii-large --local-dir {MODEL_DIR}\n"
+        f"or set GPU_GATE_MODEL to an existing model directory.\n")
 gate = PrivacyGate(None)
 gate.npu = GPUTier(MODEL_DIR)  # duck-typed neural tier: xlm-r-large fp16 on cuda:0 (= physical card via CVD)
 _warm = gate.detect('warmup Jean Tremblay NAS 046 454 286 compte 006-02761-1234567 courriel a@b.ca')

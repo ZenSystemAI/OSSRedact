@@ -26,8 +26,9 @@ XML = os.path.join(MODEL_DIR, 'openvino', 'model_fp16.xml')
 DEVICE = 'NPU'
 MAXLEN = 512   # match NPUTier/GPUTier + the 600-char chunking: a token-dense 600-char chunk reaches ~300 tokens; 256 truncated the tail and dropped PII (see NPUTier note in privacy_gate.py)
 CACHE_DIR = os.environ.get('GATEWAY_NPU_CACHE_DIR', os.path.join(APPLIANCE_DIR, '.ovcache'))
-MODEL_NAME = 'ZenSystemAI/pii-xlmr-base (OpenVINO FP16, Intel NPU)'  # public HF repo id; same base model family as the CPU/GPU gates, version ships as an HF revision tag
+MODEL_NAME = 'ZenSystemAI/ossredact-pii-base (OpenVINO FP16, Intel NPU)'  # public HF repo id; same base model family as the CPU/GPU gates, version ships as an HF revision tag
 START = time.time()
+HOST = os.environ.get('GATEWAY_NPU_HOST', '127.0.0.1')
 
 
 class OVTier:
@@ -170,7 +171,4 @@ def healthz():
 
 
 if __name__ == '__main__':
-    # 0.0.0.0 so the dockerized parser can reach it via host.docker.internal (host-gateway). The host
-    # firewall gates LAN exposure (same posture the retired sidecar had on :8001). Parser is loopback-local
-    # otherwise; PII text only crosses the host-internal docker bridge.
-    uvicorn.run(app, host='0.0.0.0', port=8001, log_level='warning')
+    uvicorn.run(app, host=HOST, port=8001, log_level='warning')

@@ -188,6 +188,11 @@ describe('ibanOk', () => {
     expect(ibanOk('GB82 WEST 1234 5698 7654 32')).toBe(true)
   })
 
+  it('returns true for lowercase and hyphen-separated valid IBANs', () => {
+    expect(ibanOk('gb82west12345698765432')).toBe(true)
+    expect(ibanOk('GB82-WEST-1234-5698-7654-32')).toBe(true)
+  })
+
   it('returns false for a short string that cannot be an IBAN', () => {
     expect(ibanOk('GB82')).toBe(false)
   })
@@ -205,6 +210,17 @@ describe('tier0Spans IBAN', () => {
     // The span substring must be exactly the IBAN string -- no offset error
     expect(ibanSpan!.sub).toBe('GB82WEST12345698765432')
     expect(ibanSpan!.validator).toBe('mod97_ok')
+  })
+
+  it('emits iban spans for lowercase and hyphen-separated valid IBANs', () => {
+    for (const iban of ['gb82west12345698765432', 'GB82-WEST-1234-5698-7654-32']) {
+      const text = `solde IBAN ${iban} fin`
+      const spans = labeledSpans(text)
+      const ibanSpan = spans.find((s) => s.label === 'iban')
+      expect(ibanSpan).toBeDefined()
+      expect(ibanSpan!.sub).toBe(iban)
+      expect(ibanSpan!.validator).toBe('mod97_ok')
+    }
   })
 
   it('does NOT emit an iban span for a mod-97-invalid lookalike', () => {
@@ -282,8 +298,11 @@ describe('tier0Spans Quebec IDs', () => {
   it('does not emit SAAQ licence without a cue', () => {
     const spans = labeledSpans('A123456789012')
 
-    expect(spans).toHaveLength(0)
+    // No SAAQ-specific span without a cue. The round-2 glued-digit floor is precision-gated to a Luhn-valid
+    // 9-digit run only (mirrors privacy_gate.py glued_digit_spans), so a 12-digit code run glued to a leading
+    // 'A' is no longer over-redacted -- and it must NOT be labeled a SAAQ licence.
     expect(spans.some((s) => s.subtype === 'saaq_licence')).toBe(false)
+    expect(spans.some((s) => s.rule === 'tier0:digit_glued')).toBe(false)
   })
 
   it('emits a cue-gated NEQ span when a NEQ cue is present', () => {

@@ -1,8 +1,9 @@
-// SHARED catastrophic-shape parity vectors -- the TypeScript (@ossredact/core) leg.
+// SHARED deterministic parity vectors -- the TypeScript (@ossredact/core) leg.
 //
 // Twin of gate/tests/test_gate_parity_vectors.py and appliance/tests/test_appliance_parity_vectors.py: all three
 // load the SAME validation/parity_vectors.json and assert the SAME safety-core spans (email, UUID,
-// mod-97 IBAN, Luhn card, Luhn SIN + Business-Number suppression + SIN-cue override). The floors are
+// mod-97 IBAN, Luhn card, Luhn SIN + Business-Number suppression + SIN-cue override, and cue-anchored
+// mailbox/header person names). The floors are
 // TIERED -- the client TS floor is THICK (phone/date/postal/ip/generic-digit-run + Quebec cue IDs),
 // like the appliance -- so we assert by PRESENCE (label + value substring), never by exact span-set
 // equality. Tiered-only spans (e.g. a generic sensitive_account_id over the IBAN digit tail) are

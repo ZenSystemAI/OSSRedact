@@ -101,7 +101,7 @@ export function redactTextWithPlaceholders(text: string, spans: Span[], placehol
 const MIN_SWEEP_LEN = 4
 const RE_SPECIAL = /[.*+?^${}()|[\]\\]/g
 const TOK = '[\\p{L}\\p{N}\\p{M}_]'
-const CASE_SENSITIVE_LABEL_KEYS = new Set(['password', 'secret', 'username', 'accesstoken', 'apikey', 'filepath'])
+const CASE_SENSITIVE_LABEL_KEYS = new Set(['password', 'secret', 'username', 'person', 'name', 'accesstoken', 'apikey', 'filepath'])
 
 function labelKey(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]/g, '')

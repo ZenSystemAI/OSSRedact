@@ -1,0 +1,20 @@
+[Unit]
+Description=OSSRedact egress privacy proxy :8011
+After=network-online.target ossredact-gate-cpu.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# QUICKSTART rewrites this to your own username -- the proxy writes its entity map under
+# that user's $HOME/.ossredact, so it must be a real account (not the placeholder below).
+User=ossredact
+WorkingDirectory=/opt/ossredact/appliance
+Environment=GATEWAY_HOST=127.0.0.1
+Environment=GATEWAY_PORT=8011
+Environment=GATEWAY_GATE_URL=http://127.0.0.1:8001
+ExecStart=/opt/ossredact/.venv/bin/python /opt/ossredact/appliance/egress_proxy.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

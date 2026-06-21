@@ -8,7 +8,7 @@ free-form dates/amounts) that dominate real expense PII.
 
 PRIVACY CONTRACT (hard rules):
   * Inputs are REAL PII; text is read from an OUT-OF-REPO dir (default ~/expenses-eval/text) and sent to the
-    on-prem gate over the tailnet. The redacted text + the entity MAP (original values) returned by /redact
+    on-prem gate over the local network. The redacted text + the entity MAP (original values) returned by /redact
     are held IN MEMORY ONLY and NEVER written to disk.
   * The committed report carries aggregate category counts only. Per-doc detail (out-of-repo, gitignored)
     carries doc id + char count + span count + per-category counts -- NO values, NO offsets-to-values.

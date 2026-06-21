@@ -128,7 +128,7 @@ export default function Dropzone({
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
           <path d="M14 2v6h6M12 18v-6M9 15l3-3 3 3" />
         </svg>
-        <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 18, color: '#fff' }}>
+        <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 18, color: 'var(--color-heading)' }}>
           Drop a document, or click to choose
         </div>
         <div className="text-sm" style={{ color: 'var(--color-muted)' }}>

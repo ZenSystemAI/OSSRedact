@@ -9,11 +9,18 @@ export type { RawSpan, Span, EntityMap, RegionBox } from './types.js'
 export {
   tier0Spans,
   contextCuedIdSpans,
+  cueNameSpans,
+  gluedDigitSpans,
+  separatedCardSpans,
+  cardAuxSpans,
   luhnOk,
   ibanOk,
+  nameShaped,
   normDash,
   normSpace,
   normCase,
+  hasFormatChars,
+  stripFormatChars,
 } from './tier0.js'
 
 // Redaction primitives + span management
@@ -36,6 +43,12 @@ export {
   newId,
 } from './redaction.js'
 
+// Shared placeholder contract
+export { PLACEHOLDER_CONTRACT_PATTERN, PLACEHOLDER_CONTRACT_RE } from './placeholder.js'
+
+// Allowlist (do-not-redact dictionary) -- user-declared known-safe values, value-exact + case-insensitive.
+export { normalizeAllowValue, buildAllowSet, isAllowlisted, applyAllowlist } from './allowlist.js'
+
 // Label metadata + tier classification
 export type { LabelMeta, Tier } from './labels.js'
-export { LABEL_REGISTRY, labelMeta, labelTier, MANUAL_LABELS } from './labels.js'
+export { LABEL_REGISTRY, labelMeta, labelTier, MANUAL_LABELS, FLOOR_LABELS } from './labels.js'

@@ -233,6 +233,41 @@ def test_extract_function_call_arguments_redacted_and_roundtrip():
     assert not _PH_RE.search(json.dumps(resp))
 
 
+def test_function_call_arguments_native_numeric_surfaced_no_500_regression():
+    """REGRESSION (5084bc0 NameError): a tool-argument JSON carrying a NATIVE NUMBER must not crash the
+    Responses/OpenAI collectors. `_collect_json_args_values` has no `in_schema` param, so a blanket
+    `and not in_schema` guard once 500'd the whole /v1/responses route here. The native-numeric account id
+    (8 digits) must surface as a scan field, redact in place (stringified placeholder), and the arguments
+    must stay valid JSON; a non-PII native number is left native + structurally intact."""
+    acct = '12345678'  # 8-digit native int -> Tier-0 sensitive_account_id once surfaced
+    ph = '<SENSITIVE_ACCOUNT_ID_001>'
+    body = {'model': 'gpt-test', 'input': [
+        {'type': 'function_call', 'call_id': 'c1', 'name': 'pay',
+         'arguments': json.dumps({'who': 'rent', 'account': 12345678, 'amount': 4200.50})}]}
+    fields = ra.extract_text_fields_responses(body)  # must NOT raise NameError
+    assert _swap_all(fields, acct, ph) == 1, 'the native-numeric account id must be surfaced as a scan field'
+    wire = json.dumps(body, ensure_ascii=False)
+    assert acct not in wire, 'PRIVACY FAILURE: raw native-numeric account leaked in function_call.arguments'
+    assert ph in wire
+    rebuilt = json.loads(body['input'][0]['arguments'])
+    assert rebuilt['account'] == ph, 'numeric value redacted in place (stringified placeholder)'
+    assert rebuilt['amount'] == 4200.5, 'a non-PII native number stays native + structure intact'
+
+
+def test_dup_key_arguments_native_numeric_surfaced_no_500_regression():
+    """Same NameError regression on the duplicate-key arguments path (_collect_dup_args, also lacks
+    in_schema). Both duplicate native-numeric values must surface (the earlier dup is not dropped)."""
+    body = {'model': 'gpt-test', 'input': [
+        {'type': 'function_call', 'call_id': 'c2', 'name': 'pay',
+         'arguments': '{"account": 12345678, "account": 87654321}'}]}
+    fields = ra.extract_text_fields_responses(body)  # must NOT raise NameError
+    n = _swap_all(fields, '12345678', '<SENSITIVE_ACCOUNT_ID_001>')
+    n += _swap_all(fields, '87654321', '<SENSITIVE_ACCOUNT_ID_002>')
+    assert n == 2, 'both duplicate-key native-numeric values must be surfaced (earlier dup not dropped)'
+    wire = json.dumps(body, ensure_ascii=False)
+    assert '12345678' not in wire and '87654321' not in wire, 'PRIVACY FAILURE: dup-key native numeric leaked'
+
+
 # ---------------------------------------------------------------------------
 # LEAK PATH (3): a `refusal` content part -- the model's refusal text is model-visible and
 # can echo a sensitive value back. It must redact + rehydrate like any other content text.

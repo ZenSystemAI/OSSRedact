@@ -4,8 +4,10 @@
 export {
   tier0Spans,
   contextCuedIdSpans,
+  cueNameSpans,
   luhnOk,
   ibanOk,
+  nameShaped,
   normDash,
   normSpace,
   normCase,

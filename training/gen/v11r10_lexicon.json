@@ -1,0 +1,1137 @@
+{
+ "orgs": [
+  "9047-2218 Québec Inc.",
+  "9183-4567 Québec Inc.",
+  "9281-0034 Québec Inc.",
+  "9356-1102 Québec Inc.",
+  "9412-7780 QUÉBEC INC",
+  "ACME MANUFACTURING LLC",
+  "AMD",
+  "ATLAS FREIGHT SYSTEMS",
+  "AWS",
+  "Accenture",
+  "AccordD Desjardins",
+  "Accès D Desjardins",
+  "Adobe",
+  "Adobe Systems",
+  "Advanced Micro Devices",
+  "Agence Marketing Demers Ltée",
+  "Agence du revenu du Canada",
+  "Agence du revenu du Québec",
+  "Agropur",
+  "Air Canada",
+  "Alimentation Couche-Tard",
+  "AlphaBuild Contractors",
+  "Alphabet Inc.",
+  "Amazon",
+  "Amazon Web Services",
+  "Aménagement Paysager Hudon SENC",
+  "Apple",
+  "Apple Inc.",
+  "Assurances Régionales Charette Ltée",
+  "AtkinsRéalis",
+  "Atos",
+  "Autorité des marchés financiers",
+  "Aéroports de Montréal",
+  "BCE Inc.",
+  "BDC",
+  "BMO Banque de Montréal",
+  "Banque Alterna",
+  "Banque CIBC",
+  "Banque Canadian Tire",
+  "Banque Canadienne Impériale de Commerce",
+  "Banque HSBC Canada",
+  "Banque Laurentienne",
+  "Banque Laurentienne du Canada",
+  "Banque Manuvie",
+  "Banque Nationale",
+  "Banque Nationale Investissements",
+  "Banque Nationale du Canada",
+  "Banque Royale du Canada",
+  "Banque Scotia",
+  "Banque TD",
+  "Banque Tangerine",
+  "Banque Toronto-Dominion",
+  "Banque de Montréal",
+  "Banque de développement du Canada",
+  "Banque Équitable",
+  "Barreau du Québec",
+  "Behaviour Interactive",
+  "Bell Canada",
+  "Beneva",
+  "Bibliothèque et Archives nationales du Québec",
+  "BluePeak Logistics",
+  "Bombardier",
+  "Bombardier Aéronautique",
+  "Bombardier Inc.",
+  "Bombardier Transport",
+  "Borrowell",
+  "Boucherie Lemay et Fils Enr.",
+  "Boulangerie Côté Enr.",
+  "Boutique Mode Renaud Enr.",
+  "Broadcom",
+  "CAE Inc.",
+  "CAE inc.",
+  "CGI",
+  "CGI Inc.",
+  "CHU Sainte-Justine",
+  "CHU de Québec",
+  "CHUM",
+  "CISSS de la Montérégie-Centre",
+  "CISSS des Laurentides",
+  "CIUSSS de l'Est-de-l'Île-de-Montréal",
+  "CIUSSS du Centre-Sud-de-l'Île-de-Montréal",
+  "CNESST",
+  "Cabinet Comptable Dubois Inc.",
+  "Café-Bistro Lanthier Enr.",
+  "Caisse Desjardins",
+  "Caisse Desjardins de Gatineau",
+  "Caisse Desjardins de Lanaudière",
+  "Caisse Desjardins de Montréal",
+  "Caisse Desjardins de Québec",
+  "Caisse Desjardins de Trois-Rivières",
+  "Caisse Desjardins de l'Est de Montréal",
+  "Caisse Desjardins du Cœur-des-vallées",
+  "Caisse de dépôt et placement du Québec",
+  "Caisse populaire Desjardins",
+  "Caisse populaire Desjardins de Lévis",
+  "Caisse populaire Desjardins de Québec",
+  "Caisse populaire Desjardins de Sherbrooke",
+  "Capgemini",
+  "Capital régional et coopératif Desjardins",
+  "Cascades",
+  "Centre antipoison du Québec",
+  "Centre de services scolaire de Montréal",
+  "Centre hospitalier de l'Université de Montréal",
+  "Chambre de la sécurité financière",
+  "Cisco",
+  "Cisco Systems",
+  "Climatisation Robitaille Inc.",
+  "CloudForgeSolutions",
+  "Cogeco",
+  "Coiffure Tremblay Enr.",
+  "Collège Ahuntsic",
+  "Collège de Maisonneuve",
+  "Commission des normes, de l'équité, de la santé et de la sécurité du travail",
+  "Commission scolaire de Montréal",
+  "Construction Bélanger SENC",
+  "Coopérative d'épargne et de crédit",
+  "Cossette",
+  "Cossette Communication",
+  "Couche-Tard",
+  "Couvre-Plancher Vaillancourt Inc.",
+  "Coveo",
+  "Crédit Logement Desjardins",
+  "Cuisines Brossard et Cie Ltée",
+  "Curateur public du Québec",
+  "Cégep Limoilou",
+  "Cégep de Saint-Laurent",
+  "Cégep de Sainte-Foy",
+  "Cégep de Trois-Rivières",
+  "Cégep du Vieux Montréal",
+  "DataNova",
+  "Dell",
+  "Dell Technologies",
+  "Deloitte",
+  "Desjardins",
+  "Desjardins Assurances",
+  "Desjardins Gestion de patrimoine",
+  "Desjardins Sécurité financière",
+  "Dialogue",
+  "Dialogue Technologies",
+  "Directeur général des élections du Québec",
+  "Distribution Aliments Bergeron Ltée",
+  "Dollarama",
+  "Dépanneur Nguyen Enr.",
+  "EQ Bank",
+  "Element AI",
+  "Empire Vie",
+  "Emploi-Québec",
+  "Entretien Ménager Côté-Pruneau Enr.",
+  "Ericsson",
+  "Ernst & Young",
+  "Excavation Bouchard Inc.",
+  "Exportation et développement Canada",
+  "FUSION ÉLECTRIQUE QUÉBEC INC",
+  "Ferblanterie Roy et Associés Inc.",
+  "Financière Banque Nationale",
+  "Financière Sun Life",
+  "Financière agricole du Québec",
+  "Fleuriste Bélair Enr.",
+  "Flinks",
+  "Fondaction",
+  "Fondaction CSN",
+  "Fondations Bétonnières Picard Inc.",
+  "Fonds FMOQ",
+  "Fonds FTQ",
+  "Fonds de solidarité FTQ",
+  "Forage Géotechnique Lemieux Inc.",
+  "Fujitsu",
+  "Fédération des caisses Desjardins du Québec",
+  "GENERAL DYNAMICS CORP",
+  "GRC",
+  "GROUPE CONSTRUCTION NORDIK INC",
+  "GROUPE TRANSPORT EXPRESS LTÉE",
+  "Garage Tremblay et Fils Inc.",
+  "Garda World",
+  "Garda World Security",
+  "GardaWorld",
+  "Garderie Petits Pas Enr.",
+  "Gendarmerie royale du Canada",
+  "Google",
+  "Great-West",
+  "Great-West Lifeco",
+  "GreenLeaf Distribution",
+  "Groupe CGI",
+  "Groupe Immobilier Sauvé Ltée",
+  "Groupe Jean Coutu",
+  "Groupe Vidéotron",
+  "HEC Montréal",
+  "HP",
+  "Hewlett-Packard",
+  "Hopper",
+  "Hopper Financial",
+  "Hydro-Québec",
+  "Héma-Québec",
+  "Hôpital général juif",
+  "IBM",
+  "IGA",
+  "Immigration, Réfugiés et Citoyenneté Canada",
+  "Imprimerie Desjardins Ltée",
+  "Industrielle Alliance",
+  "Infosys",
+  "Institut de cardiologie de Montréal",
+  "Intact Assurance",
+  "Intel",
+  "Intel Corporation",
+  "International Business Machines",
+  "Investissement Québec",
+  "IronClad Security Services",
+  "KOHO",
+  "KPMG",
+  "LES ENTREPRISES ABC LTÉE",
+  "La Banque de Nouvelle-Écosse",
+  "La Capitale assurance",
+  "La Personnelle assurances",
+  "Lassonde",
+  "Les Entreprises ABC Ltée",
+  "Lightspeed",
+  "Lightspeed Commerce",
+  "Loto-Québec",
+  "Lumen Technologies",
+  "Manuvie",
+  "Manuvie Banque",
+  "MapleStone Holdings",
+  "Marbrerie Provencale SENC",
+  "Mastercard Desjardins",
+  "McKesson Canada",
+  "Menuiserie Fortin et Fils Enr.",
+  "Metro Inc.",
+  "Metro inc.",
+  "Microbrasserie du Coteau SENC",
+  "Microsoft",
+  "Microsoft Canada",
+  "Mila",
+  "Ministère de l'Éducation",
+  "Ministère de la Santé et des Services sociaux",
+  "MoMA",
+  "Mogo",
+  "Mouvement Desjardins",
+  "Mouvement des caisses Desjardins",
+  "Museum of Modern Art",
+  "Musée de la civilisation",
+  "Musée national des beaux-arts du Québec",
+  "Métro inc.",
+  "NASA",
+  "NVIDIA Corporation",
+  "National Aeronautics and Space Administration",
+  "National Bank Financial",
+  "Nesto",
+  "Nettoyage Industriel Caron Ltée",
+  "Nokia",
+  "NorthBridgeCapital",
+  "Nuvei",
+  "Nvidia",
+  "OQLF",
+  "Office québécois de la langue française",
+  "Olymel",
+  "OmniTrade Group",
+  "OpenText",
+  "Oracle",
+  "Oracle Corporation",
+  "Ordre des comptables professionnels agréés du Québec",
+  "Ordre des ingénieurs du Québec",
+  "PIONEER STEEL WORKS",
+  "Panasonic",
+  "PayBright",
+  "Paysagement Thibault Inc.",
+  "Pharmacie Trudeau et Associés Inc.",
+  "Pharmaprix",
+  "Plomberie Gagnon et Frères Ltée",
+  "Plusgrade",
+  "Polytechnique Montréal",
+  "Postes Canada",
+  "Power Corporation du Canada",
+  "Pratt & Whitney",
+  "Pratt & Whitney Canada",
+  "Premier Tech",
+  "PrimeWorks Manufacturing",
+  "ProMecanix",
+  "Promutuel Assurance",
+  "Protecteur du citoyen",
+  "Provigo",
+  "PwC Canada",
+  "Pâtisserie Lévesque Enr.",
+  "Qualcomm",
+  "QuantumLeapSystems",
+  "Quincaillerie Richelieu",
+  "Quincaillerie Saint-Laurent Inc.",
+  "RAMQ",
+  "RBC Banque Royale",
+  "RBQ",
+  "RTC",
+  "Raymond Chabot Grant Thornton",
+  "Recyclage Vert Boisvert Ltée",
+  "Red Hat",
+  "Resolute Forest Products",
+  "Retraite Québec",
+  "Revenu Québec",
+  "RiverstoneProperties",
+  "Rogers Communications",
+  "Régie de l'assurance maladie du Québec",
+  "Régie du bâtiment du Québec",
+  "Réparation Auto Beaulieu SENC",
+  "Réseau de transport de la Capitale",
+  "Réseau de transport métropolitain",
+  "SAAQ",
+  "SAP",
+  "SAP SE",
+  "SAQ",
+  "SERVICES CONSEILS OMEGA LTÉE",
+  "SNC-Lavalin",
+  "SPVM",
+  "SSQ Assurance",
+  "STL",
+  "STM",
+  "Salesforce",
+  "Salon Esthétique Bellefeuille Enr.",
+  "Samsung Electronics",
+  "Saputo",
+  "Service Canada",
+  "Service de police de la Ville de Montréal",
+  "ServiceNow",
+  "Shopify",
+  "Siemens",
+  "Siemens AG",
+  "SilverlineConsulting",
+  "Simplii Financial",
+  "Sobeys Québec",
+  "Société canadienne des postes",
+  "Société d'habitation du Québec",
+  "Société de financement Desjardins",
+  "Société de l'assurance automobile du Québec",
+  "Société de transport de Laval",
+  "Société de transport de Montréal",
+  "Société des alcools du Québec",
+  "Société québécoise des infrastructures",
+  "Solutions Numériques Larivière Inc.",
+  "Sony Corporation",
+  "Soudure Précision Gauthier Inc.",
+  "Stingray Group",
+  "Studio Design Mercier Inc.",
+  "SummitRidge Advisors",
+  "Sun Life",
+  "Sun Life Financial",
+  "Sûreté du Québec",
+  "TRANSPORT ROUTIER DELTA INC",
+  "Tangerine Banque",
+  "Tata Consultancy Services",
+  "TechnoServicePlus",
+  "Telus",
+  "Toiture Pelletier SENC",
+  "Transat A.T.",
+  "Transport Lapointe Inc.",
+  "Transport Réfrigéré Houle Inc.",
+  "Transports Québec",
+  "Tribunal administratif du Québec",
+  "UNESCO",
+  "UQAM",
+  "Ubisoft",
+  "Ubisoft Montréal",
+  "Ubisoft Québec",
+  "UmbrellaCorporationInternational",
+  "Université Concordia",
+  "Université Laval",
+  "Université McGill",
+  "Université de Montréal",
+  "Université de Sherbrooke",
+  "Université du Québec à Chicoutimi",
+  "Université du Québec à Montréal",
+  "Université du Québec à Rimouski",
+  "Université du Québec à Trois-Rivières",
+  "Usinage Métallique Bédard Inc.",
+  "VMware",
+  "Valeurs mobilières Desjardins",
+  "VertexDynamics",
+  "Vidéotron",
+  "Ville de Gatineau",
+  "Ville de Laval",
+  "Ville de Longueuil",
+  "Ville de Montréal",
+  "Ville de Québec",
+  "Ville de Sherbrooke",
+  "Ville de Trois-Rivières",
+  "Visa Desjardins",
+  "Vitrerie Lachance Inc.",
+  "WSP Global",
+  "Wealthsimple",
+  "Wipro",
+  "exo",
+  "iA Groupe financier",
+  "iA Valeurs mobilières",
+  "Ébénisterie Fine Théberge Inc.",
+  "Élections Québec",
+  "Électricité Morin Ltée",
+  "Énergir"
+ ],
+ "addresses": [
+  "1 Complexe Desjardins",
+  "Abbey Road",
+  "Baker Street",
+  "Bay Street",
+  "C.P. 1234",
+  "C.P. 300, succursale Tour de la Bourse",
+  "C.P. 6079",
+  "C.P. 6079, succursale Centre-ville",
+  "C.P. 6128 succursale Centre-ville",
+  "C.P. 6500",
+  "C.P. 7000 succursale Place-Desjardins",
+  "C.P. 750, succursale B",
+  "Case postale 100",
+  "Case postale 11065",
+  "Case postale 1234",
+  "Case postale 4500",
+  "Case postale 6079, succursale Centre-ville",
+  "Case postale 6128",
+  "Case postale 7500",
+  "Case postale 8800, succursale A",
+  "Casier postal 11000",
+  "Centre administratif Desjardins",
+  "Complexe Desjardins",
+  "Grande Allée",
+  "Industrial Park Road",
+  "Infinite Loop",
+  "King Street West",
+  "Madison Avenue",
+  "P.O. Box 4500",
+  "P.O. Box 8000",
+  "PO Box 2200",
+  "PO Box 6002",
+  "Park Avenue",
+  "Parliament Hill",
+  "Pennsylvania Avenue",
+  "Sand Hill Road",
+  "Silicon Valley Boulevard",
+  "Station A PO Box 4047",
+  "Sunset Boulevard",
+  "Tour de la Bourse",
+  "Wall Street",
+  "Wellington Street",
+  "Yonge Street",
+  "avenue Honoré-Mercier",
+  "avenue Laurier",
+  "avenue Laurier Ouest",
+  "avenue Maguire",
+  "avenue McGill College",
+  "avenue Papineau",
+  "avenue des Commerces",
+  "avenue du Mont-Royal",
+  "avenue du Parc",
+  "boulevard Charest",
+  "boulevard Cure-Labelle",
+  "boulevard Henri-Bourassa",
+  "boulevard Laurier",
+  "boulevard Lebourgneuf",
+  "boulevard Pie-IX",
+  "boulevard René-Lévesque",
+  "boulevard Robert-Bourassa",
+  "boulevard Saint-Laurent",
+  "boulevard Taschereau",
+  "boulevard Wilfrid-Hamel",
+  "boulevard de Maisonneuve",
+  "boulevard de l'Industrie",
+  "boulevard des Sources",
+  "boîte postale 700",
+  "bureau 1500, 3e étage",
+  "bureau 200",
+  "bureau 2100",
+  "case postale 300 succursale B",
+  "chemin Sainte-Foy",
+  "chemin de la Canardière",
+  "chemin de la Côte-de-Liesse",
+  "chemin de la Côte-des-Neiges",
+  "chemin du Lac",
+  "chemin du Roy",
+  "montée des Pionniers",
+  "place Ville-Marie",
+  "rang Saint-Antoine",
+  "rang Saint-Joseph",
+  "rue Crescent",
+  "rue De La Gauchetière",
+  "rue Jean-Talon",
+  "rue Notre-Dame",
+  "rue Notre-Dame Est",
+  "rue Notre-Dame Ouest",
+  "rue Peel",
+  "rue Principale",
+  "rue Saint-Antoine",
+  "rue Saint-Denis",
+  "rue Saint-Jacques",
+  "rue Saint-Paul Est",
+  "rue Sainte-Catherine",
+  "rue Sainte-Catherine Ouest",
+  "rue Sherbrooke",
+  "rue Sherbrooke Ouest",
+  "rue University",
+  "rue Wellington",
+  "rue de l'Église",
+  "rue de la Gauchetière",
+  "rue de la Montagne",
+  "rue du Parlement",
+  "rue du Pont",
+  "succursale B",
+  "succursale Centre-ville",
+  "succursale Haute-Ville",
+  "succursale Place-Desjardins",
+  "succursale Place-d'Armes",
+  "succursale Place-du-Canada",
+  "succursale Saint-Roch",
+  "succursale Sainte-Foy",
+  "succursale Terminus",
+  "suite 1500"
+ ],
+ "templates": [
+  {
+   "text": "Le client est titulaire d'un compte chèques chez {ORG} depuis 2015.",
+   "lang": "fr"
+  },
+  {
+   "text": "Veuillez transmettre votre paiement à {ORG}, {ADDR}, Montréal (Québec).",
+   "lang": "fr"
+  },
+  {
+   "text": "EMPLOYEUR: {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "Institution financière: {ORG} -- succursale {ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"employer\": \"{ORG}\", \"city\": \"Montréal\", \"branch\": \"{ADDR}\"}",
+   "lang": "fr"
+  },
+  {
+   "text": "Salutations distinguées,\nConseiller en services financiers\n{ORG}\n{ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "Le prêt hypothécaire a été consenti par {ORG} le 12 mars dernier.",
+   "lang": "fr"
+  },
+  {
+   "text": "RELEVÉ DE COMPTE -- {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "Faites parvenir vos chèques à l'ordre de {ORG}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Mme Tremblay travaille comme analyste de crédit chez {ORG}.",
+   "lang": "fr"
+  },
+  {
+   "text": "The applicant has banked with {ORG} for over a decade.",
+   "lang": "en"
+  },
+  {
+   "text": "EMPLOYER: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "{\"company\": \"{ORG}\", \"address\": \"{ADDR}\", \"province\": \"QC\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Please remit payment to {ORG}, {ADDR}, Montreal, Quebec.",
+   "lang": "en"
+  },
+  {
+   "text": "Mortgage financing provided by {ORG} at a rate of 5.2%.",
+   "lang": "en"
+  },
+  {
+   "text": "Best regards,\nSenior Account Manager\n{ORG}\n{ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "ACCOUNT STATEMENT -- {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "Her line of credit was approved through {ORG} last quarter.",
+   "lang": "en"
+  },
+  {
+   "text": "Direct all correspondence to {ORG}, {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "The wire transfer originated from {ORG} on behalf of the borrower.",
+   "lang": "en"
+  },
+  {
+   "text": "Référence du dossier ouvert à la {ORG}, succursale {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"financial_institution\": \"{ORG}\", \"po_box\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Le client est prestataire de la {ORG} depuis 2015.",
+   "lang": "fr"
+  },
+  {
+   "text": "Votre dossier a été transmis à {ORG} pour traitement.",
+   "lang": "fr"
+  },
+  {
+   "text": "Veuillez faire parvenir le formulaire à {ORG}, {ADDR}, Québec.",
+   "lang": "fr"
+  },
+  {
+   "text": "L'employé travaille pour {ORG} au service à la clientèle.",
+   "lang": "fr"
+  },
+  {
+   "text": "EXPÉDITEUR: {ORG} - {ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "Cotisation établie par {ORG} pour l'année d'imposition courante.",
+   "lang": "fr"
+  },
+  {
+   "text": "Adressez votre paiement à {ORG}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"employeur\": \"{ORG}\", \"ville\": \"Montréal\", \"adresse\": \"{ADDR}\"}",
+   "lang": "fr"
+  },
+  {
+   "text": "Signature\nAgent de prestation de services\n{ORG}\n{ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "ORGANISME: {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "La carte d'assurance maladie est délivrée par la {ORG}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Le titulaire est étudiant inscrit à l'{ORG} au trimestre d'automne.",
+   "lang": "fr"
+  },
+  {
+   "text": "The applicant has been employed by {ORG} since March.",
+   "lang": "en"
+  },
+  {
+   "text": "Please forward all correspondence to {ORG}, {ADDR}, Montréal.",
+   "lang": "en"
+  },
+  {
+   "text": "EMPLOYER: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "Your file has been forwarded to {ORG} for review.",
+   "lang": "en"
+  },
+  {
+   "text": "{\"company\": \"{ORG}\", \"city\": \"Quebec City\", \"po_box\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Benefits are administered by {ORG} under provincial legislation.",
+   "lang": "en"
+  },
+  {
+   "text": "Return undeliverable mail to {ORG}, {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "Regards,\nCaseworker\n{ORG}\n{ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "The patient was treated at {ORG} on the date indicated.",
+   "lang": "en"
+  },
+  {
+   "text": "Tuition records are maintained by {ORG}.",
+   "lang": "en"
+  },
+  {
+   "text": "Le candidat travaille chez {ORG} depuis 2015 à titre d'ingénieur logiciel.",
+   "lang": "fr"
+  },
+  {
+   "text": "Mon dernier employeur était {ORG}, situé sur {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "The applicant has been employed at {ORG} since 2018 as a senior developer.",
+   "lang": "en"
+  },
+  {
+   "text": "Please forward the contract to {ORG}, {ADDR}, Montréal.",
+   "lang": "en"
+  },
+  {
+   "text": "EMPLOYEUR : {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "EMPLOYER: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "{\"employer\": \"{ORG}\", \"city\": \"Montréal\"}",
+   "lang": "en"
+  },
+  {
+   "text": "{\"company\": \"{ORG}\", \"address\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Cordialement,\\nMarie Tremblay\\nDirectrice, {ORG}\\n{ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "Best regards,\\nJohn Carter\\nVP Engineering, {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "ENTREPRISE PARTENAIRE : {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "La facture doit être adressée à {ORG}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Invoice issued by {ORG} for services rendered in Q3.",
+   "lang": "en"
+  },
+  {
+   "text": "Reference: contract signed between the City and {ORG} on {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "Le stage se déroulera dans les bureaux de {ORG} à Québec.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"vendor\": \"{ORG}\", \"po_box\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "COMPANY / SOCIÉTÉ: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "Nous avons conclu un partenariat stratégique avec {ORG} cette année.",
+   "lang": "fr"
+  },
+  {
+   "text": "The data was migrated from {ORG} servers located at {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "Veuillez retourner le formulaire à {ORG}, {ADDR}, succursale Centre-ville.",
+   "lang": "fr"
+  },
+  {
+   "text": "Hiring manager at {ORG} confirmed the offer.",
+   "lang": "en"
+  },
+  {
+   "text": "Siège social : {ORG}, {ADDR}, Montréal (Québec).",
+   "lang": "fr"
+  },
+  {
+   "text": "Le client est employé chez {ORG} depuis 2015.",
+   "lang": "fr"
+  },
+  {
+   "text": "Veuillez faire parvenir le paiement à {ORG}, {ADDR}, Montréal (Québec).",
+   "lang": "fr"
+  },
+  {
+   "text": "EMPLOYEUR : {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "Raison sociale : {ORG} -- numéro d'entreprise du Québec (NEQ) en règle.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"employer\": \"{ORG}\", \"city\": \"Montréal\"}",
+   "lang": "fr"
+  },
+  {
+   "text": "Cordialement,\nJean Tremblay\nDirecteur des opérations\n{ORG}\n{ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "Le contrat a été octroyé à {ORG} le 12 mars dernier.",
+   "lang": "fr"
+  },
+  {
+   "text": "FOURNISSEUR PRINCIPAL : {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "La soumission de {ORG} était la plus basse parmi les six reçues.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"company\": \"{ORG}\", \"mailing_address\": \"{ADDR}\"}",
+   "lang": "fr"
+  },
+  {
+   "text": "Adressez votre correspondance à {ORG}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "The applicant has worked at {ORG} for the past three years.",
+   "lang": "en"
+  },
+  {
+   "text": "EMPLOYER: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "Please remit invoice to {ORG}, located at {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "{\"employer\": \"{ORG}\", \"street\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Best regards,\nSarah Mitchell\nAccount Manager\n{ORG}\n{ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "The subcontractor of record is {ORG}.",
+   "lang": "en"
+  },
+  {
+   "text": "VENDOR NAME: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "All correspondence should be sent to {ORG} at {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "We confirm that {ORG} holds a valid operating licence.",
+   "lang": "en"
+  },
+  {
+   "text": "Bill to: {ORG}\nShip to: {ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "Le mandataire désigné est {ORG}, ayant son siège au {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"vendor\": \"{ORG}\", \"branch\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Notre partenaire d'affaires, {ORG}, assurera la livraison.",
+   "lang": "fr"
+  },
+  {
+   "text": "Le client est employé chez {ORG} depuis 2015.",
+   "lang": "fr"
+  },
+  {
+   "text": "Selon les documents fournis, le demandeur travaille à temps plein pour {ORG}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Employeur actuel : {ORG}, situé au {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "EMPLOYEUR: {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "Veuillez faire parvenir les documents à {ORG}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Le revenu d'emploi provient de {ORG} et est versé par dépôt direct.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"employer\": \"{ORG}\", \"city\": \"Montréal\", \"province\": \"QC\"}",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"company\": \"{ORG}\", \"mailing_address\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "The applicant has been employed at {ORG} for the past five years.",
+   "lang": "en"
+  },
+  {
+   "text": "EMPLOYER: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "Please remit payment to {ORG}, {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "Current employer: {ORG}, located at {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "Account held in trust on behalf of {ORG}.",
+   "lang": "en"
+  },
+  {
+   "text": "Le présent contrat est conclu entre {ORG} et le titulaire du compte.",
+   "lang": "fr"
+  },
+  {
+   "text": "Aux fins de vérification d'identité, le client a confirmé son lien d'emploi avec {ORG}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Cordialement,\nJean Tremblay\nConseiller principal, {ORG}\n{ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "Best regards,\nSarah Johnson\nSenior Advisor, {ORG}\n{ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "RELEVÉ D'EMPLOI - {ORG}",
+   "lang": "fr"
+  },
+  {
+   "text": "KYC REVIEW: source of funds verified against payroll deposits from {ORG}.",
+   "lang": "en"
+  },
+  {
+   "text": "La caisse a procédé à l'ouverture du compte au nom de {ORG}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Fonds détenus pour le compte de {ORG}, dont le siège social est au {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"beneficial_owner\": {\"type\": \"corporation\", \"name\": \"{ORG}\", \"registered_office\": \"{ADDR}\"}}",
+   "lang": "en"
+  },
+  {
+   "text": "ATTESTATION D'EMPLOI\nNom de l'employeur : {ORG}\nAdresse : {ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "The mortgage co-signer's employer of record is {ORG}.",
+   "lang": "en"
+  },
+  {
+   "text": "Le mandataire agit au nom de {ORG} et a fourni une preuve de pouvoir signataire.",
+   "lang": "fr"
+  },
+  {
+   "text": "Le client réside au {ADDR} depuis plus de dix ans.",
+   "lang": "fr"
+  },
+  {
+   "text": "Veuillez faire parvenir tout document à la {ADDR}, Montréal (Québec).",
+   "lang": "fr"
+  },
+  {
+   "text": "Adresse de correspondance : {ADDR}, bureau 410.",
+   "lang": "fr"
+  },
+  {
+   "text": "L'entreprise {ORG} a son siège social sur la {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "EXPÉDITEUR : {ORG}, {ADDR}, succursale Centre-ville",
+   "lang": "fr"
+  },
+  {
+   "text": "Retourner le formulaire à {ORG}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Please mail your payment to {ADDR}, suite 300.",
+   "lang": "en"
+  },
+  {
+   "text": "The applicant lives on {ADDR} near the metro station.",
+   "lang": "en"
+  },
+  {
+   "text": "Forward all correspondence to {ORG}, {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "MAILING ADDRESS: {ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "Le candidat est employé chez {ORG} depuis 2015.",
+   "lang": "fr"
+  },
+  {
+   "text": "{\"employer\": \"{ORG}\", \"street\": \"{ADDR}\", \"city\": \"Montréal\"}",
+   "lang": "en"
+  },
+  {
+   "text": "{\"company\": \"{ORG}\", \"mailing_address\": \"{ADDR}\"}",
+   "lang": "en"
+  },
+  {
+   "text": "Signé,\\nDirecteur des ressources humaines\\n{ORG}\\n{ADDR}",
+   "lang": "fr"
+  },
+  {
+   "text": "Regards,\\nAccounts Department\\n{ORG}\\n{ADDR}",
+   "lang": "en"
+  },
+  {
+   "text": "EMPLOYER: {ORG}",
+   "lang": "en"
+  },
+  {
+   "text": "Nos bureaux sont situés au {ADDR}, à deux pas de la station de métro.",
+   "lang": "fr"
+  },
+  {
+   "text": "Cheque payable to {ORG} and mailed to {ADDR}.",
+   "lang": "en"
+  },
+  {
+   "text": "Coordonnées du payeur : {ORG}, {ADDR}, {ADDR}.",
+   "lang": "fr"
+  },
+  {
+   "text": "Head office of {ORG} is located on {ADDR}.",
+   "lang": "en"
+  }
+ ],
+ "negatives": [
+  "API",
+  "Annexe A",
+  "Appendix B",
+  "Avertissement",
+  "Avis De Confidentialité",
+  "Avis Important",
+  "Avis de Confidentialité",
+  "Basse-Ville",
+  "CPU",
+  "CSV",
+  "CVV",
+  "Carte Soleil",
+  "Centre-Ville",
+  "Chapitre 3",
+  "Chapitre Premier",
+  "Code Civil du Québec",
+  "Conditions Générales",
+  "Dark Mode",
+  "Date De Naissance",
+  "Date d'Échéance",
+  "Executive Summary",
+  "FAQ",
+  "FAQ Section",
+  "Frais d'Administration",
+  "Frequently Asked Questions",
+  "GPU",
+  "Getting Started",
+  "HTTP",
+  "HTTPS",
+  "Heures D'Ouverture",
+  "IBAN",
+  "JSON",
+  "Loi sur les Banques",
+  "Mise En Garde",
+  "Mise en garde",
+  "Modalités de Paiement",
+  "NIP",
+  "North America",
+  "Notice Légale",
+  "Notice Of Assessment",
+  "Numéro D'Assurance Sociale",
+  "Numéro de Confirmation",
+  "Numéro de Référence",
+  "Old Montreal",
+  "PDF",
+  "Pièce Jointe",
+  "Plateau Mont-Royal",
+  "Politique de Confidentialité",
+  "Privacy Policy",
+  "Province de Québec",
+  "Quebec",
+  "Quick Start",
+  "RAM",
+  "README",
+  "Release Notes",
+  "Relevé de Compte",
+  "Renseignements Personnels",
+  "Rive-Sud",
+  "Régime Enregistré",
+  "Région Métropolitaine",
+  "SDK",
+  "SWIFT",
+  "Saguenay",
+  "Saint-Laurent",
+  "Section 5",
+  "Section Précédente",
+  "Silicon Valley",
+  "Solde Disponible",
+  "Sommaire Exécutif",
+  "South Shore",
+  "TODO",
+  "Table des Matières",
+  "Table des matières",
+  "Table of Contents",
+  "Taux Annuel",
+  "Terms and Conditions",
+  "Two-Factor Authentication",
+  "URL",
+  "Vieux-Montréal",
+  "XML"
+ ]
+}

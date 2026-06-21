@@ -64,3 +64,40 @@ def test_address_fragments_still_stitch():
     ]
     out = post_merge_address(spans, text)
     assert len(out) == 1 and out[0]['start'] == 0 and out[0]['end'] == 32
+
+
+def test_floor_label_sticky_when_outscored_by_soft_span():
+    """FLOOR STICKINESS regression (adversarial audit, 2026-06-20): a deterministic Tier-0 floor span
+    (payment_card) overlapped by a HIGHER-confidence soft neural span (person/address) must keep its FLOOR
+    primary label after merge -- otherwise the relabeled cluster loses its never-exempt protection and the
+    allowlist drop / 'off' mode would leak the real card. Floor wins regardless of the soft span's conf."""
+    text = "ref 4111111111111111 here"
+    spans = [
+        {'start': 4, 'end': 20, 'label': 'payment_card', 'conf': 0.97, 'tier': 0, 'rule': 'floor:card'},
+        {'start': 4, 'end': 20, 'label': 'person', 'conf': 0.99, 'tier': 2, 'rule': 'gpu'},  # out-scores the floor
+    ]
+    out = merge_spans(spans)
+    assert len(out) == 1
+    assert out[0]['label'] == 'payment_card', 'floor label must survive a higher-conf soft overlap'
+    assert out[0]['start'] == 4 and out[0]['end'] == 20
+    assert set(out[0]['labels']) == {'payment_card', 'person'}   # the soft guess is still recorded
+
+
+def test_floor_sticky_government_id_over_person():
+    """Same invariant for a 9-digit government id (SIN) the model mis-tags as a person at higher conf."""
+    spans = [
+        {'start': 0, 'end': 9, 'label': 'government_id', 'conf': 0.60, 'tier': 0, 'rule': 'floor:sin'},
+        {'start': 0, 'end': 9, 'label': 'person', 'conf': 0.95, 'tier': 2, 'rule': 'gpu'},
+    ]
+    out = merge_spans(spans)
+    assert len(out) == 1 and out[0]['label'] == 'government_id'   # floor sticky despite person 0.95 > 0.60
+
+
+def test_soft_over_soft_unchanged_by_stickiness():
+    """Non-floor overlaps keep the original highest-(conf,len) election -- stickiness only touches the floor."""
+    spans = [
+        {'start': 0, 'end': 10, 'label': 'organization', 'conf': 0.70, 'tier': 2, 'rule': 'gpu'},
+        {'start': 0, 'end': 10, 'label': 'person', 'conf': 0.90, 'tier': 2, 'rule': 'gpu'},
+    ]
+    out = merge_spans(spans)
+    assert len(out) == 1 and out[0]['label'] == 'person'   # highest conf wins, no floor involved

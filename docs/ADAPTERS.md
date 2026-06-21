@@ -8,7 +8,8 @@ the real values locally, so your CLI sees real data while the upstream model onl
 reasons over placeholders. Point any compatible tool at the proxy instead of the vendor
 endpoint and the redaction happens transparently.
 
-Live on your tailnet: `http://<tailnet-host>:8011`.
+Default local endpoint: `http://127.0.0.1:8011`. If you intentionally bind the egress proxy to a
+tailnet or another trusted interface with `GATEWAY_HOST`, replace `127.0.0.1` with that host.
 
 ## Routes the proxy exposes today
 
@@ -24,10 +25,11 @@ All three routes run the SAME redact-on-egress / rehydrate-on-response contract.
 
 EVERY user-supplied text field in a request is redacted before egress. The extractor walks
 the request schema and isolates free-text / user-data fields (system prompt, message
-content, tool-result text, OpenAI Responses `input`, `instructions`, `prompt.variables`,
-agentic item text, and JSON argument values), then redacts in place. Routing IDs, tool
-schemas, images / audio, binary file bytes, and the `model` field are not free text and are
-left structural. A once-identified entity is also re-masked anywhere it reappears later in
+content, tool-result text/JSON, Anthropic `tool_use.input`, Anthropic document text sources,
+OpenAI Responses `input`, `instructions`, `prompt.variables`, agentic item text, JSON argument
+values including native numeric leaves, and tool schema descriptions/literal values), then redacts
+in place. Routing IDs, tool/function names, schema property names, images / audio, binary file
+bytes, and the `model` field are not free text and are left structural. A once-identified entity is also re-masked anywhere it reappears later in
 the session via the known-entity backstop, so a value the model misses in a new context
 still cannot leak. If the proxy is unreachable, your CLI simply cannot reach the upstream
 -- it fails closed, it does not fall back to a raw direct call.
@@ -64,23 +66,39 @@ working. The log never prints raw PII or secret values.
 Hits: **`/v1/responses`** (current Codex), or **`/v1/chat/completions`** (older Codex via
 `wire_api = "chat"`).
 
-In `~/.codex/config.toml` add a custom provider block and select it:
+### ChatGPT / Codex plan path
+
+This is the intended no-per-use path, but it still needs a logged-in synthetic end-to-end verification run.
+Keep Codex signed in with ChatGPT, or with a Codex access token, and put this in
+**user-level** `~/.codex/config.toml`:
 
 ```toml
-[model_providers.ossredact]
-name = "OSSRedact proxy"
-base_url = "http://<tailnet-host>:8011"
-wire_api = "responses"
-env_key = "OPENAI_API_KEY"
+model_provider = "ossredact_chatgpt_plan"
 
-# then select it
-model_provider = "ossredact"
+[model_providers.ossredact_chatgpt_plan]
+name = "OSSRedact ChatGPT-plan bridge"
+base_url = "http://127.0.0.1:8011/v1"
+wire_api = "responses"
+requires_openai_auth = true
 ```
 
-**Why a custom `[model_providers.*]` block (and not an env var):** Codex's built-in `openai`
-provider ignores `base_url` overrides from `config.toml`, so pointing it at the proxy
-requires a custom provider block. `env_key = "OPENAI_API_KEY"` tells Codex which env var
-holds the key it forwards as the upstream `Authorization` header.
+Do not put this in project `.codex/config.toml`; Codex ignores provider and credential
+redirect settings there. Do not set `env_key`, `OPENAI_API_KEY`, or `CODEX_API_KEY` for
+this profile. Codex supplies its normal OpenAI auth, OSSRedact forwards `Authorization`
+unchanged, and the request lands on `/v1/responses`.
+
+If a logged-in synthetic Codex run does not route through this provider, the next path is a
+fixture-backed Codex app-server bridge. Do not guess private ChatGPT backend envelopes.
+
+### Platform API-key path
+
+This path is already supported, but it uses standard OpenAI API billing instead of included
+ChatGPT/Codex plan usage:
+
+```toml
+# User-level ~/.codex/config.toml only.
+openai_base_url = "http://127.0.0.1:8011/v1"
+```
 
 Current Codex should keep `wire_api = "responses"` so it lands on `/v1/responses`. Older
 Codex builds that still support `wire_api = "chat"` can use `/v1/chat/completions`, but
@@ -103,7 +121,7 @@ In `opencode.json`, add a custom provider. Pick the adapter for the wire format 
       "npm": "@ai-sdk/openai-compatible",
       "name": "OSSRedact proxy",
       "options": {
-        "baseURL": "http://<tailnet-host>:8011/v1"
+        "baseURL": "http://127.0.0.1:8011/v1"
       },
       "models": {
         "your-model-id": { "name": "Your Model" }
@@ -120,36 +138,47 @@ To route the Anthropic wire format instead, swap the adapter:
 ```
 
 **Note on `baseURL`:** the `@ai-sdk/openai-compatible` adapter appends `/chat/completions`
-to `baseURL`, so set `baseURL` to `http://<tailnet-host>:8011/v1` and it resolves to the
+to `baseURL`, so set `baseURL` to `http://127.0.0.1:8011/v1` and it resolves to the
 proxy's `/v1/chat/completions` route. The `@ai-sdk/anthropic` adapter appends `/v1/messages`,
-so for that adapter set `baseURL` to the proxy root `http://<tailnet-host>:8011`. Either way
+so for that adapter set `baseURL` to the proxy root `http://127.0.0.1:8011`. Either way
 the final URL must land on a route the proxy serves -- confirm with the egress log.
 
 ---
 
 ## Hermes (NousResearch Agent)
 
-Hits: **`/v1/chat/completions`** (default OpenAI wire), and **`/v1/messages`** for Claude
-models.
+Hits: **`/v1/chat/completions`** for OpenAI-compatible custom providers,
+**`/v1/responses`** when `api_mode: codex_responses` is selected, and **`/v1/messages`**
+when `api_mode: anthropic_messages` is selected.
 
-In `~/.hermes/config.yaml` set the model's `base_url` to the proxy:
+For a direct custom endpoint in `~/.hermes/config.yaml`:
 
 ```yaml
+# ~/.hermes/config.yaml
 model:
   provider: custom
-  base_url: http://<tailnet-host>:8011
+  model: your-model-id
+  base_url: http://127.0.0.1:8011/v1
+  api_mode: chat_completions
+  api_key: OSSREDACT_UPSTREAM_API_KEY
 ```
 
-Or set it via environment instead of editing the file:
+Hermes v0.16.0 also has a local OAuth-backed OpenAI-compatible proxy:
 
 ```bash
-export OPENAI_BASE_URL=http://<tailnet-host>:8011
+hermes proxy start --provider nous --host 127.0.0.1 --port 8645
 ```
 
-When `base_url` is set, Hermes calls it directly (no vendor-default fallback). Hermes speaks
-Chat Completions for OpenAI-style models -- those land on `/v1/chat/completions` -- and
-Anthropic Messages for Claude models, which land on `/v1/messages`. Pick the model
-accordingly and confirm the route in the egress log (`[egress]` vs `[egress:openai]`).
+To keep that OAuth provider as the paid/subscription upstream while still redacting first,
+run OSSRedact in front of it:
+
+```bash
+export GATEWAY_OPENAI_UPSTREAM=http://127.0.0.1:8645
+export GATEWAY_PORT=8011
+```
+
+Then point OpenAI-compatible clients at OSSRedact (`http://127.0.0.1:8011/v1`), not
+directly at Hermes. The chain is: client -> OSSRedact -> Hermes proxy -> provider.
 
 ---
 
@@ -165,11 +194,15 @@ the wire format with `api`:
 {
   "providers": {
     "ossredact": {
-      "baseUrl": "http://<tailnet-host>:8011",
+      "baseUrl": "http://127.0.0.1:8011/v1",
       "api": "openai-completions",
-      "models": {
-        "your-model-id": {}
-      }
+      "apiKey": "OSSREDACT_UPSTREAM_API_KEY",
+      "models": [
+        {
+          "id": "your-model-id",
+          "name": "Your Model"
+        }
+      ]
     }
   }
 }
@@ -190,10 +223,12 @@ Same shape as Pi, in YAML. In `~/.omp/agent/models.yml` add a provider block:
 ```yaml
 providers:
   ossredact:
-    baseUrl: http://<tailnet-host>:8011
+    baseUrl: http://127.0.0.1:8011/v1
     api: openai-completions
+    apiKey: OSSREDACT_UPSTREAM_API_KEY
     models:
-      your-model-id: {}
+      - id: your-model-id
+        name: Your Model
 ```
 
 Set `api: anthropic-messages` to route the Anthropic wire format (`/v1/messages`) instead

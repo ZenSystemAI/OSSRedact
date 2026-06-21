@@ -6,12 +6,18 @@ SAME contract as the GPU/NPU gates (drop-in for the egress proxy, workbench, CI 
   POST /redact  {text, mode='substitute'} -> {redacted_text, mapping(<LABEL_NNN>), stats{...}}
   GET  /healthz                    -> {status, model, device, uptime_s}
 
-Neural tier = xlm-r-base v11r5 ONNX INT8 (dynamic, weights-only) on CPU via onnxruntime
+Neural tier = xlm-r-base v11r9c ONNX INT8 (dynamic, per-channel, weights-only) on CPU via onnxruntime
 CPUExecutionProvider -- the GPU-free portable tier. Same labels + BIO decoding + chunking as
-the GPU gate; Tier-0 floor + union merge are shared from privacy_gate.py. This INT8 was gated
-before deploy by validation/parity_check.py (cosine 0.998, PII-argmax 0.981 vs fp32) and an
-end-task recall check (-0.56pp vs fp32, ~40% faster on CPU). Runs CPU-only; never touches the
-GPU gate on card 4 / :8001.
+the GPU gate; Tier-0 floor + union merge are shared from privacy_gate.py. Runs CPU-only; never
+touches the GPU gate on card 4 / :8001.
+
+INT8 parity: v11r9c added org/address augmentation that sharpened the decision boundaries -- a
+training win that is also harder to quantize -- so the best dynamic recipe (per-channel) lands at
+pii_argmax 0.967 (cosine 0.997, faithful) vs the v11r5 base's 0.981. The validation/parity_check.py
+INT8 bar is 0.965 for this reason (see validation/RESULT-base-int8-parity-v11r9c.md): ~62% of the
+token-flips are on floor-protected types the deterministic Tier-0 layer redacts regardless of the
+model, the highest-frequency no-floor type (person) is barely affected, and INT8 is the only
+WASM-native in-browser format. Both tiers now ship v11r9c.
 """
 import os, sys, time, uuid
 from collections import defaultdict
@@ -23,15 +29,21 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
-MODEL_DIR = os.environ.get('CPU_GATE_MODEL', os.path.expanduser('~/.ossredact/models/pii-xlmr-base-int8'))
-PORT = int(os.environ.get('CPU_GATE_PORT', '8011'))
-HOST = os.environ.get('CPU_GATE_HOST', '0.0.0.0')  # host-internal bind; gate behind your firewall (parity with the GPU gate)
+MODEL_DIR = os.environ.get('CPU_GATE_MODEL', os.path.expanduser('~/.ossredact/models/ossredact-pii-base-int8'))
+PORT = int(os.environ.get('CPU_GATE_PORT', '8001'))
+HOST = os.environ.get('CPU_GATE_HOST', '127.0.0.1')  # opt in to a tailnet/LAN bind with CPU_GATE_HOST
 CHUNK_CHARS = 600  # stay under the 256-token window even on dense tabular text (matches the egress proxy)
 CHUNK_OVERLAP = 80  # window overlap so a value straddling a boundary is caught in one window + union-merged
-MODEL_NAME = f'ZenSystemAI/{os.path.basename(MODEL_DIR).removesuffix("-int8")} (int8, CPU)'  # public HF repo id (ZenSystemAI/pii-xlmr-base); the "(int8, CPU)" suffix already conveys quantization, version ships as an HF revision tag
+MODEL_NAME = f'ZenSystemAI/{os.path.basename(MODEL_DIR).removesuffix("-int8")} (int8, CPU)'  # public HF repo id (ZenSystemAI/ossredact-pii-base); the "(int8, CPU)" suffix already conveys quantization, version ships as an HF revision tag
 START = time.time()
 
 print(f'loading CPU gate ({MODEL_DIR}) onnxruntime CPUExecutionProvider ...', flush=True)
+if not os.path.isdir(MODEL_DIR) or not any(f.endswith('.onnx') for f in os.listdir(MODEL_DIR)):
+    raise SystemExit(
+        f"\n[CPU gate] PII model weights not found at {MODEL_DIR}.\n"
+        f"Download them first (see QUICKSTART.md), e.g.:\n"
+        f"  hf download ZenSystemAI/ossredact-pii-base --local-dir {MODEL_DIR}\n"
+        f"or set CPU_GATE_MODEL to an existing INT8 ONNX model directory.\n")
 gate = PrivacyGate(None)
 gate.npu = NPUTier(MODEL_DIR)  # duck-typed neural tier: xlm-r-base v11r5 int8 on CPU (onnxruntime)
 _warm = gate.detect('warmup Jean Tremblay NAS 046 454 286 compte 006-02761-1234567 courriel a@b.ca')

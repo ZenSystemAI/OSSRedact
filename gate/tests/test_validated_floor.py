@@ -34,6 +34,11 @@ def test_floor_iban_mod97():
     assert "iban" not in {l for l, _ in lset("ref GB82WEST12345698765433 fin")}
 
 
+def test_floor_iban_lowercase_and_hyphenated():
+    assert ("iban", "gb82west12345698765432") in lset("solde IBAN gb82west12345698765432 fin")
+    assert ("iban", "GB82-WEST-1234-5698-7654-32") in lset("solde IBAN GB82-WEST-1234-5698-7654-32 fin")
+
+
 def test_floor_non_luhn_card_not_emitted():
     # 16 digits that FAIL Luhn -> not a floor payment_card (model owns the recall)
     assert "payment_card" not in {l for l, _ in lset("num 4539148803436460")}

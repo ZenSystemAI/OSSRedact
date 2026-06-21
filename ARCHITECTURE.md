@@ -17,7 +17,7 @@ redact/rehydrate contract. The egress-proxy code now lives in this repo under `a
 gate service it calls is version-controlled under `gate/` and deployed on the GPU host (F6 closed; drift-guarded by `deploy/check-gate-drift.sh`). Tool-specific wiring is documented in `docs/ADAPTERS.md`. Point any tool at the gateway with:
 
 ```
-ANTHROPIC_BASE_URL=http://<host>:8011
+ANTHROPIC_BASE_URL=http://127.0.0.1:8011
 ```
 
 It works under a Claude Max subscription: billing stays on Max, no API key is needed, and the
@@ -35,7 +35,7 @@ home). OSSRedact takes the other route: filter private data out, use cloud SOTA,
 and rehydrate transparently. Two users motivate the design:
 
 1. The hobbyist who wants data sovereignty but cannot afford GPUs.
-2. The employee who unknowingly leaks client PII into ChatGPT or Claude (always-on DLP).
+2. The employee who unknowingly leaks client PII through configured CLI/API-endpoint clients today. Browser and desktop-app interception are roadmap items.
 
 ### Honest positioning
 
@@ -53,13 +53,13 @@ be first or only. Its distinct contribution is:
 ## Process and topology
 
 ```
-                          host (tailnet-bound, on-device)
+                          host (loopback by default, on-device)
    local tool                +-------------------------------------------------+
    (Claude Code, Codex,      |                                                 |
     Hermes, Pi, opencode)    |   :8011  egress proxy                           |
        |                     |          - extract / gate / merge / rehydrate   |
        |  ANTHROPIC_BASE_URL |          - holds session+project entity map     |
-       |  = http://host:8011 |                |                                |
+       |  = http://127.0.0.1:8011             |                                |
        +---------------------+----------------+                                |
                              |                v                                |
                              |   :8001  gate + NER engine                      |
@@ -79,8 +79,9 @@ be first or only. Its distinct contribution is:
   pipeline, the entity map, and stream rehydration.
 - **`:8001` gate + NER engine** owns detection: the deterministic Tier-0 / secrets layer and the
   on-device NER pass.
-- Both are **tailnet-bound**. The gateway is not exposed to the open LAN or the internet; only the
-  egress to the cloud LLM API leaves the host, carrying placeholders and the verbatim auth header.
+- Both bind `127.0.0.1` by default. Tailnet or LAN exposure is an explicit operator opt-in via
+  `GATEWAY_HOST` / `CPU_GATE_HOST`; the gateway should not be exposed to the open LAN or internet.
+  Only the egress to the cloud LLM API leaves the host, carrying placeholders and the verbatim auth header.
 
 ---
 
@@ -108,11 +109,11 @@ be first or only. Its distinct contribution is:
 
 ### 1. Extract redactable text fields
 
-The proxy pulls the free-text fields that can carry PII: `system`, `messages`, and
-`tool_result` text. It **never touches** `tool_use` input, tool schemas, images, or the model
-name. This boundary matters: rewriting a tool schema or a model id would break the request, and
-`tool_use` input on egress is structured argument data the local model produced, not free text to
-scan at this stage.
+The proxy pulls the fields that can carry model-visible user data: `system`, `messages`,
+`tool_result` text/JSON, `tool_use` input, Anthropic document text, and tool schema
+descriptions/literal values. It never rewrites tool/function names, schema property names, images,
+binary file bytes, or the model name. This boundary matters: rewriting routing or schema structure
+would break the request, while structured argument values are user data and must be scanned.
 
 ### 2. Cheap deterministic gate (always, microseconds)
 
@@ -132,8 +133,8 @@ catastrophic categories (secrets, cards, SIN), independent of the model.
 
 If a request has no scannable extracted text and no prior session entity to backstop, it is
 forwarded unchanged. Normal non-empty text fields proceed to the local NER pass even when Tier-0
-finds nothing, because person names have no deterministic floor and short structural values can
-carry them.
+finds nothing, because the NER-only labels (person, organization, address) have no deterministic
+floor and short structural values can carry them.
 
 ### 4. On-device NER pass
 
@@ -288,6 +289,72 @@ session/project scope.
 
 ---
 
+## Concurrency and multi-agent isolation
+
+The gateway is a **single process** (`:8011`, one async event loop; no per-client workers). It does
+not fork a process or thread per client -- many simultaneous agents are handled as **interleaved
+coroutines on one loop**. While one request is awaiting the on-device NER pass or the upstream API,
+the loop serves another. So "many agents at once" means request multiplexing, not CPU parallelism,
+and each in-flight request keeps its own body, context, and placeholder map as coroutine-local state
+-- there is no shared per-request mutable global, so two requests never see each other's text in
+memory.
+
+### Isolation is by session, not by process
+
+PII isolation between agents is enforced by the **session -> entity-map-file** mapping, not by memory
+or process separation. Each request derives a `(session, project)` key, and that pair selects exactly
+one encrypted map file; an agent can only read, write, or rehydrate against its own file.
+
+- `session` comes from the client's session header (`x-claude-code-session-id`, or `x-session-id` on
+  the OpenAI routes); absent that, a hash of the system prompt; absent both, a unique per-request
+  ephemeral id (so two truly handle-less first-turn flows never share one map).
+- The map path is `sha256(project \0 session)`, so two different sessions hash to different files,
+  different placeholder counters, and different replay maps. Agent A's `<PERSON_001>` and agent B's
+  `<PERSON_001>` are minted from independent counters in independent files and can never collide or
+  cross-rehydrate.
+
+A tool that sends a stable session header (Claude Code does on every request) therefore gets a
+per-conversation map fully isolated from every other client on the same gateway.
+
+### Same-session concurrency
+
+When one agent fires parallel requests on the same session (parallel tool calls, sub-agents), they
+share one map file and must be serialized at the mint stage. Detection (the awaited NER calls) runs
+**outside** the lock so the model stays busy; then the `load -> mint -> save` cycle runs under a
+per-`(session, project)` lock: an in-process re-entrant lock **plus** a cross-process `fcntl.flock`
+on a sidecar `.lock` file, with an atomic file replace. The second request to take the lock loads the
+file the first just saved, sees its placeholders, and reuses them -- so the same value gets **one
+stable placeholder even under concurrency**. This is also what keeps the upstream prompt cache warm:
+an unstable placeholder would change the redacted prefix bytes every turn and bust the cache, which
+re-bills the whole conversation as uncached input.
+
+### Replay is scoped to the outbound body
+
+The placeholder->value map handed to the response rehydrator is scoped to the placeholders that
+actually appear in **this request's outbound body**, not the full session map. The upstream model can
+only emit a placeholder it received, so this is sufficient for rehydration (including cross-turn,
+since re-sent history carries its placeholders) while guaranteeing a request can never rehydrate a
+value it did not send. This is the isolation boundary when two header-less clients share a system
+prompt (and therefore one map file): each request still only reconstitutes its own values, and an
+unknown placeholder is left raw rather than mapped to another flow's value.
+
+### Throughput and limits
+
+- **One event loop**: CPU-bound work between awaits (regex scans, the merge, JSON (de)serialization)
+  briefly stalls all in-flight requests; there is no CPU parallelism in the proxy itself.
+- **One on-device NER engine** is the throughput ceiling -- every non-trivial field from every agent
+  funnels through it, scanned in 256-token windows.
+- **Per-`(session, project)` mint serialization**: heavy same-session concurrency serializes at the
+  lock; different sessions take different locks and do not contend.
+- **Cross-process** safety (multiple gateway instances sharing one map directory) rests on
+  `fcntl.flock` -- host-local advisory locking; it does not extend across hosts or a network
+  filesystem without working flock semantics.
+- For strict **multi-tenant** separation (different parties' data through one gateway), key the
+  session on a per-client/auth fingerprint as well, so distinct clients never share a map file even
+  when they share a system prompt.
+
+---
+
 ## Streaming SSE rehydration
 
 The response is an SSE stream of incremental deltas. The proxy rehydrates placeholders back to
@@ -332,9 +399,10 @@ value-level rehydrate --> {"to": "marie@example.com", "subject": "..."}
 
 The cloud model could emit a placeholder-looking string that was never in the egress map (a
 hallucination). Rehydrating it against nothing, or guessing, would be unsafe. The policy is: a
-placeholder is only rehydrated if it exists in the entity map for that session/project scope. A
-placeholder-shaped token with **no map entry is left as-is**, not invented and not mapped to a real
-value.
+placeholder is only rehydrated if it is in **this request's replay** -- the placeholders that
+appeared in the request's own outbound body (see *Concurrency and multi-agent isolation*). A
+placeholder-shaped token with **no entry is left as-is**, not invented and not mapped to a real
+value -- which also guarantees a request can never rehydrate a value it did not itself send.
 
 ---
 
@@ -392,7 +460,6 @@ moat: competitors lean on generic Presidio/regex.
 | Tier | Model                       | Runtime                                   | Role                                  |
 |------|-----------------------------|-------------------------------------------|---------------------------------------|
 | CPU  | xlm-roberta-base            | dynamic-INT8 ONNX on CPU (onnxruntime)    | the deployed always-on workhorse      |
-| CPU  | distilbert-multilingual     | 135MB static-INT8                         | the most portable tier                |
 | NPU  | xlm-roberta-base            | OpenVINO FP16 IR, Intel NPU (alternate tier) | preserved drop-in alternate        |
 | GPU  | xlm-roberta-large           | GPU                                       | highest-capacity tier                 |
 
@@ -420,18 +487,18 @@ The prior 23-label scheme was consolidated: `bank_account` + `routing_number` fo
 
 Recall here means **leak-prevention**. `clean_fp` means **over-redaction on negative rows**.
 
-### Current model: v11 (real-structure held-out, 5-round error-mine loop)
+### Measured public benchmark: both tiers v11r9c (synthetic held-out, 5-round error-mine loop)
 
-Measured on `pii-heldout-v11r5` (7,498 synthetic rows, 0 train overlap, unseen document structures -- an anti-saturation held-out built ONLY from structural variants never seen in training). Source: `validation/RESULT-v11.md`.
+Measured on the synthetic held-out corpus (7,498 synthetic rows, 20 labels, "full" config = Tier-0 floor + neural model, 0 train overlap, unseen document structures -- an anti-saturation held-out built ONLY from structural variants never seen in training). Source: `validation/RESULT-v11r9c.md` (the v11r5 baseline it improves on is `validation/RESULT-v11.md`). Both tiers now ship the `v11r9c` revision -- the GPU/large as `pii-gpu-xlmr-large-v11r9c` and the CPU/base as `pii-gpu-xlmr-base-v11r9c`, retrained on the same cumulative corpus so the base now carries the organization/address fix too (base `address` recall ~0.93).
 
 The privacy metric is **full-stack catastrophic DETECTION recall**: any detected span is redacted regardless of which label it gets -- an intra-catastrophic mislabel is still a redaction, not a leak.
 
 | pick | base | catastrophic full-stack DETECTION | overall labeled R | overall P | clean_fp |
 |------|------|-----------------------------------|-------------------|-----------|----------|
-| GPU  | xlm-r-large-v11r5 | **0.9964** | 0.9785 | 0.9598 | 12 / 7498 rows |
-| CPU  | xlm-r-base-v11r5  | **0.9932** | 0.9664 | 0.9456 | 12 / 7498 rows |
+| GPU  | xlm-r-large-v11r9c | **0.9954** | 0.9882 | 0.9615 | 34 / 7498 rows |
+| CPU  | xlm-r-base-v11r9c  | **0.9941** | 0.9777 | 0.9139 | 48 / 7498 rows |
 
-Every catastrophic label is caught at >=0.974 full-stack detection (large); 11 of 13 at 1.000. FR is not weaker than EN (FR R=0.980, EN R=0.978): the Quebec-French moat holds on unseen structure.
+The v11r9c catastrophic recall essentially holds vs the prior v11r5 large model (0.9964 -> 0.9954, -0.001). The reason v11r9c ships is the structural-form leak it closes: **organization recall ~0.10 -> 1.00** and **address recall ~0.60 -> 0.95** on the synthetic corpus. The honest tradeoff is more over-redaction on digit-ID-shaped tokens: clean false positives on no-PII rows rise from 12 to 34 (per-label precision dips on `government_id` ~0.87, `phone_number` ~0.84, `sensitive_account_id` ~0.88, `account_number` ~0.94, `date_of_birth` ~0.96). This is the **safe** failure direction -- over-redaction never leaks PII, it only costs a coding agent a little context when a benign number is ID-shaped -- so for a privacy firewall whose prime directive is "never leak," closing the org/address leak is worth the extra over-redaction. FR is not weaker than EN: the Quebec-French moat holds on unseen structure.
 
 ### v6/v7 historical (superseded by v11 -- see validation/RESULT-v11.md)
 
@@ -443,7 +510,6 @@ Earlier results on the v6 generation sets (in-distribution held-out, train and v
 |------------------|---------------|--------------|--------|-----------|----------|
 | NPU xlm-r-base   | 0.955         | 0.968        | 0.990  | 0.986     | 0        |
 | GPU xlm-r-large  | 0.955         | (identical to NPU) | 0.990 | (identical) | 0     |
-| CPU distilbert   | 0.923         | 0.938        | 0.978  | 0.987     | 0 to 2   |
 
 **Key result:** the base model **equals** GPU large on recall at about **4x lower latency**, which is
 why the base model is the always-on tier (deployed as CPU INT8).
@@ -466,16 +532,21 @@ A generated corpus of 5,000 FR + EN documents (bank statements, financing forms,
 CSV exports, `.env`, code), redacted entirely locally:
 
 - **218,931** PII spans redacted.
-- **Zero** email, SIN, account-ID, or credit-card leaks in the redacted output (verified against
-  ground truth).
+- **Zero** email, SIN, account-ID, or credit-card leaks in the redacted output **on this synthetic
+  corpus** (verified against ground truth); this is a synthetic-corpus result, not a real-world
+  zero-leak guarantee.
 - Adversarial cases included (ALL-CAPS, NBSP-separated IDs, mixed FR/EN, long unbroken lines,
   look-alike decoys). A NBSP-separated-SIN gap in cue-less cells was surfaced, fixed, and re-verified
   at zero SIN leaks.
 
 ### C2: code-context PII (synthetic)
 
-- **100% recall** across JSON, YAML, SQL, CSV, logs, `.env`, and code comments, in FR + EN.
-- **Adversarial variant** (full names glued into camelCase / snake_case identifiers): **0.882**.
+- On our synthetic code-context corpus, recall is **1.000** across JSON, YAML, SQL, CSV, logs, `.env`,
+  and code comments, in FR + EN. This is the realistic, structured-PII case.
+- **Honest adversarial caveat** (see Limitations #11): full names *glued* into camelCase / snake_case
+  identifiers are a harder, adversarial case and are under-detected -- **0.882** on that variant. The
+  glued/adversarial number, not the structured 1.000, is the one to lead with when reasoning about
+  worst-case identifier leaks.
 
 ### Latency
 
@@ -491,16 +562,28 @@ CSV exports, `.env`, code), redacted entirely locally:
 
 Stated plainly:
 
-- Models are trained and validated entirely on **synthetic Québec data**.
-  Broader real-world domains are future work.
-- Full names **glued into code identifiers** are under-detected (the 0.882 adversarial result).
+- Models are trained and validated entirely on **synthetic Québec data**, and every "zero leak" /
+  "verified" claim in this document is scoped to **our synthetic held-out corpus** -- it is not a
+  real-world zero-leak guarantee. Broader real-world domains are future work.
+- **The deterministic Tier-0 floor does not cover every category.** It deterministically covers
+  (model-independent hard floor): secrets / API keys, payment cards (Luhn), IBAN, SIN / government
+  IDs, emails, IP addresses, and file paths. **Address and organization have NO deterministic
+  floor** -- they rely entirely on the NER model. v11r9c now covers them well on the synthetic
+  corpus (org 1.0, address 0.95), but that coverage is **model-dependent**, not a hard guarantee
+  like the Tier-0 categories.
+- **#11 -- Glued / adversarial identifiers.** Full names **glued into code identifiers**
+  (camelCase / snake_case) are an adversarial case and are under-detected: **0.882** on the
+  synthetic adversarial variant, versus 1.000 on structured code-context PII. Lead with the
+  realistic structured number for typical traffic, but treat glued identifiers as a known worst-case
+  gap, not a solved one.
 - Bare long **digit runs glued to adjacent letters** can be missed unless a financial / identity cue
   is nearby.
 - **French and English only** by design. Multilingual is an explicit future axis, not v1.
-- **Recall is below 100%.** The deterministic layer is the reliable floor for the catastrophic
-  categories (secrets, cards, SIN).
+- **Recall is below 100%.** The deterministic layer is the reliable floor only for the catastrophic
+  *structured* categories (secrets, cards, SIN, IBAN, emails, IP, file paths); the model-dependent
+  categories (person, organization, address) have no such floor.
 
-Charts: `./charts/fig1..fig5` (png).
+Charts: `./charts/fig1, fig3, fig5` (png).
 
 ---
 

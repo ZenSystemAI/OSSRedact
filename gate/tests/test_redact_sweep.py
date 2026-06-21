@@ -69,14 +69,35 @@ def test_case_sensitive_password_sweep_uses_exact_placeholder():
     assert PrivacyGate.rehydrate(redacted, mapping) == text
 
 
-def test_sweep_is_case_insensitive():
-    # Detected once as "Jane Tremblay"; a later ALL-CAPS occurrence must still be masked.
+def test_email_sweep_is_case_insensitive():
+    # Non-name labels still sweep case variants when a detector catches one occurrence.
     g = PrivacyGate(None)
-    text = "Client Jane Tremblay. Signed: JANE TREMBLAY."
-    spans = [_span(text, "Jane Tremblay", "person")]
+    text = "Email Bob@Acme.test. Later bob@acme.test."
+    spans = [_span(text, "Bob@Acme.test", "email")]
     redacted, mapping, _ = g.redact(text, spans=spans)
-    assert "JANE TREMBLAY" not in redacted
+    assert "bob@acme.test" not in redacted
+    assert redacted.count("<EMAIL_001>") == 2
+
+
+def test_person_sweep_is_exact_case_to_preserve_paths_and_usernames():
+    g = PrivacyGate(None)
+    text = "I'm Nadia; open /home/nadia/dev/x and log in as nadia."
+    spans = [_span(text, "Nadia", "person")]
+    redacted, mapping, _ = g.redact(text, spans=spans)
+    assert redacted.count("<PERSON_001>") == 1
+    assert "/home/nadia/dev/x" in redacted
+    assert "as nadia" in redacted
+    assert PrivacyGate.rehydrate(redacted, mapping) == text
+
+
+def test_person_sweep_still_masks_exact_repeats():
+    g = PrivacyGate(None)
+    text = "Client Nadia Stone. Signed: Nadia Stone."
+    spans = [_span(text, "Nadia Stone", "person")]
+    redacted, mapping, _ = g.redact(text, spans=spans)
+    assert "Nadia Stone" not in redacted
     assert redacted.count("<PERSON_001>") == 2
+    assert PrivacyGate.rehydrate(redacted, mapping) == text
 
 
 def test_sweep_never_corrupts_an_inserted_placeholder():

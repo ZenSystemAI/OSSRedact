@@ -230,11 +230,12 @@ def _appliance_modules_pinned(bare_names):
 
 
 try:
-    # privacy_gate is the colliding one; entity_map / secrets_scan / openai_adapter / egress_proxy are appliance-only
+    # privacy_gate is the colliding one; entity_map / secrets_scan / adapters / egress_proxy are appliance-only
     # today but loaded by path too so a future same-named gate file cannot shadow them, and so egress_proxy is never
     # served from a stale cache. Order: leaf deps first, egress_proxy last (it imports the others).
     with _appliance_modules_pinned(
-            ['privacy_gate', 'entity_map', 'secrets_scan', 'openai_adapter', 'egress_proxy']) as _mods:
+            ['privacy_gate', 'entity_map', 'secrets_scan', 'responses_adapter', 'openai_adapter',
+             'egress_proxy']) as _mods:
         assert hasattr(_mods['privacy_gate'], 'tier0_spans'), (
             'expected the APPLIANCE privacy_gate (tier0_spans) but loaded '
             + repr(getattr(_mods['privacy_gate'], '__file__', None)))
@@ -260,6 +261,128 @@ def test_neural_detect_cache_key_does_not_retain_raw_text():
     assert key == egress_proxy._detect_cache_key(raw, 0.5), 'same text and score should reuse the cache entry'
     assert key != egress_proxy._detect_cache_key(raw + ' extra', 0.5)
     assert key != egress_proxy._detect_cache_key(raw, 0.6)
+
+
+@_NEEDS_PROXY
+def test_redact_body_accepts_injected_detector_without_httpx_client(monkeypatch):
+    class NoHttpxClient:
+        def __init__(self, *a, **k):
+            raise AssertionError('redact_body should not construct httpx when detector is injected')
+
+    async def detector(text, min_score=0.5):
+        needle = 'Jane Proof'
+        i = text.find(needle)
+        if i == -1:
+            return []
+        return [{'start': i, 'end': i + len(needle), 'label': 'person',
+                 'tier': 1, 'conf': 0.95, 'rule': 'injected'}]
+
+    monkeypatch.setattr(egress_proxy.httpx, 'AsyncClient', NoHttpxClient)
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'Notify Jane Proof.'}]}
+    ctx = {'session': 'injected-detector-' + os.urandom(4).hex(), 'project': 'e2e'}
+
+    meta, replay = asyncio.run(egress_proxy.redact_body(body, ctx, detector=detector))
+
+    wire = _wire_text(body)
+    assert meta['redaction'] == 'redacted'
+    assert 'Jane Proof' not in wire
+    assert '<PERSON_001>' in wire
+    assert replay['<PERSON_001>'] == 'Jane Proof'
+
+
+@_NEEDS_PROXY
+def test_concurrent_redact_body_same_session_keeps_placeholders_stable(monkeypatch):
+    """Plan 033 Task A, LIVE-PATH guard (the committed interprocess-lock test drives map_file_lock directly;
+    this drives redact_body() itself under concurrency). Claude Code fires PARALLEL requests in one session
+    (parallel tool calls / subagents). redact_body builds a FRESH EntityMap per call, so without the
+    inter-process map lock two concurrent load->mint->save cycles can mint DIVERGENT placeholders for the
+    same value -- which makes the next turn redact the cached prefix to different bytes, so the upstream
+    prompt cache misses every turn and token usage 'inflates'. Assert the shared value resolves to ONE
+    placeholder across all concurrent requests (cache-stable bytes) and per-request values never cross."""
+    class NoHttpxClient:
+        def __init__(self, *a, **k):
+            raise AssertionError('redact_body must not construct httpx when a detector is injected')
+    monkeypatch.setattr(egress_proxy.httpx, 'AsyncClient', NoHttpxClient)
+
+    N = 8
+    shared = 'jane.doe@example.test'   # present in EVERY concurrent request
+
+    async def detector(text, min_score=0.5):
+        spans = []
+        for needle, label in [(shared, 'email')] + [(f'val-{i}', 'person') for i in range(N)]:
+            j = 0
+            while (k := text.find(needle, j)) != -1:
+                spans.append({'start': k, 'end': k + len(needle), 'label': label,
+                              'tier': 1, 'conf': 0.95, 'rule': 'inj'})
+                j = k + len(needle)
+        return spans
+
+    session = 'concurrent-' + os.urandom(4).hex()
+    bodies = [{'model': 'claude-test',
+               'messages': [{'role': 'user', 'content': f'Email {shared} about val-{i}.'}]}
+              for i in range(N)]
+
+    async def drive():
+        return await asyncio.gather(*[
+            egress_proxy.redact_body(b, {'session': session, 'project': 'e2e'}, detector=detector)
+            for b in bodies])
+    results = asyncio.run(drive())
+
+    shared_phs = set()
+    for i, ((meta, replay), b) in enumerate(zip(results, bodies)):
+        wire = _wire_text(b)
+        assert shared not in wire, f'shared value leaked to wire in req {i}'
+        assert f'val-{i}' not in wire, f'per-request value leaked to wire in req {i}'
+        inv = {v: ph for ph, v in replay.items()}
+        shared_phs.add(inv[shared])
+        # no cross-flow bleed: req i's person placeholder rehydrates to ITS OWN value, not another req's
+        assert inv[f'val-{i}'] != inv[shared]
+        assert replay[inv[f'val-{i}']] == f'val-{i}'
+
+    # the cache-stability invariant: one stable placeholder for the shared value across ALL concurrent reqs
+    assert len(shared_phs) == 1, f'divergent placeholders for the shared value across reqs: {shared_phs}'
+
+    # persisted map is consistent: one placeholder per distinct value, every value rehydratable
+    reloaded = egress_proxy.EntityMap(session, 'e2e')
+    expected = {shared, *(f'val-{i}' for i in range(N))}
+    assert set(reloaded.v2p) == expected
+    assert len(set(reloaded.v2p.values())) == len(expected)
+    rep = reloaded.replay()
+    assert all(rep[reloaded.v2p[v]] == v for v in expected)
+
+
+@_NEEDS_PROXY
+def test_replay_scoped_to_outbound_body_no_cross_client_bleed(monkeypatch):
+    """Replay-scoping guard. Two DIFFERENT header-less clients that share a system prompt hash to the SAME
+    session map (derive_session falls to 'sys-'+hash(system)). The per-request replay must NOT expose one
+    client's PII to the other: it is scoped to placeholders actually present in THIS request's outbound body,
+    so a client that sent no PII gets an empty replay even though the shared map holds the other's value."""
+    async def detector(text, min_score=0.5):
+        needle = 'alice.private@example.test'
+        i = text.find(needle)
+        return ([{'start': i, 'end': i + len(needle), 'label': 'email', 'tier': 1, 'conf': 0.95, 'rule': 'inj'}]
+                if i != -1 else [])
+
+    sysprompt = 'You are a helpful assistant. Be concise.'
+    def body(user_text):
+        return {'model': 'x', 'system': sysprompt, 'messages': [{'role': 'user', 'content': user_text}]}
+
+    # both clients omit the session header -> identical sys-hash session -> ONE shared map file
+    assert egress_proxy.derive_session('', sysprompt) == egress_proxy.derive_session('', sysprompt)
+    ctx = lambda: {'session': '', 'project': 'e2e-bleed'}
+
+    bA = body('Email alice.private@example.test about the bug.')   # client A sends real PII
+    _, replayA = asyncio.run(egress_proxy.redact_body(bA, ctx(), detector=detector))
+    assert 'alice.private@example.test' in replayA.values()        # A still rehydrates its OWN value
+
+    bB = body('What is the capital of France?')                    # client B (different) sends NO PII
+    metaB, replayB = asyncio.run(egress_proxy.redact_body(bB, ctx(), detector=detector))
+
+    # the breach the fix closes: B's replay must not carry A's value, and a response that happens to carry
+    # A's placeholder must NOT rehydrate to A's PII inside B's turn (it stays raw -- fail-safe, never a leak)
+    assert 'alice.private@example.test' not in replayB.values()
+    ph = next(iter(replayA))
+    assert egress_proxy.rehydrate_text(f'see {ph} please', replayB) == f'see {ph} please'
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +534,43 @@ def test_dryrun_replay_map_is_explicit_test_opt_in(monkeypatch):
 
     assert '_replay' in payload, 'GATEWAY_TEST_EXPOSE_MAP must expose replay for diagnostics in dryrun'
     assert email in payload['_replay'].values()
+
+
+@_NEEDS_PROXY
+def test_dryrun_wire_redacts_and_local_rehydrate_restores(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', True)
+    monkeypatch.setattr(egress_proxy, 'EXPOSE_MAP', True)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({'Alice Proof': 'person'}))
+
+    name = 'Alice Proof'
+    email = 'proof.alice@example.test'
+    body = {
+        'model': 'claude-test',
+        'messages': [{'role': 'user', 'content': f'Prepare a note for {name} at {email}.'}],
+    }
+
+    payload = _run_route(
+        egress_proxy.messages,
+        body,
+        headers={'x-claude-code-session-id': 'dryrun-wire-proof-' + os.urandom(4).hex()},
+    )
+
+    wire = json.dumps(payload['upstream_body'], ensure_ascii=False)
+    assert name not in wire, 'raw synthetic name leaked in the would-be upstream body'
+    assert email not in wire, 'raw synthetic email leaked in the would-be upstream body'
+    assert '<PERSON_' in wire and '<EMAIL_' in wire
+
+    replay = payload['_replay']
+    name_ph = next(ph for ph, value in replay.items() if value == name)
+    email_ph = next(ph for ph, value in replay.items() if value == email)
+    upstream_resp = {'content': [{'type': 'text', 'text': f'Sent to {name_ph} using {email_ph}.'}]}
+
+    egress_proxy.rehydrate_anthropic_response(upstream_resp, replay)
+
+    restored = upstream_resp['content'][0]['text']
+    assert name in restored
+    assert email in restored
+    assert not _PH_RE.search(restored), 'local-visible text must not retain placeholders after rehydration'
 
 
 class _FakeUpstreamResponse:
@@ -671,9 +831,16 @@ def test_entity_map_keeps_case_sensitive_credentials_distinct():
     email_ph2, _ = emap.placeholder_for('bob@example.test', 'email')
     assert email_ph1 == email_ph2, 'ordinary PII should keep case-insensitive session stability'
 
+    person_ph1, new_person_1 = emap.placeholder_for('Nadia', 'person')
+    person_ph2, new_person_2 = emap.placeholder_for('nadia', 'person')
+    assert new_person_1 and new_person_2
+    assert person_ph1 != person_ph2
+    assert emap.replay()[person_ph1] == 'Nadia'
+    assert emap.replay()[person_ph2] == 'nadia'
+
 
 @_NEEDS_PROXY
-def test_proxy_known_sweep_uses_exact_case_for_credentials():
+def test_proxy_known_sweep_uses_exact_case_for_credentials_and_people():
     class FakeMap:
         v2p = {
             'AbC123xy': '<SECRET_001>',
@@ -683,8 +850,26 @@ def test_proxy_known_sweep_uses_exact_case_for_credentials():
 
     known_re = egress_proxy.build_known_re(FakeMap)
     out, n = egress_proxy.sweep_known('again abc123xy and Jane Roy and JANE ROY', known_re, FakeMap)
-    assert out == 'again <SECRET_002> and <PERSON_001> and <PERSON_001>'
-    assert n == 3
+    assert out == 'again <SECRET_002> and <PERSON_001> and JANE ROY'
+    assert n == 2
+
+
+@_NEEDS_PROXY
+def test_proxy_person_sweep_preserves_lowercase_paths_and_usernames():
+    class FakeMap:
+        v2p = {'Nadia': '<PERSON_001>'}
+
+        @staticmethod
+        def replay():
+            return {'<PERSON_001>': 'Nadia'}
+
+    known_re = egress_proxy.build_known_re(FakeMap)
+    text = "I'm <PERSON_001>; open /home/nadia/dev/x and log in as nadia."
+    out, n = egress_proxy.sweep_known(text, known_re, FakeMap)
+    assert n == 0
+    assert '/home/nadia/dev/x' in out
+    assert 'as nadia' in out
+    assert egress_proxy.rehydrate_text(out, FakeMap.replay()) == "I'm Nadia; open /home/nadia/dev/x and log in as nadia."
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +904,315 @@ def test_openai_route_roundtrip(monkeypatch):
     restored = resp['choices'][0]['message']['content']
     assert email in restored and secret_id in restored
     assert not _PH_RE.search(restored), 'no placeholder may survive OpenAI rehydration'
+
+
+@_NEEDS_PROXY
+def test_anthropic_assistant_tool_use_history_redacted_on_next_request(monkeypatch):
+    """A prior assistant tool_use input is rehydrated locally, then sent back as conversation history.
+    The next outbound pass must redact that model-visible history before forwarding upstream."""
+    name = 'Alice Proof'
+    email = 'history.alice@example.test'
+    body = {
+        'model': 'claude-test',
+        'messages': [
+            {'role': 'assistant', 'content': [
+                {'type': 'tool_use', 'id': 'toolu_1', 'name': 'lookup_case',
+                 'input': {'recipient': name, email: {'role': 'owner'}}},
+            ]},
+            {'role': 'user', 'content': 'Continue.'},
+        ],
+    }
+    neural = _make_neural({name: 'person'})
+    meta, replay = _run_redact(monkeypatch, body, neural)
+
+    wire = _wire_text(body)
+    assert meta['redaction'] == 'redacted'
+    assert name not in wire, 'PRIVACY FAILURE: prior Anthropic tool_use input value leaked upstream raw'
+    assert email not in wire, 'PRIVACY FAILURE: prior Anthropic tool_use input key leaked upstream raw'
+    assert '<PERSON_' in wire and '<EMAIL_' in wire
+    assert name in replay.values() and email in replay.values()
+    assert body['messages'][0]['content'][0]['name'] == 'lookup_case', 'tool routing name must stay structural'
+
+
+@_NEEDS_PROXY
+def test_openai_assistant_tool_call_history_redacted_on_next_request(monkeypatch):
+    """OpenAI chat history can include assistant tool_calls. After response rehydration those arguments contain
+    originals locally, so the next request must parse/redact the JSON arguments before forwarding."""
+    name = 'Alice Proof'
+    email = 'history.openai@example.test'
+    body = {
+        'model': 'gpt-test',
+        'messages': [
+            {'role': 'assistant', 'tool_calls': [
+                {'id': 'call_1', 'type': 'function',
+                 'function': {'name': 'lookup_case',
+                              'arguments': json.dumps({'assignee': name, email: {'role': 'owner'}})}},
+            ]},
+            {'role': 'user', 'content': 'Continue.'},
+        ],
+    }
+    neural = _make_neural({name: 'person'})
+    meta, replay = _run_redact(
+        monkeypatch, body, neural,
+        ctx={'session': 'sess-oa-history-' + os.urandom(6).hex(), 'project': 'e2e-oa'},
+        extract=openai_adapter.extract_text_fields_openai)
+
+    wire = _wire_text(body)
+    assert meta['redaction'] == 'redacted'
+    assert name not in wire, 'PRIVACY FAILURE: prior OpenAI tool_call argument value leaked upstream raw'
+    assert email not in wire, 'PRIVACY FAILURE: prior OpenAI tool_call argument key leaked upstream raw'
+    args = json.loads(body['messages'][0]['tool_calls'][0]['function']['arguments'])
+    assert any(isinstance(v, str) and v.startswith('<PERSON_') for v in args.values()), (
+        'tool_call argument value should be redacted inside valid JSON')
+    assert any(k.startswith('<EMAIL_') for k in args), 'tool_call argument key should be redacted inside valid JSON'
+    assert body['messages'][0]['tool_calls'][0]['function']['name'] == 'lookup_case', 'function name must stay structural'
+    assert name in replay.values() and email in replay.values()
+
+
+@_NEEDS_PROXY
+def test_native_numeric_tool_arguments_are_redacted_and_rehydrate(monkeypatch):
+    """A1 regression: native JSON numbers in tool/function arguments are scan-only strings and write back
+    as placeholder strings on a hit, never raw numeric PII."""
+    ssn_num = 46454286
+    card_num = 4111111111111111
+
+    anth = {
+        'model': 'claude-test',
+        'messages': [{'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'toolu_1', 'name': 'lookup_case',
+             'input': {'ssn': ssn_num, 'card': card_num, 'ok': True, 'none': None}},
+        ]}],
+    }
+    meta, replay = _run_redact(monkeypatch, anth, _make_neural({}))
+    wire = _wire_text(anth)
+    assert meta['redaction'] == 'redacted'
+    assert str(ssn_num) not in wire and str(card_num) not in wire
+    tool_input = anth['messages'][0]['content'][0]['input']
+    assert isinstance(tool_input['ssn'], str) and tool_input['ssn'].startswith('<')
+    assert isinstance(tool_input['card'], str) and tool_input['card'].startswith('<')
+    restored = {'content': [{'type': 'tool_use', 'input': tool_input}]}
+    egress_proxy.rehydrate_anthropic_response(restored, replay)
+    assert restored['content'][0]['input']['ssn'] == str(ssn_num)
+    assert restored['content'][0]['input']['card'] == str(card_num)
+    assert restored['content'][0]['input']['ok'] is True
+    assert restored['content'][0]['input']['none'] is None
+
+    tool_result = {
+        'model': 'claude-test',
+        'messages': [{'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'toolu_1',
+             'content': {'ssn': ssn_num, 'card': card_num}},
+        ]}],
+    }
+    meta, replay = _run_redact(monkeypatch, tool_result, _make_neural({}))
+    wire = _wire_text(tool_result)
+    assert meta['redaction'] == 'redacted'
+    assert str(ssn_num) not in wire and str(card_num) not in wire
+    restored = {'content': [{'type': 'text', 'text': json.dumps(tool_result['messages'][0]['content'][0]['content'])}]}
+    egress_proxy.rehydrate_anthropic_response(restored, replay)
+    assert str(ssn_num) in restored['content'][0]['text']
+    assert str(card_num) in restored['content'][0]['text']
+
+    openai_body = {
+        'model': 'gpt-test',
+        'messages': [{'role': 'assistant', 'tool_calls': [
+            {'id': 'call_1', 'type': 'function',
+             'function': {'name': 'lookup_case', 'arguments': {'ssn': ssn_num, 'card': card_num}}},
+        ]}],
+    }
+    meta, replay = _run_redact(
+        monkeypatch, openai_body, _make_neural({}),
+        ctx={'session': 'sess-native-num-' + os.urandom(6).hex(), 'project': 'e2e-oa'},
+        extract=openai_adapter.extract_text_fields_openai)
+    wire = _wire_text(openai_body)
+    assert meta['redaction'] == 'redacted'
+    assert str(ssn_num) not in wire and str(card_num) not in wire
+    args = openai_body['messages'][0]['tool_calls'][0]['function']['arguments']
+    assert isinstance(args['ssn'], str) and args['ssn'].startswith('<')
+    resp = {'choices': [{'message': {'tool_calls': [{'function': {'arguments': args}}]}}]}
+    openai_adapter.rehydrate_openai_response(resp, replay)
+    out_args = resp['choices'][0]['message']['tool_calls'][0]['function']['arguments']
+    assert out_args['ssn'] == str(ssn_num)
+    assert out_args['card'] == str(card_num)
+
+    responses_body = {
+        'model': 'gpt-test',
+        'input': [{'type': 'function_call', 'call_id': 'call_2', 'name': 'lookup_case',
+                   'arguments': {'ssn': ssn_num, 'card': card_num}}],
+    }
+    meta, replay = _run_redact(
+        monkeypatch, responses_body, _make_neural({}),
+        ctx={'session': 'sess-resp-native-num-' + os.urandom(6).hex(), 'project': 'e2e-resp'},
+        extract=egress_proxy.responses_adapter.extract_text_fields_responses)
+    wire = _wire_text(responses_body)
+    assert meta['redaction'] == 'redacted'
+    assert str(ssn_num) not in wire and str(card_num) not in wire
+    resp_args = responses_body['input'][0]['arguments']
+    restored_resp = {'output': [{'type': 'function_call', 'arguments': resp_args}]}
+    egress_proxy.responses_adapter.rehydrate_responses_response(restored_resp, replay)
+    assert restored_resp['output'][0]['arguments']['ssn'] == str(ssn_num)
+    assert restored_resp['output'][0]['arguments']['card'] == str(card_num)
+
+
+@_NEEDS_PROXY
+def test_anthropic_document_text_blocks_are_scanned(monkeypatch):
+    email = 'document.text@example.test'
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': [
+        {'type': 'document', 'source': {'type': 'text', 'media_type': 'text/plain',
+                                        'data': f'Contact {email}.'}},
+    ]}]}
+
+    meta, replay = _run_redact(monkeypatch, body, _make_neural({}))
+
+    wire = _wire_text(body)
+    assert meta['redaction'] == 'redacted'
+    assert email not in wire
+    assert email in replay.values()
+    assert '<EMAIL_' in wire
+
+
+@_NEEDS_PROXY
+def test_tool_schema_descriptions_are_scanned_without_rewriting_tool_names(monkeypatch):
+    email = 'schema.owner@example.test'
+    anth = {
+        'model': 'claude-test',
+        'tools': [{'name': 'lookup_case', 'description': f'Use for {email}.',
+                   'input_schema': {'type': 'object', 'properties': {'case_id': {'type': 'string'}}}}],
+        'messages': [{'role': 'user', 'content': 'Continue.'}],
+    }
+    meta, replay = _run_redact(monkeypatch, anth, _make_neural({}))
+    wire = _wire_text(anth)
+    assert meta['redaction'] == 'redacted'
+    assert email not in wire
+    assert anth['tools'][0]['name'] == 'lookup_case'
+    assert email in replay.values()
+
+    openai_body = {
+        'model': 'gpt-test',
+        'tools': [{'type': 'function', 'function': {
+            'name': 'lookup_case',
+            'description': f'Use for {email}.',
+            'parameters': {'type': 'object', 'properties': {'case_id': {'type': 'string'}}},
+        }}],
+        'messages': [{'role': 'user', 'content': 'Continue.'}],
+    }
+    meta, replay = _run_redact(
+        monkeypatch, openai_body, _make_neural({}),
+        ctx={'session': 'sess-schema-' + os.urandom(6).hex(), 'project': 'e2e-oa'},
+        extract=openai_adapter.extract_text_fields_openai)
+    wire = _wire_text(openai_body)
+    assert meta['redaction'] == 'redacted'
+    assert email not in wire
+    assert openai_body['tools'][0]['function']['name'] == 'lookup_case'
+    assert email in replay.values()
+
+
+def test_tool_schema_numeric_constraints_not_corrupted(monkeypatch):
+    # Regression for the LIVE 400 ("tools.N.input_schema ... must match JSON Schema draft 2020-12"): the A1
+    # numeric scanning must NOT reach into a tool/function SCHEMA and rewrite a numeric constraint
+    # (default/minimum/maximum/enum) into a placeholder string. Schema STRING descriptions stay scanned; only
+    # numerics in schema scope are exempt (in_schema guard + 'input_schema' as a schema-entry key).
+    def _schema():
+        return {'type': 'object',
+                'properties': {'limit': {'type': 'integer', 'default': 100000000, 'maximum': 99999999, 'minimum': 1},
+                               'codes': {'type': 'integer', 'enum': [46454286, 581653612]}},
+                'required': ['limit']}
+    anth = {'model': 'claude-test',
+            'tools': [{'name': 'lookup', 'description': 'Search the ledger.', 'input_schema': _schema()}],
+            'messages': [{'role': 'user', 'content': 'Continue.'}]}
+    _run_redact(monkeypatch, anth, _make_neural({}))
+    assert anth['tools'][0]['input_schema'] == _schema()   # numeric constraints + numeric enum untouched
+
+    openai_body = {'model': 'gpt-test',
+                   'tools': [{'type': 'function', 'function': {
+                       'name': 'lookup', 'description': 'Search.', 'parameters': _schema()}}],
+                   'messages': [{'role': 'user', 'content': 'Continue.'}]}
+    _run_redact(monkeypatch, openai_body, _make_neural({}),
+                ctx={'session': 'sess-num-' + os.urandom(6).hex(), 'project': 'e2e-oa'},
+                extract=openai_adapter.extract_text_fields_openai)
+    assert openai_body['tools'][0]['function']['parameters'] == _schema()
+
+
+def test_openai_metadata_redacted_parity_with_responses(monkeypatch):
+    """Adapter-parity leak (leak-hunt): top-level `metadata` (the Chat Completions free-form developer map of
+    up to 16 string pairs) was forwarded RAW on /v1/chat/completions while the Responses path redacted it. A
+    PII value in metadata must now be redacted on the OpenAI path too -- parity with the Responses adapter."""
+    body = {'model': 'gpt-test',
+            'messages': [{'role': 'user', 'content': 'Continue.'}],
+            'metadata': {'requested_by': 'marie.gagnon@example.com', 'note': 'flagged by Jean Tremblay'}}
+    _run_redact(monkeypatch, body, _make_neural({'Jean Tremblay': 'person'}),
+                ctx={'session': 'sess-md-' + os.urandom(6).hex(), 'project': 'e2e-oa'},
+                extract=openai_adapter.extract_text_fields_openai)
+    wire = _wire_text(body)
+    assert 'marie.gagnon@example.com' not in wire, 'metadata email must be redacted on the openai chat path'
+    assert 'Jean Tremblay' not in wire, 'metadata person must be redacted on the openai chat path'
+
+
+def test_openai_message_name_field_redacted_but_function_name_preserved(monkeypatch):
+    """Leak-hunt #1: the optional participant `name` on a user/assistant message is free-form metadata that can
+    carry PII -- it was forwarded RAW to api.openai.com. It must now be scanned. But `name` on a role:function /
+    role:tool message is the tool IDENTIFIER the API routes on and MUST pass through verbatim (never redacted)."""
+    body = {'model': 'gpt-test',
+            'messages': [
+                {'role': 'user', 'name': 'Jean Tremblay', 'content': 'Please look up my order.'},
+                {'role': 'function', 'name': 'get_order_status', 'content': 'status: shipped'},
+            ]}
+    _run_redact(monkeypatch, body, _make_neural({'Jean Tremblay': 'person'}),
+                ctx={'session': 'sess-nm-' + os.urandom(6).hex(), 'project': 'e2e-oa'},
+                extract=openai_adapter.extract_text_fields_openai)
+    wire = _wire_text(body)
+    assert 'Jean Tremblay' not in wire, 'participant name on a user message must be redacted'
+    assert body['messages'][1]['name'] == 'get_order_status', 'function-role name is a routing id, never redacted'
+
+
+# --- adapter-leak-hunt confirmed gaps (verified against the real API schemas) ---
+def test_anthropic_thinking_block_redacted(monkeypatch):
+    """Leak-hunt: extended-thinking blocks are rehydrated on the response, so a multi-turn client re-sends a
+    thinking block carrying REAL PII. The 'thinking' field must be scanned; the 'signature' must NOT be touched."""
+    body = {'model': 'claude-x', 'messages': [
+        {'role': 'assistant', 'content': [
+            {'type': 'thinking', 'thinking': 'Per the record the user email is nadia.roy@example.com.', 'signature': 'sig-abc-123'},
+            {'type': 'text', 'text': 'Done.'}]}]}
+    _run_redact(monkeypatch, body, _make_neural({}))
+    assert 'nadia.roy@example.com' not in _wire_text(body), 'PII in an extended-thinking block must be redacted'
+    assert body['messages'][0]['content'][0]['signature'] == 'sig-abc-123', 'thinking signature must be untouched'
+
+
+def test_anthropic_top_level_metadata_redacted(monkeypatch):
+    """Leak-hunt: Anthropic top-level metadata (e.g. user_id) was forwarded RAW -- parity with the OpenAI path."""
+    body = {'model': 'claude-x', 'messages': [{'role': 'user', 'content': 'hi'}],
+            'metadata': {'user_id': 'contact nadia.roy@example.com'}}
+    _run_redact(monkeypatch, body, _make_neural({}))
+    assert 'nadia.roy@example.com' not in _wire_text(body), 'PII in top-level metadata must be redacted'
+
+
+def test_anthropic_server_tool_use_input_redacted(monkeypatch):
+    body = {'model': 'claude-x', 'messages': [{'role': 'assistant', 'content': [
+        {'type': 'server_tool_use', 'id': 'srv_1', 'name': 'web_search',
+         'input': {'query': 'records for nadia.roy@example.com'}}]}]}
+    _run_redact(monkeypatch, body, _make_neural({}))
+    assert 'nadia.roy@example.com' not in _wire_text(body), 'PII in a server_tool_use query must be redacted'
+
+
+def test_openai_response_format_schema_literal_redacted(monkeypatch):
+    body = {'model': 'gpt', 'messages': [{'role': 'user', 'content': 'go'}],
+            'response_format': {'type': 'json_schema', 'json_schema': {'name': 'r', 'schema': {
+                'type': 'object', 'properties': {'note': {'type': 'string', 'description': 'flag nadia.roy@example.com'}}}}}}
+    _run_redact(monkeypatch, body, _make_neural({}), extract=openai_adapter.extract_text_fields_openai)
+    assert 'nadia.roy@example.com' not in _wire_text(body), 'PII in a response_format json_schema literal must be redacted'
+
+
+def test_openai_user_field_redacted(monkeypatch):
+    body = {'model': 'gpt', 'messages': [{'role': 'user', 'content': 'go'}], 'user': 'nadia.roy@example.com'}
+    _run_redact(monkeypatch, body, _make_neural({}), extract=openai_adapter.extract_text_fields_openai)
+    assert 'nadia.roy@example.com' not in _wire_text(body), 'a PII-shaped top-level user id must be redacted'
+
+
+def test_openai_prediction_content_redacted(monkeypatch):
+    body = {'model': 'gpt', 'messages': [{'role': 'user', 'content': 'go'}],
+            'prediction': {'type': 'content', 'content': 'draft reply to nadia.roy@example.com'}}
+    _run_redact(monkeypatch, body, _make_neural({}), extract=openai_adapter.extract_text_fields_openai)
+    assert 'nadia.roy@example.com' not in _wire_text(body), 'PII in prediction.content must be redacted'
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +1259,22 @@ def test_degraded_route_fails_closed(monkeypatch):
 
 
 @_NEEDS_PROXY
+def test_healthz_sanitizes_gate_url(monkeypatch):
+    monkeypatch.setattr(
+        egress_proxy,
+        'GATE_URL',
+        'http://user:secret@127.0.0.1:8001/tokens/raw-secret/detect?token=raw#frag',
+    )
+
+    payload = egress_proxy.healthz()
+
+    assert payload['gate'] == 'http://127.0.0.1:8001'
+    assert 'secret' not in json.dumps(payload, ensure_ascii=False)
+    assert 'token=raw' not in json.dumps(payload, ensure_ascii=False)
+    assert 'raw-secret' not in json.dumps(payload, ensure_ascii=False)
+
+
+@_NEEDS_PROXY
 def test_degraded_set_when_ner_only_field_and_gate_down(monkeypatch):
     """An NER-only name (no Tier-0 fallback) in a SHORT field, with the gate unreachable, must mark the request
     degraded -- so the route fails closed rather than forwarding the unmasked name. Pre-fix the field passed raw and
@@ -778,6 +1288,25 @@ def test_degraded_set_when_ner_only_field_and_gate_down(monkeypatch):
     assert meta.get('degraded') is True, 'a scanned field with the gate down must mark the request degraded'
     # and the route gate would refuse to forward this body (still carrying the raw NER-only name)
     assert egress_proxy._degraded_block(meta) is not None, 'a degraded NER-only request must fail closed'
+
+
+@_NEEDS_PROXY
+def test_carrier_gate_error_marks_degraded(monkeypatch):
+    """A8 regression: carrier scan None is a gate error, not the same as no person found."""
+    name = 'Priya McCallum'
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': name}]}
+
+    async def carrier_down(aclient, text, min_score=0.5):
+        if text.startswith('The customer is '):
+            return None
+        return []
+
+    meta, replay = _run_redact(monkeypatch, body, carrier_down)
+
+    assert meta.get('degraded') is True
+    assert egress_proxy._degraded_block(meta) is not None
+    assert name in _wire_text(body)
+    assert replay == {}
 
 
 # ---------------------------------------------------------------------------
@@ -857,6 +1386,42 @@ def test_openai_adapter_extract_rehydrate_lossless():
 
 
 @_NEEDS_PROXY
+def test_nonstreaming_route_rehydrate_is_single_pass_for_placeholder_shaped_values():
+    replay = {'<SECRET_001>': 'tok_<EMAIL_001>_x', '<EMAIL_001>': 'alice@example.test'}
+    upstream = _FakeUpstreamResponse(
+        200,
+        {'content-type': 'application/json'},
+        json.dumps({'content': [{'type': 'text', 'text': 'secret=<SECRET_001> email=<EMAIL_001>'}]}).encode('utf-8'),
+    )
+
+    resp = egress_proxy._finalize_upstream_response(upstream, replay, egress_proxy.rehydrate_anthropic_response)
+    payload = _json_response_payload(resp)
+
+    assert payload['content'][0]['text'] == 'secret=tok_<EMAIL_001>_x email=alice@example.test'
+
+
+@_NEEDS_PROXY
+def test_map_eviction_of_current_body_placeholder_is_reported(monkeypatch):
+    monkeypatch.setitem(egress_proxy.EntityMap.placeholder_for.__globals__, 'MAX_ENTITIES', 1)
+    body = {
+        'model': 'claude-test',
+        'messages': [{'role': 'user', 'content': 'Email first.eviction@example.test and second.eviction@example.test.'}],
+    }
+
+    meta, replay = _run_redact(
+        monkeypatch, body, _make_neural({}),
+        ctx={'session': 'sess-evict-' + os.urandom(6).hex(), 'project': 'e2e-evict'})
+
+    wire = _wire_text(body)
+    assert 'first.eviction@example.test' not in wire
+    assert 'second.eviction@example.test' not in wire
+    assert meta.get('map_evicted_present_count') == 1
+    assert meta.get('map_evicted_present') == ['<EMAIL_001>']
+    assert '<EMAIL_001>' not in replay
+    assert replay.get('<EMAIL_002>') == 'second.eviction@example.test'
+
+
+@_NEEDS_PROXY
 def test_anthropic_and_openai_json_rehydrate_restore_keys_and_duplicates():
     key_ph = '<EMAIL_001>'
     val_ph1 = '<PERSON_001>'
@@ -899,6 +1464,34 @@ def test_openai_stream_split_multi_underscore_placeholder_rehydrates():
     assert '<SENSITIVE_ACCOUNT' not in r1, 'partial multi-underscore placeholder must be buffered'
     assert value in combined, 'split multi-underscore placeholder must rehydrate once complete'
     assert not _PH_RE.search(combined), 'no full placeholder may survive OpenAI stream rehydration'
+
+
+def test_anthropic_stream_split_placeholder_rehydrates():
+    """Anthropic streaming -- the path Claude Code (the primary client) uses -- can split a multi-underscore
+    placeholder across content_block text deltas. The partial must be held until complete, then the full value
+    rehydrates, and no placeholder (full OR the distinctive partial) may survive on the wire to the user."""
+    value = 'Dossier-QX77182'
+    replay = {'<SENSITIVE_ACCOUNT_ID_001>': value}
+    carry, block_type, json_acc = {}, {}, {}
+
+    def ev(obj):
+        return b'event: ' + obj['type'].encode('utf-8') + b'\ndata: ' + json.dumps(obj).encode('utf-8')
+
+    events = [
+        ev({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text'}}),
+        ev({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'Case <SENSITIVE_ACCOUNT'}}),
+        ev({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': '_ID_001> is ready.'}}),
+        ev({'type': 'content_block_stop', 'index': 0}),
+    ]
+    outs = []
+    for e in events:
+        r = egress_proxy._transform_event(e, replay, carry, block_type, json_acc)
+        outs.append(r.decode('utf-8') if r else '')
+    combined = ''.join(outs)
+
+    assert '<SENSITIVE_ACCOUNT' not in outs[1], 'partial placeholder in the first delta must be buffered, not emitted raw'
+    assert value in combined, 'split placeholder must rehydrate once complete'
+    assert '<SENSITIVE' not in combined, 'no placeholder (full or partial) may survive Anthropic stream rehydration'
 
 
 # ---------------------------------------------------------------------------
@@ -954,3 +1547,187 @@ def test_carrier_booster_does_not_fire_on_non_name_short_value(monkeypatch):
     meta, replay = _run_redact(monkeypatch, body, _name_only_in_carrier(['Priya McCallum']))
     assert 'active' in _wire_text(body), 'a non-name short value must not be redacted by the booster'
     assert meta['redaction'] in ('scanned-clean', 'skip')
+
+
+# ---------------------------------------------------------------------------
+# Allowlist (the do-not-redact dictionary): user-declared known-safe values pass through verbatim, but
+# SECRETS are never allowlist-exempt (ALWAYS_REDACT stays non-negotiable).
+# ---------------------------------------------------------------------------
+def test_allowlist_passes_user_values_through_but_never_secrets(monkeypatch):
+    import allowlist as al
+    # the user declared their own email + a token safe; the gate must never exempt a SECRET label though.
+    monkeypatch.setattr(egress_proxy, 'current_allowlist',
+                        lambda: al.build_allow_set(['alex@example.com', 'hunter2']))
+
+    async def neural(client, text, min_score=0.5):
+        spans = []
+        for val, lab in [('hunter2', 'password'), ('Jane Doe', 'person')]:
+            i = text.find(val)
+            if i >= 0:
+                spans.append({'start': i, 'end': i + len(val), 'label': lab, 'tier': 1, 'conf': 0.95,
+                              'rule': 'neural'})
+        return spans
+
+    body = {'model': 'claude-test', 'messages': [
+        {'role': 'user', 'content': 'Email alex@example.com, password hunter2, signed Jane Doe.'}]}
+    meta, replay = _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    # allowlisted, non-secret -> passes through verbatim (never minted)
+    assert 'alex@example.com' in wire, 'an allowlisted email must pass through un-redacted'
+    # allowlisted BUT a secret label -> still redacted (the floor stays non-negotiable)
+    assert 'hunter2' not in wire, 'a SECRET must be redacted even when allowlisted'
+    # not allowlisted -> normal redaction still happens
+    assert 'Jane Doe' not in wire, 'a non-allowlisted name must still be redacted'
+    assert _PH_RE.search(wire), 'placeholders present for the redacted values'
+
+
+def test_allowlisted_name_in_path_not_case_mangled(monkeypatch):
+    """The case-mangle fix via allowlist: an allowlisted lowercase name in a file path is never redacted,
+    so it is never swept onto a capitalized person placeholder -> the path round-trips unchanged."""
+    import allowlist as al
+    monkeypatch.setattr(egress_proxy, 'current_allowlist', lambda: al.build_allow_set(['alex']))
+
+    async def neural(client, text, min_score=0.5):
+        # the model flags the capitalized prose name as person; the lowercase path token must NOT be minted
+        spans = []
+        i = text.find('Alex')
+        if i >= 0:
+            spans.append({'start': i, 'end': i + 4, 'label': 'person', 'tier': 1, 'conf': 0.9, 'rule': 'neural'})
+        return spans
+
+    body = {'model': 'claude-test', 'messages': [
+        {'role': 'user', 'content': "I'm Alex; open /home/alex/dev/x"}]}
+    _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    assert '/home/alex/dev/x' in wire, 'allowlisted name keeps the lowercase path intact (no /home/Alex)'
+    assert 'Alex' in wire, 'the allowlisted prose name also passes through'
+
+
+def test_allowlist_never_exempts_the_hard_floor(monkeypatch):
+    """Defense-in-depth: even if a user puts a real payment card / IBAN value in their allowlist, the hard
+    deterministic floor (FLOOR_NEVER_EXEMPT = credentials + card/account/government/tax/DOB) STILL redacts
+    it. The allowlist is for soft identifiers (name / email / file paths) only -- a user must not be able to
+    wave real money/identity values past the firewall, deliberately or by accident."""
+    import allowlist as al
+    card = '4111111111111111'        # Luhn-valid synthetic Visa test number
+    iban = 'GB82WEST12345698765432'  # RFC mod-97-valid example IBAN
+    # the user (mistakenly or maliciously) tries to allowlist a real card + IBAN alongside their own email
+    monkeypatch.setattr(egress_proxy, 'current_allowlist',
+                        lambda: al.build_allow_set([card, iban, 'alex@example.com']))
+
+    async def neural(client, text, min_score=0.5):
+        return []  # floor-only: card + IBAN are Tier-0 deterministic, need no neural pass
+
+    body = {'model': 'claude-test', 'messages': [
+        {'role': 'user', 'content': f'card {card} iban {iban} email alex@example.com'}]}
+    _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    assert card not in wire, 'an allowlisted payment card MUST still be redacted (hard floor, non-exemptable)'
+    assert iban not in wire, 'an allowlisted IBAN MUST still be redacted (hard floor, non-exemptable)'
+    assert 'alex@example.com' in wire, 'a soft identifier (email) the user allowlisted still passes through'
+
+
+def test_merge_relabel_cannot_strip_the_floor_via_allowlist(monkeypatch):
+    """ADVERSARIAL regression (floor-stickiness, 2026-06-20 audit): the model over-tags a real payment card
+    as a HIGHER-confidence 'person'. Pre-fix, merge_spans relabeled the card cluster to person (0.99 > 0.97
+    card floor), and the label-based allowlist drop then forwarded the RAW card when the user had allowlisted
+    that exact value. Floor-sticky merge keeps the payment_card label, so the allowlist can never exempt it."""
+    import allowlist as al
+    card = '4111111111111111'  # Luhn-valid synthetic Visa
+    monkeypatch.setattr(egress_proxy, 'current_allowlist', lambda: al.build_allow_set([card]))
+
+    async def neural(client, text, min_score=0.5):
+        i = text.find(card)
+        return ([{'start': i, 'end': i + len(card), 'label': 'person', 'tier': 2, 'conf': 0.99, 'rule': 'gpu'}]
+                if i >= 0 else [])
+
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': f'card on file {card} thanks'}]}
+    _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    assert card not in wire, 'a card relabeled person by a higher-conf overlap MUST still redact (floor sticky)'
+
+
+def test_merge_relabel_cannot_strip_the_floor_under_off_mode(monkeypatch, tmp_path):
+    """Same merge-relabel attack, no allowlist, under mode=off: 'off' is a soft-PII escape hatch, but the
+    deterministic floor must still redact. Pre-fix the card-tagged-person passed as soft PII under off."""
+    p = tmp_path / 'mode'
+    p.write_text('off\n')
+    monkeypatch.setattr(egress_proxy, '_MODE_FILE', str(p))
+    card = '4111111111111111'
+
+    async def neural(client, text, min_score=0.5):
+        i = text.find(card)
+        return ([{'start': i, 'end': i + len(card), 'label': 'person', 'tier': 2, 'conf': 0.99, 'rule': 'gpu'}]
+                if i >= 0 else [])
+
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': f'card {card} please'}]}
+    _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    assert card not in wire, 'under off mode a card mis-tagged person MUST still redact (floor sticky + policy floor)'
+
+
+def test_denylist_redacts_a_term_the_model_misses(monkeypatch):
+    """The always-redact dictionary catches a user term (a project codename) the neural model never flags."""
+    import denylist as dl
+    monkeypatch.setattr(egress_proxy, 'current_denylist', lambda: dl.compile_denylist(['Project Bluebird']))
+
+    async def neural(client, text, min_score=0.5):
+        return []   # model misses the codename entirely
+
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'ship Project Bluebird tonight'}]}
+    _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    assert 'Project Bluebird' not in wire, 'a declared always-redact term MUST redact even if the model misses it'
+    assert '<CUSTOM_' in wire, 'the denylist hit mints a <CUSTOM_n> placeholder'
+
+
+def test_denylist_redacts_under_off_mode(monkeypatch, tmp_path):
+    """Always-redact terms are force-redacted even when mode is 'off' (off is a soft-PII escape hatch; a
+    user-declared must-redact term is not soft and must not be releasable)."""
+    import denylist as dl
+    monkeypatch.setattr(egress_proxy, 'current_denylist', lambda: dl.compile_denylist(['Bluebird']))
+    mf = tmp_path / 'mode'
+    mf.write_text('off\n')
+    monkeypatch.setattr(egress_proxy, '_MODE_FILE', str(mf))
+
+    async def neural(client, text, min_score=0.5):
+        return []
+
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'the Bluebird launch'}]}
+    _run_redact(monkeypatch, body, neural)
+    assert 'Bluebird' not in _wire_text(body), 'a denylist term must redact even under off mode'
+
+
+def test_denylist_wins_over_allowlist(monkeypatch):
+    """If the same term is in BOTH lists, ALWAYS-redact WINS (denylist is injected after the allowlist filter)."""
+    import denylist as dl
+    import allowlist as al
+    monkeypatch.setattr(egress_proxy, 'current_denylist', lambda: dl.compile_denylist(['Falcon']))
+    monkeypatch.setattr(egress_proxy, 'current_allowlist', lambda: al.build_allow_set(['Falcon']))
+
+    async def neural(client, text, min_score=0.5):
+        return []
+
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'codename Falcon ready'}]}
+    _run_redact(monkeypatch, body, neural)
+    assert 'Falcon' not in _wire_text(body), 'a term in both lists must be redacted (always-redact wins)'
+
+
+def test_egress_redacts_real_secret_shapes_floor_only(monkeypatch):
+    """End-to-end through the proxy: real-shaped API keys in a plain message body AND a tool_result are
+    caught by the deterministic secret floor and never reach the wire -- with the neural model contributing
+    NOTHING. Proves the always-on secret floor (egress_proxy line: tier0 + secret_spans) stands alone."""
+    akia = 'AKIA' + 'IOSFODNN7EXAMPLE'              # synthetic AWS access key shape
+    antk = 'sk-ant-' + 'A1b2C3d4E5f6G7h8I9j0K1l2'   # synthetic anthropic key shape
+
+    async def neural(client, text, min_score=0.5):
+        return []  # the model finds nothing; the floor alone must redact both secrets
+
+    body = {'model': 'claude-test', 'messages': [
+        {'role': 'user', 'content': f'deploy with {akia}'},
+        {'role': 'user', 'content': [{'type': 'tool_result', 'content': f'env had {antk} set'}]}]}
+    _run_redact(monkeypatch, body, neural)
+    wire = _wire_text(body)
+    assert akia not in wire, 'an AWS access key must be redacted by the always-on secret floor'
+    assert antk not in wire, 'an anthropic key in a tool_result must be redacted by the secret floor'
+    assert _PH_RE.search(wire), 'placeholders present for the redacted secrets'

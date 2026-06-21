@@ -18,6 +18,18 @@
     "expect": [{ "label": "iban", "value": "GB82 WEST 1234 5698 7654 32" }]
   },
   {
+    "id": "iban_mod97_valid_lowercase",
+    "note": "Same canonical GB82 IBAN in lowercase. All surfaces must match case-insensitively and validate after uppercasing.",
+    "text": "Solde sur IBAN gb82west12345698765432 confirme.",
+    "expect": [{ "label": "iban", "value": "gb82west12345698765432" }]
+  },
+  {
+    "id": "iban_mod97_valid_hyphenated",
+    "note": "Same canonical GB82 IBAN with hyphen separators. All surfaces must strip hyphens for mod-97 validation while preserving original offsets.",
+    "text": "Solde sur IBAN GB82-WEST-1234-5698-7654-32 confirme.",
+    "expect": [{ "label": "iban", "value": "GB82-WEST-1234-5698-7654-32" }]
+  },
+  {
     "id": "card_luhn_valid_16",
     "note": "Luhn-VALID 16-digit Visa test number -- floor:card. A drift in _luhn_ok / luhnOk or the 15/16-digit gate drops this. Public Luhn test vector, not a real card.",
     "text": "Paiement par carte 4539148803436467 approuve.",
@@ -53,5 +65,69 @@
     "note": "8-4-4-4-12 hex UUID -- floor:uuid, emitted as sensitive_account_id on all three (UUID_RE is byte-identical). Synthetic id, never occurs by accident in prose.",
     "text": "Session ID 446062b5-366a-4a17-d308-8a7cb0524be4 ouverte.",
     "expect": [{ "label": "sensitive_account_id", "value": "446062b5-366a-4a17-d308-8a7cb0524be4" }]
+  },
+  {
+    "id": "cue_person_mailbox",
+    "note": "RFC5322 display-name mailbox: a strong email anchor makes the adjacent personal name deterministic enough for the shared floor. Synthetic name/email.",
+    "text": "From: Olivier Tremblay <olivier.tremblay@example.org>",
+    "expect": [
+      { "label": "person", "value": "Olivier Tremblay" },
+      { "label": "email", "value": "olivier.tremblay@example.org" }
+    ]
+  },
+  {
+    "id": "cue_person_role_mailbox_suppressed",
+    "note": "Role/distribution mailbox display names must not become person spans even though the email anchor is present.",
+    "text": "Support <support@example.org>",
+    "expect": [{ "label": "email", "value": "support@example.org" }],
+    "suppress": ["person"]
+  },
+  {
+    "id": "card_luhn_zero_width",
+    "note": "HARDENING (2026-06-20 sweep): a Luhn card broken by zero-width (Cf) chars must still redact on every surface -- the Cf-strip + re-scan was mirrored to appliance/gate/TS. Synthetic Luhn test card.",
+    "text": "Paiement par carte 4539​1488​0343​6467 approuve.",
+    "expect": [{ "label": "payment_card", "value": "4539148803436467", "digits_only": true }]
+  },
+  {
+    "id": "card_luhn_dot_grouped",
+    "note": "HARDENING: dot-grouped 4-4-4-4 Luhn card (separatedCardSpans) -- all three surfaces redact; a non-Luhn dotted run is rejected (covered by the appliance unit tests).",
+    "text": "Paiement par carte 4539.1488.0343.6467 approuve.",
+    "expect": [{ "label": "payment_card", "value": "4539148803436467", "digits_only": true }]
+  },
+  {
+    "id": "card_luhn_tab_grouped",
+    "note": "HARDENING: TAB (control / Cc whitespace) separated Luhn card -- the control-whitespace separator class must redact identically everywhere.",
+    "text": "Paiement par carte 4539\t1488\t0343\t6467 approuve.",
+    "expect": [{ "label": "payment_card", "value": "4539148803436467", "digits_only": true }]
+  },
+  {
+    "id": "iban_zero_width",
+    "note": "HARDENING: a mod-97-valid IBAN broken by zero-width (Cf) chars must still emit one iban span on every surface.",
+    "text": "Solde sur IBAN GB82​WEST​1234​5698​7654​32 confirme.",
+    "expect": [{ "label": "iban", "value": "GB82WEST12345698765432", "digits_only": true }]
+  },
+  {
+    "id": "sin_glued_letter_luhn",
+    "note": "HARDENING: a Luhn-valid SIN glued to a letter run (no separators) -- the glued-digit-run rule promotes it to government_id on all three surfaces. Synthetic Luhn SIN.",
+    "text": "Reference dossier Client046454286 transmise.",
+    "expect": [{ "label": "government_id", "value": "046454286", "digits_only": true }]
+  },
+  {
+    "id": "sin_luhn_tab_with_cue",
+    "note": "HARDENING: TAB-separated SIN under a NAS cue -- control-whitespace must not defeat the cued government_id floor.",
+    "text": "NAS du client: 046\t454\t286 au dossier.",
+    "expect": [{ "label": "government_id", "value": "046454286", "digits_only": true }]
+  },
+  {
+    "id": "cvv_with_cue",
+    "note": "HARDENING: card_cvv now has a cue-anchored Tier-0 floor on every surface (a stray 3-digit number stays clean -- covered by the appliance unit tests).",
+    "text": "Code cvv 123 au verso de la carte.",
+    "expect": [{ "label": "card_cvv", "value": "123", "digits_only": true }]
+  },
+  {
+    "id": "expiry_with_cue",
+    "note": "HARDENING: card_expiry has a cue-anchored Tier-0 floor on every surface (a bare MM/YY date without a cue stays clean).",
+    "text": "Date expiry 08/27 sur la carte.",
+    "expect": [{ "label": "card_expiry", "value": "08/27", "digits_only": true }]
   }
 ]

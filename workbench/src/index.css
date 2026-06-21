@@ -1,17 +1,25 @@
 @import 'tailwindcss';
 
+/* Class-based dark mode: `dark:` utilities apply when an ancestor (we use <html>) carries `.dark`.
+   Theme is toggled by src/lib/theme.ts; default follows the OS preference. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ===== Design tokens ===== */
+/* @theme holds the LIGHT defaults (so :root = light, and Tailwind emits bg-surface/text-text/... utilities
+   from these). The .dark block below overrides every token with the dark value, so both the var-styled
+   workbench and the token/utility-styled console switch together off the single `.dark` class. */
 @theme {
-  --color-bg: #0f0f0f;
-  --color-black: #050505;
-  --color-surface: #191919;
-  --color-card: #1a1a1a;
-  --color-teal: #4ecdb8;
-  --color-teal-light: #6fd9c7;
-  --color-teal-dim: #3aa89a;
-  --color-text: #e8e8e8;
-  --color-muted: #9ca3af;
-  --color-light: #6b7280;
+  --color-bg: #f6f7f8;
+  --color-black: #ffffff;
+  --color-surface: #ffffff;
+  --color-card: #ffffff;
+  --color-teal: #0d9488;
+  --color-teal-light: #14b8a6;
+  --color-teal-dim: #0f766e;
+  --color-text: #1a1d21;
+  --color-heading: #0b0d10;
+  --color-muted: #6b7280;
+  --color-light: #9ca3af;
   --color-success: #10b981;
   --color-error: #ef4444;
   --color-warning: #f59e0b;
@@ -22,9 +30,28 @@
 }
 
 :root {
+  --border: rgba(0, 0, 0, 0.10);
+  --border-mid: rgba(0, 0, 0, 0.16);
+  --glass: rgba(0, 0, 0, 0.03);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
+}
+
+.dark {
+  --color-bg: #0f0f0f;
+  --color-black: #050505;
+  --color-surface: #191919;
+  --color-card: #1a1a1a;
+  --color-teal: #4ecdb8;
+  --color-teal-light: #6fd9c7;
+  --color-teal-dim: #3aa89a;
+  --color-text: #e8e8e8;
+  --color-heading: #ffffff;
+  --color-muted: #9ca3af;
+  --color-light: #6b7280;
   --border: rgba(255, 255, 255, 0.08);
   --border-mid: rgba(255, 255, 255, 0.12);
   --glass: rgba(255, 255, 255, 0.045);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
 }
 
 * {
@@ -55,7 +82,7 @@ h4 {
   font-weight: 800;
   line-height: 1.1;
   letter-spacing: -0.02em;
-  color: #fff;
+  color: var(--color-heading);
   margin: 0;
 }
 
@@ -145,7 +172,7 @@ h4 {
   border-radius: 0;
 }
 .tok-selected {
-  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--tok-color, var(--color-teal));
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--tok-color, var(--color-teal));
 }
 
 /* thin scrollbars to match the dark UI */
@@ -154,7 +181,7 @@ h4 {
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--scrollbar-thumb);
   border-radius: 6px;
 }
 *::-webkit-scrollbar-track {

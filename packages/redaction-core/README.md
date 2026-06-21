@@ -45,7 +45,7 @@ npm run build   # emits dist/ via tsup (ESM + .d.ts)
 ## Test
 
 ```
-npm test        # vitest run (83 unit tests)
+npm test        # vitest run (unit tests: tier0, redaction, parity, allow/denylist)
 ```
 
 ## License

@@ -17,7 +17,7 @@ export default function Header() {
           </svg>
         </span>
         <div className="leading-none">
-          <div style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 17, color: '#fff', letterSpacing: '-.02em' }}>
+          <div style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 17, color: 'var(--color-heading)', letterSpacing: '-.02em' }}>
             OSSRedact Workbench
           </div>
         </div>

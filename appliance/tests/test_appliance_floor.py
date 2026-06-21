@@ -44,6 +44,11 @@ def test_appliance_iban_with_internal_spaces():
     assert ('iban', 'GB82 WEST 1234 5698 7654 32') in labset('IBAN GB82 WEST 1234 5698 7654 32 .')
 
 
+def test_appliance_iban_lowercase_and_hyphenated():
+    assert ('iban', 'gb82west12345698765432') in labset('IBAN gb82west12345698765432 .')
+    assert ('iban', 'GB82-WEST-1234-5698-7654-32') in labset('IBAN GB82-WEST-1234-5698-7654-32 .')
+
+
 # ---- Finding A: Business Number suppression + SIN-cue override ----
 def test_appliance_suppresses_business_number():
     assert 'government_id' not in labels('TPS 046454286 RT0001')

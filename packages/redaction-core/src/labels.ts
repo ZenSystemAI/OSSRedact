@@ -44,6 +44,17 @@ const CATASTROPHIC = new Set<string>([
   'name', 'sensitive_date', 'manual',
 ])
 
+// The HARD FLOOR: credential + money/government/identity labels that are NEVER allowlist-exempt and are
+// force-redacted in every mode. Mirrors the Python gate's privacy_gate.FLOOR_LABELS 1:1 (detector-twin
+// parity). NOTE this is a STRICT SUBSET of CATASTROPHIC -- soft catastrophic labels (person, email,
+// address) are redact-by-default but CAN be allowlisted/turned off; the floor labels here cannot.
+export const FLOOR_LABELS: ReadonlySet<string> = new Set<string>([
+  'secret', 'password', 'api_key', 'access_token',
+  'payment_card', 'card_cvv', 'card_expiry',
+  'sensitive_account_id', 'bank_account', 'account_number', 'iban', 'routing_number',
+  'government_id', 'tax_id', 'date_of_birth',
+])
+
 export function labelMeta(label: string): LabelMeta {
   return LABEL_REGISTRY[label] ?? { ...FALLBACK, en: prettify(label), fr: prettify(label) }
 }

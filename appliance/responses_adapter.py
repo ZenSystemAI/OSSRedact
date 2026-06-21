@@ -92,10 +92,20 @@ class Field:
 
     @property
     def text(self):
-        return self.container[self.key]
+        value = self.container[self.key]
+        return str(value) if _is_scan_number(value) else value
 
     def write(self, value):
         self.container[self.key] = value
+
+
+def _is_scan_number(value):
+    """True for native JSON numeric leaves that should be scanned as text.
+
+    bool is a subclass of int in Python, but JSON booleans are control values here,
+    not redactable text.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _disambiguate_key(new_key, node, old_key):
@@ -663,7 +673,7 @@ _USER_DATA_KEYS = frozenset({'output', 'outputs', 'variables'})
 # top-level metadata, function_call_output.output, mcp/custom-tool output, message content), never on a bare
 # property-name match inside a schema. `properties`/`$defs` are reached UNDER `parameters`/`schema`, so flagging the
 # two roots is sufficient -- once in_schema is set it propagates to every deeper descent.
-_SCHEMA_ENTRY_KEYS = frozenset({'parameters', 'schema'})
+_SCHEMA_ENTRY_KEYS = frozenset({'parameters', 'schema', 'input_schema'})  # incl. the Anthropic tool-def schema key
 
 # VALUE-LITERAL ENTRY KEYS (FIX-ROUND-4-R3-R2 ITEM 2): a JSON-Schema keyword whose VALUE is a model-picked LITERAL
 # (or a list/object of literals), not a structural token. `enum` / `const` are NOT in _DENY_KEYS, so a DIRECT string
@@ -682,8 +692,9 @@ _VALUE_LITERAL_KEYS = frozenset({'enum', 'const'})
 def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, struct_scope=True, in_schema=False):
     """Defensive backstop: surface EVERY remaining free-text string reachable in `node`. Auto-covers shell_call/
     apply_patch_call/code_interpreter_call/mcp_call/custom_tool_call/file_search_call/web_search_call/computer_call/
-    reasoning AND any FUTURE item type. Numbers/bools/null are never surfaced. Already-claimed (container,key) pairs
-    are skipped so explicitly-handled fields are not double-surfaced.
+    reasoning AND any FUTURE item type. Native JSON int/float leaves are surfaced as scan-only strings and, on a hit,
+    written back as placeholder strings; bool/null stay structural. Already-claimed (container,key) pairs are skipped
+    so explicitly-handled fields are not double-surfaced.
 
     CONTEXT-SCOPED DENY-LIST (FIX-ROUND-4-R2 LEAK 1). `struct_scope` decides whether the structural deny-list is
     consulted at all:
@@ -724,6 +735,8 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
             denied = _is_denied_key(k) if struct_scope else _is_request_breaking_key(k)
             # SCHEMA POSITION (FIX A): once inside a schema subtree it stays a schema subtree for every deeper key.
             child_in_schema = in_schema or (isinstance(k, str) and k in _SCHEMA_ENTRY_KEYS)
+            json_arg_object = (struct_scope and not child_in_schema and isinstance(k, str)
+                               and _is_json_args_key(k) and isinstance(v, (dict, list)))
             # a user-data gateway key opens a user-data subtree; once in user data we never return to struct scope.
             # The gateway is SUPPRESSED inside a schema (FIX A): a SCHEMA property named output/outputs/variables is a
             # structural property name, NOT a user-data container, so it must never flip scope by a bare name match.
@@ -733,7 +746,8 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
             # enum/const flip scope in BOTH schema and non-schema position (a const is a value literal either way).
             child_scope = struct_scope and not (
                 isinstance(k, str)
-                and ((k in _USER_DATA_KEYS and not child_in_schema) or k in _VALUE_LITERAL_KEYS))
+                and ((k in _USER_DATA_KEYS and not child_in_schema) or k in _VALUE_LITERAL_KEYS)
+                or json_arg_object)
             # USER-DATA OBJECT KEY (FIX-ROUND-4-R2 LEAK 1 round-2 :515): a dict KEY in user-data scope can itself BE
             # PII (an email used as the key of a metadata / prompt.variables / function_call_output.output map). The
             # walk previously read keys only as traversal metadata, so PII-as-key bypassed the gate. Surface the KEY
@@ -757,7 +771,17 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
                 claimed.add((id(node), '__key__', k))
                 entry = _DictEntry(node, k)
                 fields.append(Field(entry.key_handle, '__key__', kind))
-            if isinstance(v, str):
+            # ACCEPTED TRADEOFF (numeric schema literals): `not in_schema` exempts numeric leaves inside a tool-
+            # DEFINITION schema from scanning. This is deliberate -- redacting a numeric schema literal would
+            # rewrite it to a placeholder STRING, breaking the property's declared `integer`/`number` type and
+            # producing a JSON-Schema-draft-2020-12 400 upstream (regressed once; guarded by
+            # test_tool_schema_numeric_constraints_not_corrupted). The cost: a NUMERIC PII literal placed
+            # specifically under enum/const in a tool SCHEMA (e.g. const:4111111111111111) is not redacted. This
+            # is near-nonexistent in real traffic -- PII flows as tool-CALL ARGUMENTS (model/user values, scanned
+            # here with in_schema=False), not as schema constraints. STRING schema literals ARE always surfaced.
+            # A precision-gated redaction (redact only checksum-validated cards/IBANs, accepting a 400 on that
+            # rare real-card-in-schema case) is a tracked post-launch hardening, not a launch blocker.
+            if isinstance(v, str) or (_is_scan_number(v) and not in_schema):
                 if denied:
                     continue
                 if (id(node), k) in claimed:
@@ -770,7 +794,7 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
                 # In USER-DATA scope a key ending in input/arguments is a user-data field name (its KEY may even be PII,
                 # now surfaced above), so its value is treated as a plain user-data string -- never parsed as a
                 # json-args slot (which is keyed by the exact key string and would desync if the PII KEY is renamed).
-                if struct_scope and _is_json_args_key(k):
+                if isinstance(v, str) and struct_scope and _is_json_args_key(k):
                     _surface_json_args(node, k, kind, fields, claimed)
                     continue
                 claimed.add((id(node), k))
@@ -785,7 +809,7 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
                                  in_schema=child_in_schema)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            if isinstance(v, str):
+            if isinstance(v, str) or (_is_scan_number(v) and not in_schema):
                 if parent_denied:
                     continue
                 if (id(node), i) in claimed:
@@ -798,8 +822,8 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
 
 
 def _collect_json_args_values(node, root, slot_container, slot_key, kind, fields):
-    """Recursively surface EVERY STRING VALUE -- AND every OBJECT KEY -- inside a PARSED tool-argument object as its
-    own clean Field (so the NER scans a bare name, not the hard-to-detect JSON blob). The structural deny-list
+    """Recursively surface EVERY STRING/NUMBER VALUE -- AND every OBJECT KEY -- inside a PARSED tool-argument object
+    as its own clean Field (so the NER scans a bare name or numeric ID, not the hard-to-detect JSON blob). The structural deny-list
     (_DENY_KEYS) is DELIBERATELY NOT applied here: that deny-list protects the Responses REQUEST SCHEMA (routing/
     identity fields, JSON-Schema structural tokens). The keys INSIDE a tool's arguments payload are APPLICATION-
     DEFINED data field names -- a value under 'name'/'url'/'type'/'id'/'*_id' there is real model-visible free text
@@ -820,14 +844,18 @@ def _collect_json_args_values(node, root, slot_container, slot_key, kind, fields
             if isinstance(k, str):
                 # surface the object KEY itself for redaction (PII-as-key). Renaming re-serializes JSON-safely.
                 fields.append(Field(entry.key_handle, '__key__', kind))
-            if isinstance(v, str):
+            # NOTE: tool-argument values are model-picked USER DATA, never a JSON schema -- numerics here must
+            # ALWAYS be scanned. Do NOT add an `in_schema` guard in this function (it has no such param; the
+            # schema-scope guard belongs only to _recurse_collect). A blanket replace_all once did and 500'd
+            # this route with NameError -- keep the bare _is_scan_number(v) here.
+            if isinstance(v, str) or _is_scan_number(v):
                 # the VALUE indexes via the shared current-key cell, so it survives the sibling key rename above.
                 fields.append(Field(entry.value_handle, '__val__', kind))
             else:
                 _collect_json_args_values(v, root, slot_container, slot_key, kind, fields)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            if isinstance(v, str):
+            if isinstance(v, str) or _is_scan_number(v):  # tool-arg values = user data, always scan numerics
                 fields.append(Field(_JsonArgsContainer(node, root, slot_container, slot_key), i, kind))
             else:
                 _collect_json_args_values(v, root, slot_container, slot_key, kind, fields)
@@ -883,21 +911,22 @@ class _DupSlot:
 
 
 def _collect_dup_args(node, root, slot_container, slot_key, kind, fields):
-    """Walk a faithful dup-preserving tree, surfacing EVERY string KEY and string VALUE as its own Field -- same
-    contract as _collect_json_args_values, but over _DupObj pairs so duplicate keys survive and the EARLIER value of a
-    duplicate (invisible to a plain dict) is scanned + round-tripped. Each Field's write re-emits the root via _emit_dup."""
+    """Walk a faithful dup-preserving tree, surfacing EVERY string KEY and string/number VALUE as its own Field --
+    same contract as _collect_json_args_values, but over _DupObj pairs so duplicate keys survive and the EARLIER
+    value of a duplicate (invisible to a plain dict) is scanned + round-tripped. Each Field's write re-emits the root
+    via _emit_dup."""
     if isinstance(node, _DupObj):
         for pair in node.pairs:
             k, v = pair[0], pair[1]
             if isinstance(k, str):
                 fields.append(Field(_DupSlot(pair, 0, root, slot_container, slot_key), 0, kind))
-            if isinstance(v, str):
+            if isinstance(v, str) or _is_scan_number(v):  # tool-arg values = user data, always scan numerics
                 fields.append(Field(_DupSlot(pair, 1, root, slot_container, slot_key), 1, kind))
             else:
                 _collect_dup_args(v, root, slot_container, slot_key, kind, fields)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            if isinstance(v, str):
+            if isinstance(v, str) or _is_scan_number(v):  # tool-arg values = user data, always scan numerics
                 fields.append(Field(_DupSlot(node, i, root, slot_container, slot_key), i, kind))
             else:
                 _collect_dup_args(v, root, slot_container, slot_key, kind, fields)
@@ -1051,8 +1080,11 @@ def extract_text_fields_responses(body):
             # function_call item: the `arguments` JSON string is echoed model-visible tool input. Parse it and
             # surface each inner string VALUE as its own clean field (the gate NER detects a bare name far better
             # than the same name buried in a serialized '{"k":"v"}' blob); writes re-serialize JSON-safely.
-            if itype == 'function_call' and isinstance(item.get('arguments'), str):
-                _surface_json_args(item, 'arguments', 'tool_result', fields, claimed)
+            if itype == 'function_call':
+                if isinstance(item.get('arguments'), str):
+                    _surface_json_args(item, 'arguments', 'tool_result', fields, claimed)
+                elif isinstance(item.get('arguments'), (dict, list)):
+                    _recurse_collect(item['arguments'], 'tool_result', fields, notes, claimed, struct_scope=False)
             # function_call_output item: `output` is a string OR an array of typed parts.
             if itype == 'function_call_output':
                 out = item.get('output')
@@ -1505,8 +1537,15 @@ async def stream_rehydrate_responses(upstream_aiter, replay):
 
 # ---------------------------------------------------------------------------
 # Upstream forwarding headers (Responses uses the SAME auth as chat: Bearer + optional org/project/beta).
-# ---------------------------------------------------------------------------
-FWD_HEADERS_RESPONSES = {'authorization', 'content-type', 'openai-organization', 'openai-project', 'openai-beta'}
+# The Codex ChatGPT/Codex-PLAN path (requires_openai_auth=true, wire_api=responses) additionally sends
+# identity/routing headers the ChatGPT backend needs to authorize plan usage -- chatgpt-account-id (which
+# plan account), originator (codex_cli_rs), session_id, and a codex version pin. These are auth/routing
+# metadata, NOT request-body PII, so forwarding them to the SAME upstream the request is already bound for is
+# not a leak; STRIPPING them silently broke the plan path (the OAuth token alone is rejected without the
+# account id). The API-key path never sends them, so this is purely additive there.
+FWD_HEADERS_RESPONSES = {'authorization', 'content-type', 'openai-organization', 'openai-project', 'openai-beta',
+                         'chatgpt-account-id', 'originator', 'session_id', 'openai-sentinel-token',
+                         'x-codex-version', 'codex-version'}
 
 
 def fwd_headers_responses(req):

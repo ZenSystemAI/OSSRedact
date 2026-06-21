@@ -1,0 +1,37 @@
+OSSRedact app icons -- OPERATOR ACTION REQUIRED
+================================================
+
+This directory must contain the application + tray icon set BEFORE running a native build
+(`npm run app:build`). The Rust shell `include_bytes!`s `32x32.png` for the tray at compile time,
+so a build will FAIL LOUDLY (compile error on src/lib.rs) until at least that file is present --
+that is intentional: a real installer must ship a real icon.
+
+Required files (drop them in next to this README):
+
+  32x32.png        -- 32x32 px, RGBA PNG. Used for the system-tray icon (and Linux window icon).
+                      Keep it crisp at small size; on macOS this is treated as a template image
+                      (monochrome, see `iconAsTemplate: true` in tauri.conf.json), so prefer a
+                      single-color silhouette with transparency for the mac menu bar.
+  128x128.png      -- 128x128 px, RGBA PNG. App icon (Linux .deb/.rpm/AppImage, general bundling).
+  128x128@2x.png   -- 256x256 px, RGBA PNG. Retina variant referenced by the bundle icon list.
+  icon.ico         -- Windows multi-resolution .ico (include 16/32/48/64/256). Used by the NSIS/MSI
+                      installer and the Windows app/tray.
+  icon.icns        -- macOS .icns (include up to 512@2x / 1024). Used by the .app / .dmg bundle.
+
+Fastest way to generate the whole set from a single 1024x1024 source PNG
+------------------------------------------------------------------------
+Tauri ships a generator that emits every size/format from one square source:
+
+    cd workbench
+    npx tauri icon path/to/source-1024.png
+
+That writes 32x32.png, 128x128.png, 128x128@2x.png, icon.ico, icon.icns (and the mobile/Windows
+Store sizes) straight into src-tauri/icons/. Re-run it whenever the brand mark changes.
+
+Brand note: use the OSSRedact mark (teal shield). The tray icon should read at 16-32 px -- avoid fine
+detail or text. Provide a monochrome/template-friendly silhouette so the macOS menu-bar variant looks
+native in both light and dark menu bars.
+
+These binary assets are intentionally NOT committed in this scaffold (no placeholder art shipped).
+Commit the real icon set with the first real build, or keep them out of the public repo and supply
+them in CI -- but they MUST exist locally for `npm run app:build` to compile.

@@ -18,7 +18,7 @@ pipeline_tag: token-classification
 
 ## Model description
 
-OSSRedact is the detection model behind a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs (Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions` routing Codex/omp/Hermes/Pi/opencode, and OpenAI `/v1/responses` for current Codex CLI). On egress the gateway redacts PII and secrets in the request's free-text fields to stable placeholders; on the response it rehydrates those placeholders back to the real values. The local client sees real data; the cloud model only ever sees placeholders. The NER model runs **locally on-device** (deployed always-on tier: dynamic-INT8 ONNX on CPU via onnxruntime; Intel NPU / OpenVINO FP16 preserved as a drop-in alternate), so detection never leaves the machine.
+OSSRedact is the detection model behind a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs (Anthropic `/v1/messages`, OpenAI-compatible `/v1/chat/completions` routing Codex/omp/Hermes/Pi/opencode, and OpenAI `/v1/responses` for current Codex CLI). On egress the gateway redacts PII and secrets in the request's free-text fields to stable placeholders; on the response it rehydrates those placeholders back to the real values. The local client sees real data; the cloud model sees only placeholders in the request fields the gateway scans (cryptographically-bound reasoning/thinking blocks are passed through opaque and not re-scanned -- they are model-generated from already-redacted input, so they too carry only placeholders). The NER model runs **locally on-device** (deployed always-on tier: dynamic-INT8 ONNX on CPU via onnxruntime; Intel NPU / OpenVINO FP16 preserved as a drop-in alternate), so detection never leaves the machine.
 
 The motivation: going fully local for data sovereignty is too expensive (256GB+ of VRAM). Instead, filter private data out, use cloud SOTA, redact on egress and rehydrate transparently. Two users are served: (1) the hobbyist who wants data sovereignty but cannot afford GPUs; (2) the employee who unknowingly leaks client PII through configured CLI/API-endpoint clients today. Browser and desktop-app interception are roadmap items.
 
@@ -58,7 +58,7 @@ Per-project and per-session PII config (session overrides project overrides defa
 
 ## Intended use
 
-- Always-on DLP / privacy gateway in front of cloud LLM APIs, so private data never reaches the cloud model.
+- Always-on DLP / privacy gateway in front of cloud LLM APIs, so private data in your prompts and tool calls never reaches the cloud model.
 - French-Quebec + English PII and secret detection for coding agents (Claude Code, Codex, Hermes) and chat traffic.
 - Data-sovereignty use where local GPU inference is not affordable, but cloud SOTA is still wanted.
 

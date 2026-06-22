@@ -27,7 +27,9 @@ _TEXT_BLOCK_TYPES = ('text', 'input_text', 'output_text')
 # It is opaque binary like `image`/`input_image`: recursing into it surfaced the data-URI / URL string for
 # PII scanning, an incoherent boundary that could over-rewrite an image blob or a routing URL. Treat it as
 # binary and skip it (matching the documented "image/audio/binary bytes are out of scope" contract).
-_BINARY_BLOCK_TYPES = ('image', 'input_image', 'image_url', 'document', 'redacted_thinking')
+# `thinking` / `redacted_thinking` are kept here ONLY to stay byte-identical with egress_proxy._BINARY_BLOCK_TYPES
+# (the sync invariant); the Chat Completions schema has no thinking content-part, so they are inert on this path.
+_BINARY_BLOCK_TYPES = ('image', 'input_image', 'image_url', 'document', 'redacted_thinking', 'thinking')
 
 # matches the tail of a partial placeholder still being streamed (e.g. "<EMAIL_00" before its ">" arrives).
 # A label may carry INTERNAL underscores (gate-form labels such as PHONE_NUMBER / SENSITIVE_ACCOUNT_ID ->

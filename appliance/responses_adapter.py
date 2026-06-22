@@ -374,6 +374,20 @@ _DENY_KEYS = frozenset({
 })
 
 
+# CRYPTOGRAPHICALLY-OPAQUE reasoning material. An OpenAI Responses `reasoning` item carries `encrypted_content`, a
+# ciphertext blob the model decrypts on the NEXT turn to recover its own private chain-of-thought (Codex CLI runs
+# stateless -- store:false, include:["reasoning.encrypted_content"] -- and re-sends these items every turn). It MUST
+# round-trip to the upstream BYTE-FOR-BYTE: any mutation (the known-value sweep hitting a coincidental substring of
+# the base64, or the NER false-positive-tagging a span inside the gibberish) makes it undecryptable upstream ->
+# `invalid_request_error / invalid_encrypted_content` ("Encrypted content could not be decrypted or parsed"), which
+# HARD-BREAKS Codex through the gate. The blob is generated from ALREADY-REDACTED input, so it holds no real PII to
+# protect. So it is NEVER surfaced for redaction, in ANY scope (structural or user-data), and never rehydrated on the
+# response. The reasoning `summary`/`content` free text is NOT in here on purpose: it is not part of the encrypted
+# blob and is not cross-validated against it, so it keeps the normal redact-out / rehydrate-back treatment (no PII
+# leaks upstream, and mutating it cannot break decryption).
+_OPAQUE_KEYS = frozenset({'encrypted_content'})
+
+
 def _is_denied_key(k):
     """A key is structural (its string value is never redacted) if it is in the deny-list OR is an identifier
     key matching the *_id family (call_id, item_id, file_id, response_id, previous_response_id, ...) OR one of the
@@ -733,6 +747,10 @@ def _recurse_collect(node, kind, fields, notes, claimed, parent_denied=False, st
         # snapshot the items: a redacted-KEY rename mutates `node` LATER (during redaction, after extraction), so
         # iteration here is not affected -- but iterate a snapshot defensively so a future in-loop mutation is safe.
         for k, v in list(node.items()):
+            # OPAQUE ciphertext (reasoning.encrypted_content): never surface the KEY or its VALUE for redaction, in
+            # ANY scope -- it must round-trip byte-for-byte or upstream decryption fails (invalid_encrypted_content).
+            if isinstance(k, str) and k in _OPAQUE_KEYS:
+                continue
             # STRUCTURAL scope: the full deny-list applies. USER-DATA scope: nothing is structural EXCEPT a
             # request-breaking key (a protocol routing id: file_id/container_id/call_id/...) -- redacting one corrupts
             # the request in any context, so those stay protected; every other key (name/id/customer_id/file_data/...)
@@ -1327,6 +1345,11 @@ def _rehydrate_recursive(node, replay):
     if isinstance(node, dict):
         # Rehydrate VALUES in place first.
         for k, v in node.items():
+            # OPAQUE ciphertext (reasoning.encrypted_content): leave it byte-for-byte. A placeholder is a unique
+            # <LABEL_NNN> token that never appears inside a base64 blob, so this is already a no-op today -- but
+            # skipping it explicitly keeps the request/response treatment symmetric and guards a future rehydrate.
+            if isinstance(k, str) and k in _OPAQUE_KEYS:
+                continue
             if isinstance(v, str):
                 node[k] = rehydrate_json_string(v, replay) if _is_json_args_key(k) else rehydrate_text(v, replay)
             else:

@@ -8,7 +8,10 @@ understand or audit the design.
 OSSRedact is a **local privacy gateway**: an HTTP proxy that sits in front of cloud LLM APIs. On
 egress it redacts PII and secrets in the request's free-text fields to stable placeholders; on
 the response it rehydrates those placeholders back to the real values. The local client sees
-real data; the cloud model only ever sees placeholders.
+real data; the cloud model sees only placeholders in the request fields the gateway scans.
+(Cryptographically-bound reasoning material -- extended-thinking blocks and OpenAI `encrypted_content` --
+is passed through opaque and not re-scanned; it is model-generated from already-redacted input, so it
+carries only placeholders. See §1.)
 
 The wire formats supported today are Anthropic `/v1/messages`, OpenAI-compatible
 `/v1/chat/completions` (routing Codex, Hermes, Pi, omp, opencode, and other OpenAI-compatible clients via openai_adapter.py),
@@ -112,8 +115,12 @@ be first or only. Its distinct contribution is:
 The proxy pulls the fields that can carry model-visible user data: `system`, `messages`,
 `tool_result` text/JSON, `tool_use` input, Anthropic document text, and tool schema
 descriptions/literal values. It never rewrites tool/function names, schema property names, images,
-binary file bytes, or the model name. This boundary matters: rewriting routing or schema structure
-would break the request, while structured argument values are user data and must be scanned.
+binary file bytes, or the model name. It also passes **cryptographically-bound reasoning material through
+opaque** -- Anthropic `thinking` / `redacted_thinking` blocks (a `signature` MAC over the content) and OpenAI
+reasoning `encrypted_content` (a ciphertext blob) -- neither redacting nor rehydrating it, because it must
+round-trip byte-for-byte or the signature/decryption breaks; it is model-generated from already-redacted
+input, so it holds only placeholders. This boundary matters: rewriting routing or schema structure would
+break the request, while structured argument values are user data and must be scanned.
 
 ### 2. Cheap deterministic gate (always, microseconds)
 

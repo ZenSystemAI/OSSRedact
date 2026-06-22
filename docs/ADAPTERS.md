@@ -4,9 +4,12 @@ The OSSRedact egress proxy is an always-on privacy layer that sits in front of t
 cloud LLM APIs. On the way OUT it redacts PII and secrets in every user-supplied text
 field of the request, swapping each detected value for a stable placeholder
 (`<EMAIL_001>`, `<PERSON_002>`, ...). On the way BACK it rehydrates those placeholders to
-the real values locally, so your CLI sees real data while the upstream model only ever
-reasons over placeholders. Point any compatible tool at the proxy instead of the vendor
-endpoint and the redaction happens transparently.
+the real values locally, so your CLI sees real data while the upstream model reasons over
+placeholders, not your real values. (Extended-thinking / reasoning blocks -- Anthropic `thinking`
+and OpenAI reasoning `encrypted_content` -- are cryptographically bound and must round-trip
+byte-for-byte, so they are passed through opaque and not re-scanned; the model generated them
+from already-redacted input, so they too carry only placeholders.) Point any compatible tool at
+the proxy instead of the vendor endpoint and the redaction happens transparently.
 
 Default local endpoint: `http://127.0.0.1:8011`. If you intentionally bind the egress proxy to a
 tailnet or another trusted interface with `GATEWAY_HOST`, replace `127.0.0.1` with that host.

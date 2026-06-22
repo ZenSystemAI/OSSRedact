@@ -1166,16 +1166,86 @@ def test_openai_message_name_field_redacted_but_function_name_preserved(monkeypa
 
 
 # --- adapter-leak-hunt confirmed gaps (verified against the real API schemas) ---
-def test_anthropic_thinking_block_redacted(monkeypatch):
-    """Leak-hunt: extended-thinking blocks are rehydrated on the response, so a multi-turn client re-sends a
-    thinking block carrying REAL PII. The 'thinking' field must be scanned; the 'signature' must NOT be touched."""
+def test_anthropic_thinking_block_opaque_passthrough(monkeypatch):
+    """Extended-thinking blocks are CRYPTOGRAPHICALLY BOUND: `signature` is a MAC over the `thinking` content, and a
+    multi-turn client must re-send the block VERBATIM. Redacting the thinking desyncs content<->signature (Anthropic
+    400s) AND mutates a block inside the cached prefix -> the whole prompt re-caches every turn (the operator's
+    "context maxed / 5h usage climbs fast" symptom). The model only ever saw REDACTED input, so its thinking carries
+    placeholders, never real PII -- nothing to protect. So a thinking block is OPAQUE PASSTHROUGH: never redacted.
+    A model-mentioned entity INSIDE the thinking (here 'Acme Corp') must survive untouched -- redacting it is exactly
+    what diverged the bytes turn-to-turn before. Real PII in a SIBLING user message is STILL redacted."""
+    thinking_text = 'The user <PERSON_NAME_001> asked about org Acme Corp and path /etc/hosts.'
     body = {'model': 'claude-x', 'messages': [
         {'role': 'assistant', 'content': [
-            {'type': 'thinking', 'thinking': 'Per the record the user email is nadia.roy@example.com.', 'signature': 'sig-abc-123'},
-            {'type': 'text', 'text': 'Done.'}]}]}
-    _run_redact(monkeypatch, body, _make_neural({}))
-    assert 'nadia.roy@example.com' not in _wire_text(body), 'PII in an extended-thinking block must be redacted'
-    assert body['messages'][0]['content'][0]['signature'] == 'sig-abc-123', 'thinking signature must be untouched'
+            {'type': 'thinking', 'thinking': thinking_text, 'signature': 'sig-abc-123'},
+            {'type': 'text', 'text': 'noted'}]},
+        {'role': 'user', 'content': 'Also email nadia.roy@example.com please.'}]}
+    # The detector would tag 'Acme Corp' as an org IF the thinking were surfaced -- it must never be called on it.
+    _run_redact(monkeypatch, body, _make_neural({'nadia.roy@example.com': 'email', 'Acme Corp': 'organization'}))
+    tb = body['messages'][0]['content'][0]
+    assert tb['thinking'] == thinking_text, 'thinking text must pass through byte-for-byte (signature would desync)'
+    assert tb['signature'] == 'sig-abc-123', 'thinking signature must be untouched'
+    assert 'Acme Corp' in _wire_text(body), 'a model-mentioned entity inside thinking must NOT be redacted'
+    assert 'nadia.roy@example.com' not in body['messages'][1]['content'], 'a real user-message email is still redacted'
+
+
+def test_anthropic_thinking_block_not_rehydrated_on_response():
+    """Response rehydration must NOT touch a thinking block. Rehydrating its placeholders into real values would
+    inject real PII into a SIGNED block, which then (a) is forwarded upstream verbatim next turn (the gate no longer
+    redacts thinking) AND (b) desyncs the signature. So thinking/signature pass through the response unchanged; only
+    the user-visible text + tool_use inputs are rehydrated."""
+    replay = {'<EMAIL_001>': 'nadia.roy@example.com'}
+    resp = {'type': 'message', 'content': [
+        {'type': 'thinking', 'thinking': 'emailing <EMAIL_001> now', 'signature': 'sig-xyz'},
+        {'type': 'redacted_thinking', 'data': 'opaque<EMAIL_001>blob'},
+        {'type': 'text', 'text': 'I emailed <EMAIL_001>.'},
+        # a coincidental tool-arg sub-object literally tagged type:thinking but with NO signature is NOT a real
+        # thinking block -> the structural guard must still rehydrate it (placeholder -> real value for the tool).
+        {'type': 'tool_use', 'name': 'send', 'input': {'type': 'thinking', 'to': '<EMAIL_001>'}}]}
+    egress_proxy.rehydrate_anthropic_response(resp, replay)
+    assert resp['content'][0]['thinking'] == 'emailing <EMAIL_001> now', 'thinking placeholders must NOT be rehydrated'
+    assert resp['content'][0]['signature'] == 'sig-xyz', 'signature untouched'
+    assert resp['content'][1]['data'] == 'opaque<EMAIL_001>blob', 'redacted_thinking data must NOT be rehydrated'
+    assert resp['content'][2]['text'] == 'I emailed nadia.roy@example.com.', 'user-visible text IS rehydrated'
+    assert resp['content'][3]['input']['to'] == 'nadia.roy@example.com', 'signature-less type:thinking sub-object IS rehydrated'
+
+
+def test_concurrent_detection_deterministic_minting(monkeypatch):
+    """Concurrent per-field detection must not change placeholder NUMBERING. Pass-2 mints in field order, which the
+    concurrent path preserves (asyncio.gather returns in submission order; detected_fields is reassembled in fi
+    order). A serial run (GATEWAY_DETECT_CONCURRENCY=1) and a concurrent run (8) over the same body MUST produce
+    byte-identical redacted bodies AND replay maps -- otherwise the redacted prefix diverges turn-to-turn and busts
+    the upstream prompt cache (the exact failure class this whole change set is closing)."""
+    def build():
+        return {'model': 'claude-x', 'messages': [
+            {'role': 'user', 'content': [
+                {'type': 'text', 'text': f'msg {i}: email person{i}@example.com re Client Name{i}'}
+                for i in range(12)]}]}
+    found = {f'person{i}@example.com': 'email' for i in range(12)}
+    found.update({f'Client Name{i}': 'person' for i in range(12)})
+    base = _make_neural(found)
+
+    # Concurrency stub that REVERSES completion order vs submission order: field i sleeps (12-i)ms, so the LAST
+    # field finishes FIRST. If the code reassembled detected_fields by completion order (a real bug), placeholder
+    # numbering would invert and the bytes would differ from the serial run -> this test fails loudly. It passes
+    # only because gather + fi-order reassembly keeps minting deterministic.
+    async def _reordering_neural(aclient, text, min_score=0.5):
+        m = re.search(r'msg (\d+):', text)
+        if m:
+            await asyncio.sleep((12 - int(m.group(1))) * 0.001)
+        return await base(aclient, text, min_score)
+
+    monkeypatch.setattr(egress_proxy, 'DETECT_CONCURRENCY', 1)
+    b1 = build()
+    _m1, r1 = _run_redact(monkeypatch, b1, base, ctx={'session': 'det-serial-' + os.urandom(6).hex(), 'project': 'e2e'})
+
+    monkeypatch.setattr(egress_proxy, 'DETECT_CONCURRENCY', 8)
+    b2 = build()
+    _m2, r2 = _run_redact(monkeypatch, b2, _reordering_neural, ctx={'session': 'det-conc-' + os.urandom(6).hex(), 'project': 'e2e'})
+
+    assert _wire_text(b1) == _wire_text(b2), 'serial vs concurrent detection must produce identical redacted bytes'
+    assert r1 == r2, 'serial vs concurrent detection must produce identical replay maps'
+    assert 'person0@example.com' not in _wire_text(b1) and '<EMAIL_' in _wire_text(b1), 'sanity: redaction happened'
 
 
 def test_anthropic_top_level_metadata_redacted(monkeypatch):

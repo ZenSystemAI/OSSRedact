@@ -970,6 +970,51 @@ def test_response_agentic_items_rehydrate_recursively():
     assert not _PH_RE.search(json.dumps(resp)), 'no placeholder may survive recursive rehydration'
 
 
+# ---------------------------------------------------------------------------
+# OPAQUE CIPHERTEXT (reasoning.encrypted_content): the self-contained encrypted reasoning blob a Codex CLI stateless
+# turn (store:false, include:["reasoning.encrypted_content"]) re-sends. It MUST round-trip BYTE-FOR-BYTE -- mutating
+# even one byte makes it undecryptable upstream -> invalid_request_error / invalid_encrypted_content (Codex HARD-fails
+# through the gate). It must NEVER be surfaced for redaction, while the sibling summary/content free text STAYS
+# scanned (it carries real PII). These pin both halves so a regression that re-opens the leak fails loudly.
+# ---------------------------------------------------------------------------
+def test_reasoning_encrypted_content_never_surfaced_request_side():
+    val = 'amelie.fortin@example.com'
+    ph = '<EMAIL_001>'
+    # a ciphertext-shaped blob that LITERALLY embeds the PII value: if encrypted_content were (wrongly) surfaced, the
+    # _swap_all below would rewrite that substring and corrupt the blob -- so the byte-identity assert is a TRUE
+    # protection test, not a no-op. (Real encrypted_content is base64 and would never contain plaintext PII; we embed
+    # it on purpose so the test fails loudly if the skip ever regresses.)
+    blob = 'gAAAAABm9_enc::' + val + '::cmVhc29uaW5nLXN0YXRl_Zq7=='
+    body = {'model': 'gpt-test', 'input': [
+        {'type': 'reasoning', 'id': 'rs_1',
+         'summary': [{'type': 'summary_text', 'text': f'the user is {val}'}],
+         'content': [{'type': 'reasoning_text', 'text': f'plan: email {val}'}],
+         'encrypted_content': blob}]}
+    fields = ra.extract_text_fields_responses(body)
+    surfaced = [f.text for f in fields if isinstance(f.text, str)]
+    assert not any(blob in s for s in surfaced), 'encrypted_content must NEVER be surfaced for redaction'
+    assert any(val in s for s in surfaced), 'the reasoning summary/content free text MUST still be surfaced + scanned'
+    # redact the summary/content; the ciphertext must be untouched even though it contains the same value substring
+    _swap_all(fields, val, ph)
+    assert body['input'][0]['encrypted_content'] == blob, 'encrypted_content must be byte-identical after redaction'
+    wire = json.dumps(body, ensure_ascii=False)
+    assert wire.count(val) == 1, 'only the in-ciphertext copy may remain; summary/content copies must be redacted'
+    assert ph in wire, 'summary/content must carry placeholders'
+
+
+def test_reasoning_encrypted_content_passthrough_response_side():
+    """The response side (output_item.done snapshot / response.completed) carries the reasoning item incl.
+    encrypted_content -- the blanket placeholder swap must leave the ciphertext byte-identical while still
+    rehydrating the summary's placeholders for display."""
+    blob = 'gAAAAABm9_OpAqUeCiPhErTeXt_<not-a-placeholder>_Zq7=='
+    resp = {'id': 'resp_1', 'output': [
+        {'type': 'reasoning', 'id': 'rs_1', 'encrypted_content': blob,
+         'summary': [{'type': 'summary_text', 'text': 'about <EMAIL_001>'}]}]}
+    ra.rehydrate_responses_response(resp, {'<EMAIL_001>': 'amelie.fortin@example.com'})
+    assert resp['output'][0]['encrypted_content'] == blob, 'encrypted_content must pass through byte-identical'
+    assert resp['output'][0]['summary'][0]['text'] == 'about amelie.fortin@example.com', 'summary IS rehydrated'
+
+
 # ===========================================================================
 # ROUND 2 -- the four remaining Codex DO-NOT-SHIP findings. Each test pins the exact leak/over-redaction the
 # finding describes, so a regression that reopens it fails loudly. 100% synthetic data.

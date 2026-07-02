@@ -33,12 +33,12 @@ export function isNeuralOnlyLabel(label: string): boolean {
 
 /** The canonical, human-facing warning shown (persistently) whenever the deep scan degraded to Tier-0 only. */
 export const DEEP_DEGRADED_WARNING =
-  'Deep scan unavailable — only structured data (secrets, IDs, card and account numbers, emails, dates) was ' +
+  'Deep scan unavailable -- only structured data (secrets, IDs, card and account numbers, emails, dates) was ' +
   'checked. Names, organizations, and addresses were NOT scanned and may remain in the output. Review before ' +
   'you export.'
 
 /** Short label for a degraded state, for compact chips/badges. */
-export const DEEP_DEGRADED_BADGE = 'Tier-0 only — names/orgs/addresses NOT scanned'
+export const DEEP_DEGRADED_BADGE = 'Tier-0 only -- names/orgs/addresses NOT scanned'
 
 /** The confirmation a user must accept to export degraded output (fail-closed gate copy). */
 export const DEEP_DEGRADED_EXPORT_CONFIRM =

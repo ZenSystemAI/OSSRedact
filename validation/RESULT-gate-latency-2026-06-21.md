@@ -9,7 +9,7 @@
 A workflow latency audit hypothesized the **sequential per-field `/detect` loop was the dominant request
 latency** (estimated 20-60ms/call x N fields = "seconds"), and we shipped a concurrent loop
 (`collect_detected_fields`, `GATEWAY_DETECT_CONCURRENCY`, default 8). Per the work-discipline rule we then
-**measured before trusting the table** — against the actual deployed gate, not an estimate. The measurement
+**measured before trusting the table** -- against the actual deployed gate, not an estimate. The measurement
 overturned the hypothesis.
 
 ## Setup

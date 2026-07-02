@@ -14,6 +14,12 @@ models/
 *.png
 !charts/
 !charts/*.png
+# Tauri build icons: required by tauri::generate_context! + the tray include_bytes -- a fresh
+# checkout (CI cargo test) fails to COMPILE without them. Not screenshots; keep tracked.
+!workbench/src-tauri/icons/
+!workbench/src-tauri/icons/32x32.png
+!workbench/src-tauri/icons/128x128.png
+!workbench/src-tauri/icons/128x128@2x.png
 
 # Python / venv / node
 __pycache__/

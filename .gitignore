@@ -14,6 +14,9 @@ models/
 *.png
 !charts/
 !charts/*.png
+# README product screenshots (public repo needs them to render)
+!docs/media/
+!docs/media/*.png
 # Tauri build icons: required by tauri::generate_context! + the tray include_bytes -- a fresh
 # checkout (CI cargo test) fails to COMPILE without them. Not screenshots; keep tracked.
 !workbench/src-tauri/icons/

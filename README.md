@@ -10,6 +10,10 @@
 
 OSSRedact is an HTTP proxy that sits in front of cloud LLM APIs. On the way out it redacts PII and secrets in the request's free-text fields to stable placeholders. On the way back it rehydrates those placeholders into the real values. Your local tool sees real data the whole time; the cloud model only ever sees placeholders in the fields the gateway scans (reasoning/thinking blocks pass through opaque -- see Limitations). Claude Code and Codex are both verified end-to-end -- Codex on the OpenAI API-key path and on the ChatGPT/Codex-plan path (the gate routes plan requests, identified by the `chatgpt-account-id` header, to the ChatGPT backend; `GATEWAY_CHATGPT_UPSTREAM` overrides it). OpenAI/Anthropic-compatible tools such as Hermes, Pi, omp, and opencode route through the same documented adapters. The detection model runs locally on-device (CPU INT8 always-on; NPU/OpenVINO alternate), so no detection call ever leaves your machine.
 
+![The OSSRedact Workbench redacting a French banking document fully on-device](docs/media/workbench-redaction.png)
+
+*The Workbench after a deep detect on a French banking document: name, SIN, cards, accounts, address, and dates become stable placeholders, entirely in-browser. Try it live (works offline once loaded) at [ossredact.dev/app](https://ossredact.dev/app/).*
+
 ![OSSRedact vs Microsoft Presidio -- held-out Quebec FR/EN PII](charts/fig5_vs_presidio.png)
 
 *Historical v6/v7 comparison against Microsoft Presidio on held-out Quebec FR/EN PII. Current measured v11 numbers are below.*

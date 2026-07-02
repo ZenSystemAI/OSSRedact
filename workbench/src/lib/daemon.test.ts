@@ -8,11 +8,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   daemonBase,
   ping,
+  probe,
+  verifyControl,
+  connectGate,
+  mixedContentRisk,
+  cleartextRisk,
   getAllowlist,
   setAllowlist,
   getLiveStatus,
   clearLive,
   subscribeLive,
+  getDaemonOverride,
+  setDaemonOverride,
+  getControlToken,
+  setControlToken,
   DaemonError,
   DEFAULT_DAEMON,
   type LiveEvent,
@@ -373,5 +382,255 @@ describe('subscribeLive', () => {
     expect(states).toEqual(['error'])
     // the fallback unsubscribe must be callable without throwing
     expect(() => unsub()).not.toThrow()
+  })
+
+  it('appends ?token= to the stream URL when an off-device control token is set', () => {
+    setControlToken('tok-xyz')
+    try {
+      const unsub = subscribeLive(() => {})
+      expect(FakeEventSource.last().url).toBe('/api/stream?token=tok-xyz')
+      unsub()
+    } finally {
+      setControlToken('')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// off-device gate connection: address override + control token (localStorage-backed)
+// ---------------------------------------------------------------------------
+describe('gate connection override', () => {
+  beforeEach(() => {
+    try { localStorage.clear() } catch { /* storage off */ }
+  })
+  afterEach(() => {
+    try { localStorage.clear() } catch { /* storage off */ }
+    delete (window as unknown as { __OSSREDACT_DAEMON__?: string }).__OSSREDACT_DAEMON__
+    vi.unstubAllEnvs()
+  })
+
+  it('an operator override wins over the window injection AND the env override', () => {
+    setDaemonOverride('http://gate-host:8011')
+    ;(window as unknown as { __OSSREDACT_DAEMON__?: string }).__OSSREDACT_DAEMON__ = 'http://127.0.0.1:8011'
+    vi.stubEnv('VITE_OSSREDACT_DAEMON', 'http://env.example:9000')
+    expect(daemonBase()).toBe('http://gate-host:8011')
+    expect(getDaemonOverride()).toBe('http://gate-host:8011')
+  })
+
+  it('strips a trailing slash on save and clearing falls back to the default chain', () => {
+    setDaemonOverride('http://gate-host:8011/')
+    expect(daemonBase()).toBe('http://gate-host:8011')
+    setDaemonOverride('')
+    expect(getDaemonOverride()).toBe('')
+    expect(daemonBase()).toBe('') // back to same-origin default
+  })
+
+  it('persists + trims the control token; empty clears it', () => {
+    setControlToken('  s3cret-token  ')
+    expect(getControlToken()).toBe('s3cret-token')
+    setControlToken('')
+    expect(getControlToken()).toBe('')
+  })
+})
+
+describe('control-token request wiring', () => {
+  beforeEach(() => {
+    try { localStorage.clear() } catch { /* storage off */ }
+  })
+  afterEach(() => {
+    try { localStorage.clear() } catch { /* storage off */ }
+    vi.unstubAllGlobals()
+  })
+
+  it('attaches x-ossredact-control-token to control fetches when a token is set', async () => {
+    setControlToken('tok-123')
+    const calls = installFetch(async () =>
+      fakeResponse({ values: [], active_total: 0, config_values: 0, path: '' }))
+    await getAllowlist()
+    expect((calls[0].init?.headers as Record<string, string>)['x-ossredact-control-token']).toBe('tok-123')
+  })
+
+  it('omits the token header entirely when no token is set (local gate wire unchanged)', async () => {
+    const calls = installFetch(async () =>
+      fakeResponse({ values: [], active_total: 0, config_values: 0, path: '' }))
+    await getAllowlist()
+    expect((calls[0].init?.headers as Record<string, string>)['x-ossredact-control-token']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// probe() -- the "Test connection" + discovery primitive
+// ---------------------------------------------------------------------------
+describe('probe', () => {
+  afterEach(() => {
+    try { localStorage.clear() } catch { /* storage off */ }
+    vi.unstubAllGlobals()
+  })
+
+  it('confirms an OSSRedact gate and reports version + remoteControl', async () => {
+    installFetch(async () =>
+      fakeResponse({ status: 'ok', service: 'ossredact-egress', version: '0.2.0', remote_control: true }))
+    const r = await probe('http://gate-host:8011/')
+    expect(r.ok).toBe(true)
+    expect(r.base).toBe('http://gate-host:8011') // trailing slash normalized
+    expect(r.service).toBe('ossredact-egress')
+    expect(r.version).toBe('0.2.0')
+    expect(r.remoteControl).toBe(true)
+  })
+
+  it('is NOT ok when a reachable endpoint is not an OSSRedact gate', async () => {
+    installFetch(async () => fakeResponse({ hello: 'world' }))
+    const r = await probe('http://nginx.example')
+    expect(r.ok).toBe(false)
+    expect(r.service).toBeUndefined()
+  })
+
+  it('reports the HTTP status on a non-2xx /healthz', async () => {
+    installFetch(async () => fakeResponse({}, { status: 502 }))
+    const r = await probe('http://x:1')
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(502)
+  })
+
+  it('returns { ok:false, error } when the host is unreachable (never throws)', async () => {
+    installFetch(async () => {
+      throw new TypeError('Failed to fetch')
+    })
+    const r = await probe('http://nope:1')
+    expect(r.ok).toBe(false)
+    expect(r.error).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// verifyControl() + connectGate() -- B4: persist a control token only after it AUTHORIZES
+// ---------------------------------------------------------------------------
+describe('verifyControl', () => {
+  afterEach(() => { try { localStorage.clear() } catch { /* off */ } ; vi.unstubAllGlobals() })
+
+  it('sends the token header to /api/live/status and is ok only on 200', async () => {
+    const calls = installFetch(async () => fakeResponse({ enabled: true }, { status: 200 }))
+    const v = await verifyControl('http://gate-host:8011/', 'tok-123')
+    expect(v.ok).toBe(true)
+    expect(v.status).toBe(200)
+    expect(calls[0].url).toBe('http://gate-host:8011/api/live/status')
+    expect((calls[0].init?.headers as Record<string, string>)['x-ossredact-control-token']).toBe('tok-123')
+  })
+
+  it('is not ok on a 403 (token rejected)', async () => {
+    installFetch(async () => fakeResponse({ error: 'local-only' }, { status: 403 }))
+    const v = await verifyControl('http://gate-host:8011', 'wrong')
+    expect(v.ok).toBe(false)
+    expect(v.status).toBe(403)
+  })
+})
+
+describe('connectGate', () => {
+  beforeEach(() => { try { localStorage.clear() } catch { /* off */ } })
+  afterEach(() => {
+    try { localStorage.clear() } catch { /* off */ }
+    vi.unstubAllGlobals()
+    delete (window as unknown as { __OSSREDACT_DAEMON__?: string }).__OSSREDACT_DAEMON__
+  })
+
+  // The whole point of B4: /healthz OK but the control token is wrong -> do NOT persist.
+  it('does NOT persist when /healthz is OK but /api/live/status returns 403', async () => {
+    const calls = installFetch(async (url) => {
+      if (url.endsWith('/healthz')) return fakeResponse({ service: 'ossredact-egress', version: '0.2.0', remote_control: true })
+      if (url.endsWith('/api/live/status')) return fakeResponse({ error: 'local-only' }, { status: 403 })
+      return fakeResponse({}, { status: 404 })
+    })
+    const o = await connectGate('http://gate-host:8011', 'wrong-token')
+    expect(o.ok).toBe(false)
+    expect(o).toMatchObject({ reason: 'unauthorized', status: 403 })
+    expect(getDaemonOverride()).toBe('')   // nothing persisted
+    expect(getControlToken()).toBe('')
+    // it actually attempted the authenticated round-trip (healthz then live/status)
+    expect(calls.map((c) => c.url)).toEqual([
+      'http://gate-host:8011/healthz',
+      'http://gate-host:8011/api/live/status',
+    ])
+  })
+
+  it('persists address + token when the authenticated round-trip returns 200', async () => {
+    installFetch(async (url) => {
+      if (url.endsWith('/healthz')) return fakeResponse({ service: 'ossredact-egress', version: '0.2.0', remote_control: true })
+      return fakeResponse({ enabled: true }, { status: 200 })
+    })
+    const o = await connectGate('http://gate-host:8011/', '  good-token  ')
+    expect(o.ok).toBe(true)
+    expect(getDaemonOverride()).toBe('http://gate-host:8011')
+    expect(getControlToken()).toBe('good-token')   // trimmed
+  })
+
+  it('refuses a NON-loopback gate that reports no remote control (no token would 403 everything)', async () => {
+    const calls = installFetch(async () =>
+      fakeResponse({ service: 'ossredact-egress', remote_control: false }))
+    const o = await connectGate('http://gate-host:8011', '')
+    expect(o.ok).toBe(false)
+    expect(o).toMatchObject({ reason: 'no-remote-control' })
+    expect(getDaemonOverride()).toBe('')
+    expect(calls).toHaveLength(1)   // only /healthz; never attempts the control round-trip
+  })
+
+  it('persists a loopback gate with no remote control (local control needs no token)', async () => {
+    const calls = installFetch(async () =>
+      fakeResponse({ service: 'ossredact-egress', remote_control: false }))
+    const o = await connectGate('http://127.0.0.1:8011', '')
+    expect(o.ok).toBe(true)
+    expect(getDaemonOverride()).toBe('http://127.0.0.1:8011')
+    expect(calls).toHaveLength(1)   // loopback shortcut: no auth round-trip
+  })
+
+  it('does not persist an unreachable address', async () => {
+    installFetch(async () => { throw new TypeError('Failed to fetch') })
+    const o = await connectGate('http://nope:1', 'x')
+    expect(o.ok).toBe(false)
+    expect(o).toMatchObject({ reason: 'unreachable' })
+    expect(getDaemonOverride()).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// mixedContentRisk() -- B3: a secure console cannot reach a plain http:// remote gate
+// ---------------------------------------------------------------------------
+describe('mixedContentRisk', () => {
+  it('flags a remote http:// gate from an https console', () => {
+    expect(mixedContentRisk('http://gate-host:8011', 'https:')).toBe(true)
+  })
+  it('flags a remote http:// gate from a Tauri (tauri:) console', () => {
+    expect(mixedContentRisk('http://gate-host:8011', 'tauri:')).toBe(true)
+  })
+  it('does not flag an https:// gate from a secure console', () => {
+    expect(mixedContentRisk('https://gate.example.ts.net', 'https:')).toBe(false)
+  })
+  it('does not flag http gate from a plain-http (loopback dev) console -- both http, no mixed content', () => {
+    expect(mixedContentRisk('http://gate-host:8011', 'http:')).toBe(false)
+  })
+  it('exempts a loopback http gate even from a secure console (potentially-trustworthy)', () => {
+    expect(mixedContentRisk('http://127.0.0.1:8011', 'https:')).toBe(false)
+    expect(mixedContentRisk('http://localhost:8011', 'tauri:')).toBe(false)
+  })
+  it('does not flag a relative / same-origin base', () => {
+    expect(mixedContentRisk('', 'https:')).toBe(false)
+    expect(mixedContentRisk('/api', 'https:')).toBe(false)
+  })
+})
+
+describe('cleartextRisk', () => {
+  it('flags a non-loopback http:// gate regardless of console scheme', () => {
+    expect(cleartextRisk('http://gate-host:8011')).toBe(true)
+    expect(cleartextRisk('http://192.168.1.50:8011')).toBe(true)
+  })
+  it('does not flag an https:// gate', () => {
+    expect(cleartextRisk('https://gate.example.ts.net')).toBe(false)
+  })
+  it('does not flag a loopback http gate (local, never leaves the machine)', () => {
+    expect(cleartextRisk('http://127.0.0.1:8011')).toBe(false)
+    expect(cleartextRisk('http://localhost:8011')).toBe(false)
+  })
+  it('does not flag a relative / same-origin base', () => {
+    expect(cleartextRisk('')).toBe(false)
+    expect(cleartextRisk('/api')).toBe(false)
   })
 })

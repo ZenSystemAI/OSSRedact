@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from 'vitest'
 import JSZip from 'jszip'
-import { loadDocx, verifyDocx } from './docx'
+import { loadDocx, verifyDocx, docxLeakParts } from './docx'
 import { loadXlsx, verifyXlsx } from './xlsx'
 import { tier0Spans } from './tier0'
 import { mergeSpans, toSpans, buildEntityMap } from './redaction'
@@ -126,6 +126,143 @@ describe('docx round-trip', () => {
     // The SIN (with spaces, as it appears in the docx text) must still be present in the output
     const leaked = await verifyDocx(outputBlob, [SYNTHETIC_SIN])
     expect(leaked.length).toBeGreaterThan(0)
+  })
+})
+
+// -------------------------
+// .docx non-body parts (customXml data stores, glossary, cached chart/diagram data)
+// -------------------------
+// These parts can MIRROR body PII (content controls bound to a customXml store, cached chart labels, etc.).
+// They are not in BODY_PART_RE, so before the fix a mapped value survived there. Each fixture puts the value
+// in the body (so it is detected + mapped -> a replacement is produced) AND in the extra part.
+
+// Decode the serialized-XML entities so a <LABEL_NNN> placeholder (which serializes as &lt;LABEL_NNN&gt;)
+// can be matched literally in the assertions.
+function decodeEntities(s: string): string {
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+}
+
+// Attach an extra XML part to a base .docx blob and return the new blob.
+async function withExtraPart(blob: Blob, partName: string, xml: string): Promise<Blob> {
+  const zip = await JSZip.loadAsync(blob)
+  zip.file(partName, xml)
+  return zip.generateAsync({ type: 'blob', mimeType: blob.type })
+}
+
+describe('docx non-body value sweep', () => {
+  it('sweeps a mapped value out of a customXml data store (text nodes AND attribute values)', async () => {
+    const base = await makeDocxBlob({ paragraphs: [`Contact: ${SYNTHETIC_NAME}`] })
+    const blob = await withExtraPart(
+      base,
+      'customXml/item1.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<root xmlns="urn:test"><client full="${SYNTHETIC_NAME}">${SYNTHETIC_NAME}</client></root>`,
+    )
+
+    const file = docxBlobToFile(blob, 'customxml-test.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const placeholder = placeholderOf.get(spans[0].id)!
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postItem = await postZip.file('customXml/item1.xml')!.async('string')
+    expect(postItem).not.toContain(SYNTHETIC_NAME) // gone from both the text node and the attribute
+    expect(decodeEntities(postItem)).toContain(placeholder) // placeholder written in its place
+    // Fail-closed gate now scans customXml/ too -> passes because the value was actually removed.
+    expect(await verifyDocx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
+  it('sweeps a mapped value out of a cached chart label', async () => {
+    const base = await makeDocxBlob({ paragraphs: [`Region owner: ${SYNTHETIC_NAME}`] })
+    const blob = await withExtraPart(
+      base,
+      'word/charts/chart1.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+  <c:ser><c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>${SYNTHETIC_NAME}</c:v></c:pt></c:strCache></c:strRef></c:cat></c:ser>
+</c:chartSpace>`,
+    )
+
+    const file = docxBlobToFile(blob, 'chart-test.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const placeholder = placeholderOf.get(spans[0].id)!
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postChart = await postZip.file('word/charts/chart1.xml')!.async('string')
+    expect(postChart).not.toContain(SYNTHETIC_NAME)
+    expect(decodeEntities(postChart)).toContain(placeholder)
+    expect(await verifyDocx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
+  it('sweeps a mapped value out of the glossary document', async () => {
+    const base = await makeDocxBlob({ paragraphs: [`Signed: ${SYNTHETIC_NAME}`] })
+    const blob = await withExtraPart(
+      base,
+      'word/glossary/document.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:glossaryDocument xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docParts><w:docPart><w:docPartBody><w:p><w:r><w:t>${SYNTHETIC_NAME}</w:t></w:r></w:p></w:docPartBody></w:docPart></w:docParts>
+</w:glossaryDocument>`,
+    )
+
+    const file = docxBlobToFile(blob, 'glossary-test.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const placeholder = placeholderOf.get(spans[0].id)!
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    const postZip = await JSZip.loadAsync(outputBlob)
+    const postGlossary = await postZip.file('word/glossary/document.xml')!.async('string')
+    expect(postGlossary).not.toContain(SYNTHETIC_NAME)
+    expect(decodeEntities(postGlossary)).toContain(placeholder)
+    expect(await verifyDocx(outputBlob, Object.values(map))).toHaveLength(0)
+  })
+
+  it('fail-closed retained: a verified-but-unswept part still BLOCKS and is named', async () => {
+    // word/unsweepable.xml is scanned by the verifier (matches word/*.xml) but is NOT in NONBODY_SWEEP_RE,
+    // so the mirrored value cannot be removed there -> the export must stay blocked, naming the part.
+    const base = await makeDocxBlob({ paragraphs: [`Contact: ${SYNTHETIC_NAME}`] })
+    const blob = await withExtraPart(
+      base,
+      'word/unsweepable.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<root xmlns="urn:x"><v>${SYNTHETIC_NAME}</v></root>`,
+    )
+
+    const file = docxBlobToFile(blob, 'unsweepable-test.docx')
+    const { text, rebuild } = await loadDocx(file)
+    const spans = [valueSpan(text, SYNTHETIC_NAME)]
+    const { map, placeholderOf } = buildEntityMap(text, spans)
+    const outputBlob = await rebuild(replacementsForText(text, spans, placeholderOf, map))
+
+    // Body was redacted, but the unswept part still holds the value -> gate blocks.
+    const leaked = await verifyDocx(outputBlob, Object.values(map))
+    expect(leaked).toContain(SYNTHETIC_NAME)
+
+    // FIX 3: the blocking part is named for the UI message, and it is NOT word/document.xml (body is clean).
+    const parts = await docxLeakParts(outputBlob, leaked)
+    expect(parts).toContain('word/unsweepable.xml')
+    expect(parts).not.toContain('word/document.xml')
+  })
+
+  it('verifyDocx now scans customXml/ (silent-leak hole closed)', async () => {
+    // A value living only in a customXml store, with no body redaction, must be reported by the gate.
+    const base = await makeDocxBlob({ paragraphs: ['Dossier 2026-001'] })
+    const blob = await withExtraPart(
+      base,
+      'customXml/item1.xml',
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<root xmlns="urn:test"><client>${SYNTHETIC_NAME}</client></root>`,
+    )
+    const leaked = await verifyDocx(blob, [SYNTHETIC_NAME])
+    expect(leaked).toContain(SYNTHETIC_NAME)
+    expect(await docxLeakParts(blob, [SYNTHETIC_NAME])).toContain('customXml/item1.xml')
   })
 })
 

@@ -64,4 +64,16 @@ describe('deep-detect providers', () => {
     expect(detectNeural).toHaveBeenCalledWith('hello Alice Zephyr', 0.5)
     expect(spans.some((s) => s.label === 'person' && s.start === 6 && s.end === 18)).toBe(true)
   })
+
+  // Fail-closed contract: a neural model-load/inference failure must PROPAGATE out of deepDetect, NEVER be
+  // silently swallowed into a Tier-0-only result. The UI relies on the throw to mark the doc degraded and gate
+  // export; if deepDetect ever returned Tier-0 spans on neural failure, the fail-open bug would be back.
+  it('PROPAGATES a neural failure (does not silently degrade to Tier-0)', async () => {
+    vi.mocked(detectNeural).mockRejectedValueOnce(new Error('on-device model failed to load'))
+    // 'Daniel Brooks' is a free-text name Tier-0 cannot catch -- if the failure were swallowed, deepDetect
+    // would resolve with Tier-0 spans that do NOT cover it, and the caller would treat the output as scanned.
+    await expect(deepDetect('memo from Daniel Brooks', 0.5, undefined, 'browser')).rejects.toThrow(
+      /model failed to load/,
+    )
+  })
 })

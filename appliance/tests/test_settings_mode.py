@@ -71,10 +71,28 @@ def test_privacy_mode_redacts_all_soft_pii(monkeypatch, tmp_path):
 def test_coding_mode_lets_org_through_keeps_rest(monkeypatch, tmp_path):
     _set_mode(monkeypatch, tmp_path, 'coding')
     assert egress_proxy.policy_allows_pii('organization', {}) is False   # org passes for coding agents
+    assert egress_proxy.policy_allows_pii('ip_address', {}) is False      # bind/localhost/config IPs pass too
     for label in ('person', 'address', 'email', 'phone_number'):
         assert egress_proxy.policy_allows_pii(label, {}) is True, label
     for label in ('payment_card', 'secret', 'government_id'):            # floor unaffected
         assert egress_proxy.policy_allows_pii(label, {}) is True, label
+
+
+def test_privacy_mode_still_redacts_ip(monkeypatch, tmp_path):
+    """IP exclusion is coding-only: privacy mode (handling real PII) still redacts IP addresses."""
+    _set_mode(monkeypatch, tmp_path, 'privacy')
+    assert egress_proxy.policy_allows_pii('ip_address', {}) is True
+
+
+def test_coding_mode_lets_dates_and_versions_through_but_keeps_dob(monkeypatch, tmp_path):
+    """RC5: in coding mode, ambiguous dates/versions pass through (semver like 2.4.11 reads as a D.M.YY date to
+    DATE_RE, and timestamps/log-dates/copyright-years aren't PII in code) so the coding agent isn't mangled --
+    but a CUED date_of_birth is a floor label and STILL redacts. Scoping is coding-only, not global."""
+    _set_mode(monkeypatch, tmp_path, 'coding')
+    assert egress_proxy.policy_allows_pii('sensitive_date', {}) is False   # bare/ambiguous dates pass through
+    assert egress_proxy.policy_allows_pii('date_of_birth', {}) is True     # floor DOB STILL redacts (the guard)
+    _set_mode(monkeypatch, tmp_path, 'privacy')
+    assert egress_proxy.policy_allows_pii('sensitive_date', {}) is True     # privacy mode still redacts dates
 
 
 def test_off_mode_passes_soft_pii_but_keeps_floor(monkeypatch, tmp_path):

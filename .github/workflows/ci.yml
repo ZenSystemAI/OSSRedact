@@ -91,9 +91,12 @@ jobs:
         run: npm test
 
   # -----------------------------------------------------------------------
-  # Gate + appliance + training: torch-free tests (Tier-0 re + merge + gateway wiring).
-  # Excluded: gate/tests/test_maxlen.py and training/tests/test_compute_metrics.py
-  # (both require torch/onnxruntime on the GPU box).
+  # Gate + appliance + training: torch-free tests via pytest DISCOVERY over each domain dir, so a NEW test
+  # file is never silently skipped by a hand-maintained list (the prior list omitted gate/tests/test_maxlen.py,
+  # which is in fact torch-free). The only torch-requiring module (training/tests/test_compute_metrics.py)
+  # self-skips via pytest.importorskip('torch'); the NER tiers in privacy_gate.py import torch/onnxruntime/
+  # transformers LAZILY inside methods, so the floor tests are torch-free. TestClient deps are pinned in
+  # requirements-test.txt.
   # -----------------------------------------------------------------------
   gate-floor:
     name: Gate + appliance torch-free tests (Python 3.12)
@@ -115,32 +118,42 @@ jobs:
           python -m pip install pip-audit==2.10.1
           python -m pip_audit -r requirements-test.txt --strict
 
-      # Two SEPARATE pytest invocations on purpose: gate/ and appliance/ both ship a module named
-      # `privacy_gate` (the gate's thin checksum-exact floor vs the appliance's thicker floor), so a single
-      # interpreter collides on sys.modules['privacy_gate'] and the second domain imports the wrong copy.
-      # Separate processes keep each domain importing its own file. All of these are torch-free: the FastAPI
-      # TestClient deps (fastapi/httpx/uvicorn/pydantic/pyyaml) are pinned in requirements-test.txt, and the
-      # torch/onnxruntime/transformers NER tiers are imported LAZILY inside privacy_gate.py methods only.
-      - name: Run torch-free gate tests
-        run: |
-          python -m pytest \
-            gate/tests/test_validated_floor.py \
-            gate/tests/test_merge.py \
-            gate/tests/test_gate_regression.py \
-            gate/tests/test_gate_parity_vectors.py \
-            gate/tests/test_cue_name.py \
-            gate/tests/test_deploy_gate_service_sync.py \
-            gate/tests/test_redact_sweep.py \
-            training/gen/tests \
-            training/tests/test_labeling.py \
-            training/tests/test_remap_scheme.py \
-            validation/test_parity_check.py \
-            -v
+      # gate/ and appliance/ MUST be SEPARATE pytest invocations: both ship a module named `privacy_gate`
+      # (the gate's checksum-exact floor vs the appliance's thicker floor), so one interpreter collides on
+      # sys.modules['privacy_gate'] and the second domain imports the wrong copy. Separate processes keep each
+      # domain importing its own file. training/ + validation/ ride with the gate process (no privacy_gate import).
+      - name: Run torch-free gate + training + validation tests
+        run: python -m pytest gate/tests training/gen/tests training/tests validation -v
 
-      # The FULL appliance suite, in its own process (see the collision note above). This is the
-      # redaction-critical regression net that public CI previously skipped: control CORS/CSRF guard, floor
-      # hardening (the 2026-06-20 bypass locks), secret-key force-redact, input-shape fail-open, settings/mode
-      # invariants, denylist, glued-checksum, IPv6 / US-ZIP, live-view safety. A PR that regresses any of these
-      # now fails public CI instead of being caught only by a local run.
+      # The FULL appliance suite, in its own process (the collision note above). This is the redaction-critical
+      # regression net: control CORS/CSRF guard, floor hardening (the 2026-06-20 bypass locks), secret-key
+      # force-redact, input-shape fail-open, settings/mode invariants, denylist, glued-checksum, IPv6 / US-ZIP,
+      # live-view safety, entity-map eviction/TTL, gate-fallback + body-cap + CORS-once. Hermeticity does not
+      # depend on the runner's $HOME: appliance/tests/conftest.py points GATEWAY_ALLOWLIST/DENYLIST/MODE_FILE at
+      # empty temp files (mode=privacy) at import, so a populated ~/.ossredact cannot cause false pass/fail.
       - name: Run torch-free appliance tests
         run: python -m pytest appliance/tests -v
+
+  # -----------------------------------------------------------------------
+  # Workbench Tauri shell: Rust unit tests. Guards the settings.json routing writer -- the code that points
+  # Claude Code at the local firewall and appends the [1m] context-window suffix. Untested before, it now fails
+  # CI on a regression to the ANTHROPIC_BASE_URL redirect / model-suffix / sibling-key-preservation logic.
+  # -----------------------------------------------------------------------
+  tauri-rust:
+    name: Workbench Tauri (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Tauri v2 links against system webkit/gtk; the src-tauri crate needs them present to compile its tests.
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
+
+      - name: Cargo test (routing writer)
+        run: cargo test --manifest-path workbench/src-tauri/Cargo.toml

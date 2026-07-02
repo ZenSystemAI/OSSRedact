@@ -13,6 +13,7 @@ export type RawSpan = {
   cue?: string // context word that promoted a context-cued id
   subtype?: string // secret subtype, etc.
   members?: number // how many raw spans merged into this one
+  labels?: string[] // all DISTINCT member labels when a merged cluster spans >1 category (sorted; audit)
 }
 
 // A span as the workbench tracks it: a raw detection plus editable UI state.

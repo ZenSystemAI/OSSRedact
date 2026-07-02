@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { initTheme, toggleTheme, type Theme } from './lib/theme'
+import { isTauri } from './tauri-bootstrap'
 
 // The unified OSSRedact app shell. A thin top-level switch between two surfaces that share one codebase:
 //   - Redact   : the document workbench (in-browser, offline, daemon-independent) -- the universal-reach
@@ -18,8 +19,10 @@ const Console = lazy(() => import('./console/Console'))
 type Surface = 'redact' | 'firewall'
 
 export default function AppShell() {
-  // Default to Redact: a plain-browser visitor lands on the daemon-independent tool, unchanged from today.
-  const [surface, setSurface] = useState<Surface>('redact')
+  // Surface default by context: the Tauri tray app IS the "Firewall Console" (and its 440px window is too
+  // narrow for the Redact inspector), so it opens on Firewall; a plain-browser visitor still lands on the
+  // daemon-independent Redact tool, unchanged from today. Either is one click from the other via the segments.
+  const [surface, setSurface] = useState<Surface>(() => (isTauri() ? 'firewall' : 'redact'))
   const [theme, setThemeState] = useState<Theme>('light')
 
   useEffect(() => {

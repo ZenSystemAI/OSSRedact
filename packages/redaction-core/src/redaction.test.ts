@@ -15,6 +15,8 @@ import {
   sweepKnownValues,
   resolveRenderSpans,
 } from './redaction'
+import { applyAllowlist, buildAllowSet } from './allowlist'
+import { FLOOR_LABELS } from './labels'
 import type { RawSpan, Span } from './types'
 
 // Helper: build a minimal RawSpan
@@ -70,6 +72,74 @@ describe('mergeSpans', () => {
 
   it('returns empty array for empty input', () => {
     expect(mergeSpans([])).toHaveLength(0)
+  })
+
+  // PORTED (was the B13 tracked-gap tripwire): the merge now records ALL distinct member labels of a
+  // multi-category cluster in a sorted `labels` field AND enforces floor stickiness -- a faithful port of
+  // the Python floor (gate + appliance merge_spans). This asserts the multi-label record; the
+  // floor-stickiness cases live in the block below.
+  it('records a sorted multi-label `labels` field for a multi-category cluster (Python-floor parity)', () => {
+    const result = mergeSpans([raw(0, 10, 'email', 0.9), raw(5, 15, 'phone', 0.95)])
+    expect(result).toHaveLength(1)
+    expect(result[0].labels).toEqual(['email', 'phone'])
+    expect(result[0].label).toBe('phone') // neither is a floor label -> highest-conf primary stands
+  })
+
+  it('does NOT record a `labels` field for a single-category cluster', () => {
+    const result = mergeSpans([raw(0, 10, 'address', 0.9), raw(8, 16, 'address', 0.8)])
+    expect(result).toHaveLength(1)
+    expect(Object.keys(result[0])).not.toContain('labels')
+  })
+})
+
+// -------------------------
+// mergeSpans FLOOR STICKINESS (port of gate/tests/test_merge.py merge_spans behaviour)
+// A hard-floor label must never be downgraded to a soft label by an overlapping higher-conf guess, or the
+// downstream floor guards (applyAllowlist, 'off' mode) that key off the post-merge LABEL would let a floor
+// value reach the wire. Floor only ever WINS -- it keeps more redaction, never shifts the mask.
+// -------------------------
+describe('mergeSpans floor stickiness', () => {
+  it('the probe ends floor-labeled and stays un-allowlist-exemptable (proven failure made impossible)', () => {
+    // Old merge elected phone_number (0.9 > 0.6); applyAllowlist then let an allowlisted value pass -- a floor
+    // value on the wire. Now the floor label (sensitive_account_id) sticks and the allowlist can never exempt it.
+    const merged = mergeSpans([raw(0, 10, 'sensitive_account_id', 0.6), raw(5, 15, 'phone_number', 0.9)])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].label).toBe('sensitive_account_id')
+    expect(FLOOR_LABELS.has(merged[0].label)).toBe(true)
+    expect(merged[0].start).toBe(0)
+    expect(merged[0].end).toBe(15) // merged extents kept (union), only the label is restored
+
+    const text = '0'.repeat(15) // the whole merged value, declared safe in the allowlist
+    const allow = buildAllowSet([text])
+    expect(applyAllowlist(merged, text, allow)).toHaveLength(1) // floor label -> never exempt
+    // contrast: the SOFT phone_number the old merge elected WOULD have been dropped by the same allowlist
+    const asPhone = [{ ...merged[0], label: 'phone_number' }]
+    expect(applyAllowlist(asPhone, text, allow)).toHaveLength(0)
+  })
+
+  it('soft-only cluster: the highest-(conf,len) election is untouched by stickiness', () => {
+    const result = mergeSpans([raw(0, 10, 'organization', 0.7), raw(0, 10, 'person', 0.9)])
+    expect(result).toHaveLength(1)
+    expect(result[0].label).toBe('person') // highest conf wins, no floor involved
+    expect(result[0].labels).toEqual(['organization', 'person'])
+  })
+
+  it('floor-vs-floor: primary elected by the same (conf, length) rule Python uses', () => {
+    // equal confidence -> the LONGER floor member wins the primary; both stay floor so no restore is needed
+    const result = mergeSpans([raw(0, 5, 'iban', 0.8), raw(3, 15, 'government_id', 0.8)])
+    expect(result).toHaveLength(1)
+    expect(result[0].label).toBe('government_id')
+    expect(result[0].labels).toEqual(['government_id', 'iban'])
+  })
+
+  it('parity with gate/tests/test_merge.py: payment_card floor survives a higher-conf soft person overlap', () => {
+    // mirror of test_floor_label_sticky_when_outscored_by_soft_span (text "ref 4111111111111111 here")
+    const result = mergeSpans([raw(4, 20, 'payment_card', 0.97), raw(4, 20, 'person', 0.99)])
+    expect(result).toHaveLength(1)
+    expect(result[0].label).toBe('payment_card') // floor sticky despite person 0.99 > 0.97
+    expect(result[0].start).toBe(4)
+    expect(result[0].end).toBe(20)
+    expect(result[0].labels).toEqual(['payment_card', 'person']) // the soft guess is still recorded
   })
 })
 

@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { isTauri } from '../tauri-bootstrap'
 import { useDaemon } from './useDaemon'
+import FirewallControls from './FirewallControls'
 import InstallCta from './InstallCta'
 import ConnectPanel from './ConnectPanel'
 import LivePanel from './LivePanel'
@@ -26,6 +28,9 @@ export default function Console() {
 
   return (
     <div className="mx-auto max-w-3xl px-5 py-6">
+      {/* Point-and-click on/off + routing (desktop app only; in a browser there's no local service to control). */}
+      {isTauri() && <FirewallControls onFirewallChange={recheck} />}
+
       <nav className="mb-5 flex gap-1 border-b border-gray-200 dark:border-white/10">
         {TABS.map((t) => (
           <button

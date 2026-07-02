@@ -42,6 +42,33 @@ UUID_RE = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 # (common Canadian format) is caught deterministically, not left to the model. The digit-count gate below
 # decides the label and rejects too-short noise.
 DIGIT_RUN_RE = re.compile(r'(?<![\w])(\d[\d \-]{5,}\d)(?![\w])')   # space/hyphen groups only (D1: no '.', matches tier0.ts + gate -- '.' over-matched decimals/versions)
+# Date-shaped digit runs. DIGIT_RUN_RE also swallows dates ("2026-07-01" -> 8 digits -> the 7-19 bucket),
+# minting sensitive_account_id for every datestamp/filename/beta tag even though tier0:date emitted
+# sensitive_date for the same span -- the account label then survives coding mode's `date` category
+# exclusion and re-redacts it (the RC5 gap: `context-1m-2025-08-07` -> <SENSITIVEACCOUNTID_nnn>).
+# Classify these runs as sensitive_date instead: privacy mode still redacts them (date category),
+# coding mode passes them. Hyphenated forms only -- space-grouped runs ("2026 07 01") stay account-shaped
+# because real account/transit groupings use spaces. Compact YYYYMMDD is included (build/date stamps);
+# a labeled account number that happens to look like one is still caught by the cue/keyed rules.
+_DATE_SHAPED_RES = (
+    re.compile(r'(19|20)\d{2}-(\d{1,2})-(\d{1,2})( \d{1,2})?$'),   # Y-M-D (+ optional glued log hour)
+    re.compile(r'(\d{1,2})-(\d{1,2})-((?:19|20)\d{2})$'),          # D-M-Y / M-D-Y
+    re.compile(r'(19|20)(\d{2})(\d{2})(\d{2})$'),                  # compact YYYYMMDD
+)
+
+
+def _date_shaped(raw: str) -> bool:
+    m = _DATE_SHAPED_RES[0].match(raw)
+    if m:
+        return 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31
+    m = _DATE_SHAPED_RES[1].match(raw)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        return (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
+    m = _DATE_SHAPED_RES[2].match(raw)
+    if m:
+        return 1 <= int(m.group(3)) <= 12 and 1 <= int(m.group(4)) <= 31
+    return False
 PHONE_RE = re.compile(r'(?<![\w])(\+?1[ .\-]?)?\(?\d{3}\)?[ .\-]?\d{3}[ .\-]?\d{4}(?![\w])')
 # Dates: FR/EN month-name dates, ISO, and numeric. The model catches dates in clean prose but is
 # unreliable in tabular statement noise (e.g. "21 mai 2026" -> only "21"), so own them deterministically.
@@ -452,6 +479,9 @@ def tier0_spans(text: str):
     for m in DIGIT_RUN_RE.finditer(t):
         raw = m.group(1); digits = re.sub(r'\D', '', raw)
         n = len(digits); val = None
+        if _date_shaped(raw):
+            add(m.start(1), m.end(1), 'sensitive_date', 0.8, 'tier0:date_shaped')
+            continue
         if n == 16 or n == 15:
             ok = _luhn_ok(digits); lab, conf, val = 'payment_card', (0.97 if ok else 0.7), ('luhn_ok' if ok else 'luhn_fail')
         elif n == 9:
@@ -523,8 +553,9 @@ class NPUTier:
 # ---------------- Tier 2: GPU fp16 (the large always-on tier) ----------------
 class GPUTier:
     """fp16 safetensors token-classifier on CUDA = the strongest tier. Same .spans() interface as NPUTier
-    (duck-typed into PrivacyGate.npu). Loads the model in its deployment form (fp16 on GPU), not INT8."""
-    def __init__(self, model_dir, device='cuda', max_len=256):
+    (duck-typed into PrivacyGate.npu). Loads the model in its deployment form (fp16 on GPU), not INT8.
+    This is the tier the dedicated GPU appliance box (spare 3090s) will run; max_len mirrors NPUTier (512)."""
+    def __init__(self, model_dir, device='cuda', max_len=512):  # 512: see NPUTier note (256 truncated dense-chunk tails)
         import torch
         from transformers import AutoTokenizer, AutoModelForTokenClassification
         self.torch = torch
@@ -563,7 +594,7 @@ class GPUTier:
 FLOOR_LABELS = frozenset({
     'secret', 'password', 'api_key', 'access_token',                  # credentials
     'payment_card', 'card_cvv', 'card_expiry',                        # cards
-    'sensitive_account_id', 'bank_account', 'iban', 'routing_number', # bank / account
+    'sensitive_account_id', 'account_number', 'bank_account', 'iban', 'routing_number', # bank / account
     'government_id', 'tax_id', 'date_of_birth',                       # government / identity
 })
 
@@ -573,8 +604,9 @@ def merge_spans(spans, sticky=FLOOR_LABELS):
     # overlapping detections. Greedy drop-the-loser does exactly that: model emits "21" inside a date, or a
     # spurious "password" on a UUID partially overlaps "21 mai 2026" -> whichever is dropped, half the date
     # leaks. So instead: any cluster of overlapping spans is redacted as ONE span covering their union. The
-    # cluster's label is the highest-confidence (then longest) member's; the union text is what gets masked
-    # and stored for rehydration. Over-redaction (a UUID swallowed with an adjacent date) is the safe error.
+    # cluster's PRIMARY label is the highest-confidence (then longest) member's (used for the placeholder),
+    # but ALL distinct member labels are recorded in 'labels' so a category filter / audit is not lied to.
+    # The union text is what gets masked and stored for rehydration. Over-redaction is the safe error.
     #
     # FLOOR STICKINESS: a deterministic hard-floor label (credentials, payment cards, bank/IBAN, government/
     # tax IDs, DOB) must NEVER be downgraded to a soft neural label just because an overlapping model guess
@@ -592,6 +624,7 @@ def merge_spans(spans, sticky=FLOOR_LABELS):
         if out and s['start'] < out[-1]['end']:  # overlaps the current cluster
             cur = out[-1]
             cur['members'] = cur.get('members', 1) + 1
+            cur['_labels'].add(s['label'])
             cand = (s['conf'], s['end'] - s['start'])
             if cand > (cur['_bc'], cur['_bl']):  # better label-bearer -> its provenance wins the cluster
                 cur['label'] = s['label']; cur['tier'] = s['tier']; cur['_bc'], cur['_bl'] = cand
@@ -602,7 +635,8 @@ def merge_spans(spans, sticky=FLOOR_LABELS):
             cur['end'] = max(cur['end'], s['end'])
             cur['conf'] = max(cur['conf'], s['conf'])
         else:
-            nc = {**s, '_bc': s['conf'], '_bl': s['end'] - s['start'], 'members': 1}
+            nc = {**s, '_bc': s['conf'], '_bl': s['end'] - s['start'], 'members': 1,
+                  '_labels': {s['label']}}
             if floor:
                 nc['_floor'] = s; nc['_fc'] = s['conf']
             out.append(nc)
@@ -615,6 +649,11 @@ def merge_spans(spans, sticky=FLOOR_LABELS):
             m['rule'] = fl.get('rule'); m['validator'] = fl.get('validator')
             m['cue'] = fl.get('cue'); m['subtype'] = fl.get('subtype')
         m.pop('_bc', None); m.pop('_bl', None)
+        labset = m.pop('_labels', None)
+        if labset and len(labset) > 1:
+            # union spanned >1 category: keep the elected primary in 'label' for the placeholder, but record
+            # ALL categories so a downstream category filter / Law 25 audit sees the true set, not just one.
+            m['labels'] = sorted(labset)
         for k in ('validator', 'cue', 'subtype'):
             if m.get(k) is None:
                 m.pop(k, None)   # drop null provenance keys for a clean record

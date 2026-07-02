@@ -1,27 +1,33 @@
 // Span merge + placeholder/entity-map machinery. The merge is a faithful port of privacy_gate.py
 // merge_spans() (CONNECTED-COMPONENT UNION): any cluster of overlapping detections becomes ONE
-// redaction covering their union, labelled by the highest-confidence (then longest) member. A privacy
-// gate must never leave a PII fragment exposed between two overlapping spans, so over-redaction is the
-// safe error. Placeholders are <LABEL_NNN>, matching the appliance's gate_service.py /redact contract,
-// so a document redacted here round-trips through the same entity map.
+// redaction covering their union, labelled by the highest-confidence (then longest) member -- EXCEPT a
+// hard-floor label always wins the cluster primary (FLOOR STICKINESS), and every distinct member label is
+// recorded in `labels`. A privacy gate must never leave a PII fragment exposed between two overlapping
+// spans, so over-redaction is the safe error. Placeholders are <LABEL_NNN>, matching the appliance's
+// gate_service.py /redact contract, so a document redacted here round-trips through the same entity map.
 
 import type { RawSpan, Span, EntityMap } from './types'
 import { PLACEHOLDER_CONTRACT_RE } from './placeholder'
+import { FLOOR_LABELS } from './labels.js'
 
 let _idCounter = 0
 export function newId(): string {
   return 's' + (++_idCounter).toString(36)
 }
 
-export function mergeSpans(spans: RawSpan[]): RawSpan[] {
+export function mergeSpans(spans: RawSpan[], sticky: ReadonlySet<string> = FLOOR_LABELS): RawSpan[] {
   if (!spans.length) return []
   const arr = [...spans].sort((a, b) => a.start - b.start || b.end - b.start - (a.end - a.start))
-  type Acc = RawSpan & { _bc: number; _bl: number }
+  // _bc/_bl = the elected primary's (conf, length); _labels = all distinct member labels; _floor/_fc =
+  // the STRONGEST floor member (so a floor value out-scored by a soft guess can be restored below).
+  type Acc = RawSpan & { _bc: number; _bl: number; _labels: Set<string>; _floor?: RawSpan; _fc?: number }
   const out: Acc[] = []
   for (const s of arr) {
+    const floor = sticky.has(s.label)
     const cur = out[out.length - 1]
     if (cur && s.start < cur.end) {
       cur.members = (cur.members ?? 1) + 1
+      cur._labels.add(s.label)
       const candC = s.conf
       const candL = s.end - s.start
       if (candC > cur._bc || (candC === cur._bc && candL > cur._bl)) {
@@ -34,15 +40,45 @@ export function mergeSpans(spans: RawSpan[]): RawSpan[] {
         cur.cue = s.cue
         cur.subtype = s.subtype
       }
+      if (floor && s.conf > (cur._fc ?? -1)) {
+        // remember the strongest floor member so its provenance survives even if a soft guess out-scores it
+        cur._floor = s
+        cur._fc = s.conf
+      }
       cur.end = Math.max(cur.end, s.end)
       cur.conf = Math.max(cur.conf, s.conf)
     } else {
-      out.push({ ...s, _bc: s.conf, _bl: s.end - s.start, members: 1 })
+      const nc: Acc = { ...s, _bc: s.conf, _bl: s.end - s.start, members: 1, _labels: new Set([s.label]) }
+      if (floor) {
+        nc._floor = s
+        nc._fc = s.conf
+      }
+      out.push(nc)
     }
   }
   for (const o of out) {
+    // FLOOR STICKINESS: if the elected primary is NOT a floor label but the cluster held a floor member,
+    // restore the strongest floor member's label + provenance. The merged span EXTENTS (start/end/conf) are
+    // untouched -- floor only ever KEEPS more redaction, never shifts the mask. The downstream floor guards
+    // (applyAllowlist, 'off' mode) key off the post-merge LABEL, so a real floor value out-scored by a soft
+    // neural guess must exit the merge carrying a floor label or it would lose its protection and leak.
+    const fl = o._floor
+    if (fl && !sticky.has(o.label)) {
+      o.label = fl.label
+      o.tier = fl.tier
+      o.rule = fl.rule
+      o.validator = fl.validator
+      o.cue = fl.cue
+      o.subtype = fl.subtype
+    }
+    // union spanned >1 category: keep the elected primary in `label` for the placeholder, but record ALL
+    // distinct member labels so a downstream category filter / Law 25 audit sees the true set, not just one.
+    if (o._labels.size > 1) o.labels = [...o._labels].sort()
     delete (o as Partial<Acc>)._bc
     delete (o as Partial<Acc>)._bl
+    delete (o as Partial<Acc>)._labels
+    delete (o as Partial<Acc>)._floor
+    delete (o as Partial<Acc>)._fc
     if (!o.validator) delete o.validator
     if (!o.cue) delete o.cue
     if (!o.subtype) delete o.subtype

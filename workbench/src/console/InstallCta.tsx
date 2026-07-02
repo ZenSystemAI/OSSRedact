@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { isTauri } from '../tauri-bootstrap'
 import { connectBase } from '../lib/daemon'
+import { firewallControl } from '../lib/firewall'
 
 /**
  * Shown in the Firewall console tabs when no local daemon is reachable. Two very different situations:
@@ -11,6 +13,22 @@ import { connectBase } from '../lib/daemon'
 export default function InstallCta({ onRetry }: { onRetry: () => void }) {
   const inApp = isTauri()
   const base = connectBase()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  async function start() {
+    setBusy(true)
+    setErr(null)
+    try {
+      await firewallControl('start')
+      onRetry()
+      // the gate loads its model over a few seconds; re-check reachability shortly after
+      window.setTimeout(onRetry, 4000)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <div className="mx-auto max-w-xl py-16 text-center">
       <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-teal-50 dark:bg-teal-400/10 text-teal-700 dark:text-teal-300">
@@ -26,11 +44,18 @@ export default function InstallCta({ onRetry }: { onRetry: () => void }) {
       </p>
 
       {inApp && (
-        <div className="mx-auto mt-5 max-w-md rounded-lg border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-black/30 p-3 text-left">
-          <p className="mb-1.5 text-xs font-medium text-gray-700 dark:text-neutral-300">Start the firewall service:</p>
-          <pre className="overflow-x-auto rounded-md bg-white dark:bg-black/40 p-2 font-mono text-xs text-gray-800 dark:text-neutral-200">sudo systemctl start ossredact-gate-cpu.service ossredact-egress.service</pre>
-          <p className="mt-1.5 text-[11px] text-gray-400 dark:text-neutral-500">
-            Running it another way? It just needs to be listening on <code className="font-mono">{base}</code>.
+        <div className="mx-auto mt-5 max-w-md rounded-lg border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-black/30 p-4 text-center">
+          <button
+            type="button"
+            onClick={start}
+            disabled={busy}
+            className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50"
+          >
+            {busy ? 'Starting…' : 'Start the firewall'}
+          </button>
+          {err && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
+          <p className="mt-2 text-[11px] text-gray-400 dark:text-neutral-500">
+            Starts the local services -- no admin needed. Or use the Firewall switch at the top.
           </p>
         </div>
       )}
@@ -51,6 +76,12 @@ export default function InstallCta({ onRetry }: { onRetry: () => void }) {
           Retry connection
         </button>
       </div>
+
+      <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-gray-400 dark:text-neutral-500">
+        Running the gate on another machine (a home server or tailnet host)? Set its address in the{' '}
+        <strong className="font-medium text-gray-500 dark:text-neutral-400">Connect</strong> tab →{' '}
+        <strong className="font-medium text-gray-500 dark:text-neutral-400">Gate connection</strong>.
+      </p>
 
       {!inApp && (
         <p className="mt-4 text-xs text-gray-400 dark:text-neutral-500">

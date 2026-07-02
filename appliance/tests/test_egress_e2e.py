@@ -69,6 +69,30 @@ class _StubAsyncClient:
 
 
 _httpx.AsyncClient = _StubAsyncClient
+
+
+# httpx exception hierarchy the proxy references to classify gate failures (TransportError = unreachable ->
+# fail over / degrade; HTTPStatusError = a reachable gate returned 4xx/5xx -> a real fault, not an outage).
+class _StubHTTPError(Exception):
+    pass
+
+
+class _StubTransportError(_StubHTTPError):
+    pass
+
+
+class _StubConnectError(_StubTransportError):
+    pass
+
+
+class _StubHTTPStatusError(_StubHTTPError):
+    pass
+
+
+_httpx.HTTPError = _StubHTTPError
+_httpx.TransportError = _StubTransportError
+_httpx.ConnectError = _StubConnectError
+_httpx.HTTPStatusError = _StubHTTPStatusError
 _install_stub('httpx', _httpx)
 
 
@@ -288,6 +312,38 @@ def test_redact_body_accepts_injected_detector_without_httpx_client(monkeypatch)
     assert 'Jane Proof' not in wire
     assert '<PERSON_001>' in wire
     assert replay['<PERSON_001>'] == 'Jane Proof'
+
+
+@_NEEDS_PROXY
+def test_scannable_request_loads_entity_map_once(monkeypatch):
+    """perf-lock: on the COMMON path (a request carrying scannable text) redact_body must NOT pre-load the
+    session map merely to compute the empty-body fast-path -- that read is consulted only when there are zero
+    scannable fields. So a scannable request constructs EntityMap exactly ONCE (the authoritative pass-2 load
+    under the lock), not twice. Regression guard for the dropped redundant load+decrypt of the whole map."""
+    class NoHttpxClient:
+        def __init__(self, *a, **k):
+            raise AssertionError('redact_body should not construct httpx when a detector is injected')
+    monkeypatch.setattr(egress_proxy.httpx, 'AsyncClient', NoHttpxClient)
+
+    real_map = egress_proxy.EntityMap
+    count = {'n': 0}
+
+    class CountingEntityMap(real_map):
+        def __init__(self, *a, **k):
+            count['n'] += 1
+            super().__init__(*a, **k)
+    monkeypatch.setattr(egress_proxy, 'EntityMap', CountingEntityMap)
+
+    async def detector(text, min_score=0.5):
+        i = text.find('Jane Proof')
+        return [] if i == -1 else [{'start': i, 'end': i + 10, 'label': 'person',
+                                    'tier': 1, 'conf': 0.95, 'rule': 'inj'}]
+
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'Notify Jane Proof.'}]}
+    ctx = {'session': 'perf-once-' + os.urandom(4).hex(), 'project': 'e2e'}
+    meta, _ = asyncio.run(egress_proxy.redact_body(body, ctx, detector=detector))
+    assert meta['redaction'] == 'redacted'
+    assert count['n'] == 1, f'scannable path should load the entity map exactly once, got {count["n"]}'
 
 
 @_NEEDS_PROXY
@@ -725,6 +781,54 @@ def test_nonstreaming_routes_preserve_headers_and_rehydrate_json_error(monkeypat
         assert _RouteAsyncClient.instances[-1].closed, 'non-streaming route client must close'
 
 
+@_NEEDS_PROXY
+def test_count_tokens_dryrun_redacts(monkeypatch):
+    """B2: the count_tokens pre-flight must redact its body like /v1/messages (it carries the same content)."""
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', True)
+    monkeypatch.setattr(egress_proxy, 'EXPOSE_MAP', False)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({}))
+
+    email = 'count.tokens@example.test'
+    body = {'model': 'claude-test',
+            'messages': [{'role': 'user', 'content': f'How many tokens is {email}?'}]}
+    payload = _run_route(egress_proxy.messages_count_tokens, body,
+                         headers={'x-claude-code-session-id': 'ct-dry-' + os.urandom(4).hex()})
+
+    assert payload['_dryrun'] is True
+    wire = json.dumps(payload['upstream_body'], ensure_ascii=False)
+    assert email not in wire, 'raw email leaked in count_tokens dryrun upstream_body'
+    assert _PH_RE.search(wire), 'expected a placeholder in the count_tokens dryrun upstream_body'
+
+
+@_NEEDS_PROXY
+def test_count_tokens_redacts_then_forwards_count_verbatim(monkeypatch):
+    """B2: count_tokens redacts the body, forwards to ANTHROPIC /v1/messages/count_tokens, and returns the
+    upstream {input_tokens: N} verbatim (no rehydration -- the count carries no PII)."""
+    monkeypatch.setattr(egress_proxy, 'DRYRUN', False)
+    monkeypatch.setattr(egress_proxy, '_detect_neural', _make_neural({'Alice Proof': 'person'}))
+    monkeypatch.setattr(egress_proxy.httpx, 'AsyncClient', _RouteAsyncClient)
+    _RouteAsyncClient.instances = []
+    _RouteAsyncClient.next_response = _FakeUpstreamResponse(
+        200, {'content-type': 'application/json'}, json.dumps({'input_tokens': 1234}).encode('utf-8'))
+
+    name, email = 'Alice Proof', 'proof.alice@example.test'
+    body = {'model': 'claude-test',
+            'messages': [{'role': 'user', 'content': f'Count tokens for {name} at {email}.'}]}
+    resp = asyncio.run(egress_proxy.messages_count_tokens(
+        _FakeRequest(body, headers={'x-claude-code-session-id': 'ct-fwd-' + os.urandom(4).hex()})))
+
+    # returned verbatim count
+    assert _json_response_payload(resp) == {'input_tokens': 1234}
+    assert _response_status(resp) == 200
+    # forwarded to the count_tokens endpoint with a REDACTED body
+    inst = _RouteAsyncClient.instances[-1]
+    assert inst.request['url'] == egress_proxy.ANTHROPIC_UPSTREAM + '/v1/messages/count_tokens'
+    fwd = inst.request['content']
+    assert name not in fwd and email not in fwd, 'raw PII forwarded to the count_tokens endpoint'
+    assert _PH_RE.search(fwd), 'expected placeholders in the forwarded count_tokens body'
+    assert inst.closed, 'count_tokens client must close'
+
+
 # ---------------------------------------------------------------------------
 # 1. ROUND-TRIP: Anthropic /v1/messages body redacts on egress, and the replay
 #    map restores the originals in a synthetic upstream response.
@@ -809,12 +913,19 @@ def test_response_rehydrate_is_single_pass_for_placeholder_shaped_values():
     for helper in (egress_proxy.rehydrate_text, openai_adapter.rehydrate_text):
         assert helper(sample, replay) == expected
 
-    args = json.dumps({'secret': '<SECRET_001>', 'email': '<EMAIL_001>'})
+    # TOOL-ARG single-pass: a NON-FLOOR token still rehydrates (Half A); its restored value carrying
+    # placeholder-shaped text must not be rescanned either.
+    nf_replay = {'<PERSON_001>': 'tok_<EMAIL_001>_x', '<EMAIL_001>': 'alice@example.test'}
+    nf_args = json.dumps({'name': '<PERSON_001>', 'email': '<EMAIL_001>'})
     for helper in (egress_proxy.rehydrate_json_string, openai_adapter.rehydrate_json_string):
-        assert json.loads(helper(args, replay)) == {
-            'secret': 'tok_<EMAIL_001>_x',
+        assert json.loads(helper(nf_args, nf_replay)) == {
+            'name': 'tok_<EMAIL_001>_x',
             'email': 'alice@example.test',
         }
+    # B5: a FLOOR/secret token is WITHHELD from executed tool args -> stays the inert literal.
+    f_args = json.dumps({'secret': '<SECRET_001>'})
+    for helper in (egress_proxy.rehydrate_json_string, openai_adapter.rehydrate_json_string):
+        assert json.loads(helper(f_args, replay)) == {'secret': '<SECRET_001>'}
 
 
 @_NEEDS_PROXY
@@ -990,10 +1101,15 @@ def test_native_numeric_tool_arguments_are_redacted_and_rehydrate(monkeypatch):
     tool_input = anth['messages'][0]['content'][0]['input']
     assert isinstance(tool_input['ssn'], str) and tool_input['ssn'].startswith('<')
     assert isinstance(tool_input['card'], str) and tool_input['card'].startswith('<')
-    restored = {'content': [{'type': 'tool_use', 'input': tool_input}]}
+    restored = {'content': [{'type': 'tool_use', 'input': dict(tool_input)}]}
     egress_proxy.rehydrate_anthropic_response(restored, replay)
-    assert restored['content'][0]['input']['ssn'] == str(ssn_num)
-    assert restored['content'][0]['input']['card'] == str(card_num)
+    # B5 Half A: ssn (government_id) and card (payment_card) are FLOOR/secret-class, and this is a tool_use.input
+    # (an EXECUTED tool argument), so they are WITHHELD from rehydration -> the inert placeholder stays literal,
+    # the real numeric PII never reappears in an executed argument. (request-side redaction above is unchanged.)
+    out_ssn = restored['content'][0]['input']['ssn']
+    out_card = restored['content'][0]['input']['card']
+    assert out_ssn.startswith('<') and str(ssn_num) not in out_ssn
+    assert out_card.startswith('<') and str(card_num) not in out_card
     assert restored['content'][0]['input']['ok'] is True
     assert restored['content'][0]['input']['none'] is None
 
@@ -1032,8 +1148,10 @@ def test_native_numeric_tool_arguments_are_redacted_and_rehydrate(monkeypatch):
     resp = {'choices': [{'message': {'tool_calls': [{'function': {'arguments': args}}]}}]}
     openai_adapter.rehydrate_openai_response(resp, replay)
     out_args = resp['choices'][0]['message']['tool_calls'][0]['function']['arguments']
-    assert out_args['ssn'] == str(ssn_num)
-    assert out_args['card'] == str(card_num)
+    # B5: FLOOR ssn/card are WITHHELD from the executed tool_calls.arguments (native dict form here, reached via
+    # the _is_json_args_key key rule) -> stay the inert placeholder, never the raw number.
+    assert out_args['ssn'].startswith('<') and str(ssn_num) not in out_args['ssn']
+    assert out_args['card'].startswith('<') and str(card_num) not in out_args['card']
 
     responses_body = {
         'model': 'gpt-test',
@@ -1050,8 +1168,10 @@ def test_native_numeric_tool_arguments_are_redacted_and_rehydrate(monkeypatch):
     resp_args = responses_body['input'][0]['arguments']
     restored_resp = {'output': [{'type': 'function_call', 'arguments': resp_args}]}
     egress_proxy.responses_adapter.rehydrate_responses_response(restored_resp, replay)
-    assert restored_resp['output'][0]['arguments']['ssn'] == str(ssn_num)
-    assert restored_resp['output'][0]['arguments']['card'] == str(card_num)
+    # B5: FLOOR ssn/card withheld from the executed function_call.arguments -> stay the inert placeholder.
+    out_resp = restored_resp['output'][0]['arguments']
+    assert out_resp['ssn'].startswith('<') and str(ssn_num) not in out_resp['ssn']
+    assert out_resp['card'].startswith('<') and str(card_num) not in out_resp['card']
 
 
 @_NEEDS_PROXY
@@ -1801,3 +1921,424 @@ def test_egress_redacts_real_secret_shapes_floor_only(monkeypatch):
     assert akia not in wire, 'an AWS access key must be redacted by the always-on secret floor'
     assert antk not in wire, 'an anthropic key in a tool_result must be redacted by the secret floor'
     assert _PH_RE.search(wire), 'placeholders present for the redacted secrets'
+
+
+@_NEEDS_PROXY
+@_NEEDS_PROXY
+def test_rc3_mode_toggle_takes_effect_on_frozen_and_swept_value(monkeypatch, tmp_path):
+    """RC3: a config change (mode toggle) must take effect on content the gate ALREADY saw this session. Turn 1
+    (privacy) mints an org and FREEZES the field. Turn 2 re-sends the SAME text under 'off' mode: the freeze must
+    INVALIDATE (the config fingerprint in the key changed) AND the cross-turn sweep must NOT replay the org
+    placeholder (the policy-aware veto), so the org passes through. Without the freeze-key cfg dimension OR the
+    sweep veto, the stale privacy redaction would replay -- the 'mode toggle feels dead' bug. Turn 3 (still off)
+    is the regression guard: config UNCHANGED must stay byte-identical (the freeze still hits, no spurious bust)."""
+    mode_file = tmp_path / 'mode'
+    monkeypatch.setattr(egress_proxy, '_MODE_FILE', str(mode_file))
+    al = tmp_path / 'allow'; al.write_text(''); monkeypatch.setattr(egress_proxy, '_ALLOWLIST_FILE', str(al))
+    dl = tmp_path / 'deny'; dl.write_text(''); monkeypatch.setattr(egress_proxy, '_DENYLIST_FILE', str(dl))
+    monkeypatch.setattr(egress_proxy, 'FREEZE_PREFIX', True)
+
+    async def detector(text, min_score=0.5):
+        return [{'start': m.start(1), 'end': m.end(1), 'label': 'organization', 'tier': 1, 'conf': 0.95, 'rule': 'cue'}
+                for m in re.finditer(r'vendor:\s+(\S+)', text)]
+
+    SYS = 'Our billing runs through vendor: Acme today.'
+    session = 'rc3-' + os.urandom(6).hex()
+
+    def turn():
+        body = {'model': 'claude-test', 'system': SYS, 'messages': [{'role': 'user', 'content': 'Hi.'}]}
+        asyncio.run(egress_proxy.redact_body(body, {'session': session, 'project': 'e2e'}, detector=detector))
+        return body['system']
+
+    mode_file.write_text('privacy')
+    t1 = turn()
+    assert 'Acme' not in t1, f'turn-1 privacy mode must redact the org, got {t1!r}'
+
+    mode_file.write_text('off')
+    t2 = turn()
+    assert t2 == SYS, f'toggling to off must un-mask the org on the re-sent field (mode took effect), got {t2!r}'
+
+    t3 = turn()   # config UNCHANGED (still off)
+    assert t3 == t2, f'a config-stable turn must stay byte-identical (freeze still hits, no spurious cache-bust): {t3!r}'
+
+
+def test_prompt_cache_freeze_keeps_prefix_bytes_stable_across_turns(monkeypatch):
+    """Headline prompt-cache fix. A re-sent system prefix must redact to BYTE-IDENTICAL output every turn, even
+    after the entity map grows -- otherwise Anthropic re-processes the whole prefix every turn (the operator's
+    "context balloons one shot / 5h usage climbs fast" symptom). The pass-3 known-value sweep applies the WHOLE
+    (growing) map to every field, so a value first minted on a LATER turn would retroactively redact the SAME
+    system text and shift its bytes. The freeze memo (redact once, replay verbatim) prevents that. We drive the
+    real divergence and assert BOTH directions: freeze ON -> prefix stable; freeze OFF -> prefix diverges (so the
+    test provably exercises the bug, and the freeze is what fixes it)."""
+
+    # Detector tags the token after a 'codename:' cue as an organization. The cue lets a value be UNKNOWN in the
+    # system prefix on turn 1 (no cue there) yet minted from a tail message on turn 2 -- the exact shape that makes
+    # the growing sweep retroactively rewrite the prefix.
+    async def detector(text, min_score=0.5):
+        return [{'start': m.start(1), 'end': m.end(1), 'label': 'organization',
+                 'tier': 1, 'conf': 0.95, 'rule': 'cue'}
+                for m in re.finditer(r'codename:\s+(\S+)', text)]
+
+    # Turn-1 system carries 'Falcon' RAW (no cue) plus a cued 'Tango' so turn 1 redacts something and PERSISTS the
+    # map (stabilising its generation for the freeze key). The system text is identical on both turns.
+    SYS = 'The Falcon dashboard is owned by codename: Tango today.'
+
+    def run_two_turns():
+        session = 'freeze-' + os.urandom(6).hex()
+        body1 = {'model': 'claude-test', 'system': SYS,
+                 'messages': [{'role': 'user', 'content': 'Kickoff.'}]}
+        asyncio.run(egress_proxy.redact_body(body1, {'session': session, 'project': 'e2e'}, detector=detector))
+        sys_t1 = body1['system']
+        # Turn 2: SAME system, plus a NEW tail message that first introduces 'Falcon' under the cue -> minted.
+        body2 = {'model': 'claude-test', 'system': SYS,
+                 'messages': [{'role': 'user', 'content': 'Kickoff.'},
+                              {'role': 'assistant', 'content': 'Ack.'},
+                              {'role': 'user', 'content': 'New: codename: Falcon goes live.'}]}
+        _m, replay2 = asyncio.run(
+            egress_proxy.redact_body(body2, {'session': session, 'project': 'e2e'}, detector=detector))
+        return sys_t1, body2['system'], body2['messages'][-1]['content'], replay2
+
+    # freeze ON (default): prefix byte-stable; the NEW tail is still redacted + rehydratable.
+    monkeypatch.setattr(egress_proxy, 'FREEZE_PREFIX', True)
+    s1, s2, tail, replay = run_two_turns()
+    assert 'Falcon' in s1, 'turn-1 system should carry Falcon RAW (no cue there, not yet a known value)'
+    assert s2 == s1, ('FROZEN prefix must be byte-identical across turns or the Anthropic prompt cache busts:'
+                      f'\n  t1={s1!r}\n  t2={s2!r}')
+    assert 'Falcon' not in tail, 'the NEW tail message must still be redacted (freeze only covers re-sent text)'
+    assert any(v == 'Falcon' for v in replay.values()), 'Falcon must still rehydrate from the tail mint'
+
+    # freeze OFF: the growing sweep rewrites the SAME prefix -> divergence (the bug the fix prevents).
+    monkeypatch.setattr(egress_proxy, 'FREEZE_PREFIX', False)
+    s1b, s2b, _tail, _r = run_two_turns()
+    assert 'Falcon' in s1b
+    assert s2b != s1b, ('control: with freeze OFF the sweep should retroactively redact Falcon in the re-sent '
+                        'prefix, proving this test exercises the real divergence')
+    assert 'Falcon' not in s2b, 'freeze-off path should have swept Falcon out of the prefix on turn 2'
+
+
+# --- file_path over-redaction precision (GATEWAY_PATH_POLICY) -----------------------------------------------
+# The gate NER tags the WHOLE absolute path as file_path (verified live against the GPU gate :8001). These tests mock that
+# behaviour with an injected detector and assert the appliance narrows it to the home-dir username only.
+def _path_detector():
+    async def detector(text, min_score=0.5):
+        return [{'start': m.start(), 'end': m.end(), 'label': 'file_path', 'tier': 1, 'conf': 0.99, 'rule': 'npu'}
+                for m in re.finditer(r'/[A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)*', text)]
+    return detector
+
+
+def _redact_with_path_detector(session, content):
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': content}]}
+    meta, replay = asyncio.run(
+        egress_proxy.redact_body(body, {'session': session, 'project': 'e2e'}, detector=_path_detector()))
+    return body['messages'][0]['content'], meta, replay
+
+
+@_NEEDS_PROXY
+def test_filepath_narrowed_to_home_username_linux(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    out, _meta, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/steven/dev/app.py now.')
+    assert out == 'Edit /home/<FILEPATH_001>/dev/app.py now.', out
+    assert replay['<FILEPATH_001>'] == 'steven', 'username must round-trip to EXACT case (no /home/Steven mangle)'
+
+
+@_NEEDS_PROXY
+def test_filepath_narrowed_to_home_username_mac(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    out, _m, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Open /Users/steven/Projects/x.ts here.')
+    assert out == 'Open /Users/<FILEPATH_001>/Projects/x.ts here.', out
+    assert replay['<FILEPATH_001>'] == 'steven'
+
+
+@_NEEDS_PROXY
+def test_filepath_without_home_username_passes_through(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    for path_text in ('The file /etc/nginx/nginx.conf controls it.',
+                      'Asset /assets/img/logo.svg is referenced.',
+                      'Logs at /var/log/app/output.log on the box.'):
+        out, _m, _r = _redact_with_path_detector('p-' + os.urandom(4).hex(), path_text)
+        assert out == path_text, f'a non-PII path must pass through verbatim, got {out!r}'
+
+
+@_NEEDS_PROXY
+def test_filepath_narrowing_preserves_surrounding_html(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    out, _m, _r = _redact_with_path_detector(
+        'p-' + os.urandom(4).hex(), '<img src="/home/steven/pics/avatar.png" alt="profile"/>')
+    assert out == '<img src="/home/<FILEPATH_001>/pics/avatar.png" alt="profile"/>', out
+
+
+@_NEEDS_PROXY
+def test_filepath_narrowing_keeps_other_pii_in_same_field(monkeypatch):
+    """No-leak guard: narrowing a file_path span must not suppress a co-located span (email here, caught by the
+    Tier-0 floor). The username AND the email both redact; only the non-PII path structure passes through."""
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    out, _m, replay = _redact_with_path_detector(
+        'p-' + os.urandom(4).hex(), 'Edit /home/steven/app.py and ping jordan.castellano@example.test')
+    assert 'steven' not in out and 'jordan.castellano@example.test' not in out, out
+    assert '/app.py' in out, 'non-username path structure must survive'
+    assert set(replay.values()) >= {'steven', 'jordan.castellano@example.test'}, replay
+
+
+@_NEEDS_PROXY
+def test_path_policy_passthrough_drops_every_filepath(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'passthrough')
+    out, _m, _r = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/steven/dev/app.py now.')
+    assert out == 'Edit /home/steven/dev/app.py now.', 'passthrough must forward the whole path verbatim'
+
+
+@_NEEDS_PROXY
+def test_path_policy_full_keeps_legacy_whole_path_span(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'full')
+    out, _m, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/steven/dev/app.py now.')
+    assert '/home/steven/dev/app.py' not in out and '<FILEPATH_001>' in out, out
+    assert replay['<FILEPATH_001>'] == '/home/steven/dev/app.py'
+
+
+@_NEEDS_PROXY
+def test_narrow_path_span_vetoes_echoed_placeholder_username(monkeypatch):
+    """RC4 remint guard at the narrower. When a placeholder leaked to chat in a prior turn and is echoed back
+    at the home-username offset (/home/<FILEPATH_001>/...), the NER may tag the whole path as file_path again.
+    Narrowing must NOT target the placeholder -- doing so reminted <FILEPATH_005> over <FILEPATH_001>, which
+    single-pass rehydrate cannot unwind, leaking a raw token to the local chat and breaking file ops. The span
+    is dropped (already redacted); a real-username path in the SAME batch still narrows normally."""
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    text = 'Edit /home/<FILEPATH_001>/dev/app.py and /home/steven/x.py'
+    p1, p1e = text.index('/home/<'), text.index('/dev/app.py') + len('/dev/app.py')
+    p2 = text.index('/home/steven')
+    spans = [
+        {'start': p1, 'end': p1e, 'label': 'file_path', 'tier': 1, 'conf': 0.99},
+        {'start': p2, 'end': p2 + len('/home/steven/x.py'), 'label': 'file_path', 'tier': 1, 'conf': 0.99},
+    ]
+    out = egress_proxy._narrow_path_spans(spans, text)
+    narrowed = [text[s['start']:s['end']] for s in out]
+    assert '<FILEPATH_001>' not in narrowed, 'must not narrow onto an existing placeholder (no remint)'
+    assert narrowed == ['steven'], f'only the real-username path narrows, got {narrowed!r}'
+
+
+# --- red-team must-fixes (workflow redteam-path-narrowing): username-variant leaks + sweep pollution ----------
+def _abs_path_detector():
+    """Tag unix, Windows-drive, and tilde absolute paths as one file_path span each (as the GPU-gate NER does)."""
+    async def detector(text, min_score=0.5):
+        return [{'start': m.start(), 'end': m.end(), 'label': 'file_path', 'tier': 1, 'conf': 0.99, 'rule': 'npu'}
+                for m in re.finditer(r'(?:[A-Za-z]:\\[^\s]+|/[A-Za-z0-9._\-/]*[A-Za-z0-9._\-]|~[^\s]+)', text)]
+    return detector
+
+
+@_NEEDS_PROXY
+@pytest.mark.parametrize('content,raw', [
+    ('Open /users/steven/dev/app.py', 'steven'),          # lowercase macOS canonical
+    ('Edit /HOME/steven/dev/app.py', 'steven'),           # uppercase HOME
+    ('Path /home//steven/dev/app.py', 'steven'),          # double-slash join artifact
+    (r'Read C:\Users\steven\proj\app.py', 'steven'),      # Windows drive form
+    ('Config in ~steven/.bashrc today', 'steven'),        # tilde home
+])
+def test_home_username_variants_do_not_leak(monkeypatch, content, raw):
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': content}]}
+    meta, replay = asyncio.run(
+        egress_proxy.redact_body(body, {'session': 'v-' + os.urandom(4).hex(), 'project': 'e2e'},
+                                 detector=_abs_path_detector()))
+    out = body['messages'][0]['content']
+    assert raw not in out, f'home-dir username leaked raw for {content!r}: {out!r}'
+    assert raw in replay.values(), f'username must be minted+rehydratable, replay={replay}'
+
+
+@_NEEDS_PROXY
+def test_filepath_username_not_swept_into_flags_or_prose(monkeypatch):
+    """Fix B: a short/common home-dir username (build) is redacted at its path site ONLY -- it must not be swept
+    body-wide into the CLI flag --build, the prose word in 'test suite', or an unrelated /tmp/test directory."""
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+    content = 'Read /home/build/app.py then run --build; the test suite writes /tmp/test/out'
+    body = {'model': 'claude-test', 'messages': [{'role': 'user', 'content': content}]}
+    _m, replay = asyncio.run(
+        egress_proxy.redact_body(body, {'session': 'v-' + os.urandom(4).hex(), 'project': 'e2e'},
+                                 detector=_abs_path_detector()))
+    out = body['messages'][0]['content']
+    assert out == 'Read /home/<FILEPATH_001>/app.py then run --build; the test suite writes /tmp/test/out', out
+    assert replay == {'<FILEPATH_001>': 'build'}
+
+
+@_NEEDS_PROXY
+def test_path_username_colliding_with_person_does_not_leak(monkeypatch):
+    """Red-team round-2 blocker: a lowercase home-dir username ('mason') that EXACTLY collides with an NER-tagged
+    lowercase person, with the path field processed FIRST and a third UNTAGGED recurrence, must not leak. The path
+    mint claims the value (placeholder_for is value-keyed); keep_values keeps it in the sweep because it was also
+    tagged a person this request, so the bare recurrence is caught."""
+    monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
+
+    async def detector(text, min_score=0.5):
+        out = [{'start': m.start(), 'end': m.end(), 'label': 'file_path', 'tier': 1, 'conf': 0.99, 'rule': 'npu'}
+               for m in re.finditer(r'/[A-Za-z0-9._\-/]*[A-Za-z0-9._\-]', text)]
+        if 'Engineer mason' in text:          # tag 'mason' as a person ONLY in this sentence (msg1)
+            j = text.index('mason')
+            out.append({'start': j, 'end': j + 5, 'label': 'person', 'tier': 1, 'conf': 0.99, 'rule': 'npu'})
+        return out
+
+    body = {'model': 'm', 'messages': [
+        {'role': 'user', 'content': 'Patch lives at /home/mason/src/fix.py'},   # path FIRST -> mints 'mason' file_path
+        {'role': 'user', 'content': 'Engineer mason reviewed the change.'},      # person tag (same request)
+        {'role': 'user', 'content': 'mason will deploy it tonight.'}]}           # bare untagged recurrence
+    asyncio.run(egress_proxy.redact_body(body, {'session': 'col-' + os.urandom(4).hex(), 'project': 'e2e'},
+                                         detector=detector))
+    assert 'mason' not in body['messages'][2]['content'], \
+        f'colliding name leaked in untagged recurrence: {body["messages"][2]["content"]!r}'
+
+
+# ---------------------------------------------------------------------------
+# GATE FALLBACK (availability): a remote-primary outage degrades to the local
+# CPU gate instead of failing every request closed. Connection-level failures
+# fail over; a reachable gate returning an HTTP error does NOT (real fault).
+# ---------------------------------------------------------------------------
+def _fallback_detect_against(fail_primary_with):
+    """Build a fake _detect_against that raises `fail_primary_with` for the primary GATE_URL and returns a marker
+    span for the fallback URL, so a test can assert which gate produced the result."""
+    async def _da(aclient, gate_url, text, min_score):
+        if gate_url == egress_proxy.GATE_URL:
+            raise fail_primary_with
+        return [{'start': 0, 'end': 4, 'label': 'person', 'tier': 1, 'conf': 0.9, 'rule': 'fallback-gate'}]
+    return _da
+
+
+def test_gate_fallback_used_when_primary_unreachable(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'GATE_URL', 'http://primary:8001')
+    monkeypatch.setattr(egress_proxy, 'GATE_FALLBACK_URL', 'http://127.0.0.1:8001')
+    monkeypatch.setattr(egress_proxy, '_DETECT_CACHE', egress_proxy.OrderedDict())
+    monkeypatch.setattr(egress_proxy, '_detect_against',
+                        _fallback_detect_against(egress_proxy.httpx.ConnectError('primary down')))
+    spans = asyncio.run(egress_proxy._detect_neural(None, 'Jean lives here', 0.5))
+    assert spans is not None and len(spans) == 1
+    assert spans[0]['rule'] == 'fallback-gate', 'a connection-level primary failure must fail over to the fallback gate'
+
+
+def test_is_connection_error_classifies_only_transport_failures():
+    """The failover trigger: only httpx.TransportError (unreachable) counts; an HTTPStatusError (reachable gate,
+    HTTP error) or any other exception is a real fault, not an outage."""
+    assert egress_proxy._is_connection_error(egress_proxy.httpx.ConnectError('down')) is True
+    assert egress_proxy._is_connection_error(ValueError('x')) is False
+    # HTTPStatusError is a sibling of TransportError under HTTPError, so it is NOT a connection error.
+    assert not issubclass(egress_proxy.httpx.HTTPStatusError, egress_proxy.httpx.TransportError)
+
+
+def test_gate_fallback_not_used_on_non_transport_error(monkeypatch):
+    """A reachable gate returning 4xx/5xx (or any non-transport fault) is a real error, not an outage -- do NOT
+    paper over it by retrying elsewhere; degrade (return None) so fail-closed kicks in. Uses a stand-in
+    non-transport exception; the branch is identical for HTTPStatusError (asserted non-transport above)."""
+    monkeypatch.setattr(egress_proxy, 'GATE_URL', 'http://primary:8001')
+    monkeypatch.setattr(egress_proxy, 'GATE_FALLBACK_URL', 'http://127.0.0.1:8001')
+    monkeypatch.setattr(egress_proxy, '_DETECT_CACHE', egress_proxy.OrderedDict())
+    monkeypatch.setattr(egress_proxy, '_detect_against',
+                        _fallback_detect_against(ValueError('gate returned 500')))
+    spans = asyncio.run(egress_proxy._detect_neural(None, 'Jean lives here', 0.5))
+    assert spans is None, 'a non-transport error from a reachable gate must NOT trigger failover'
+
+
+def test_gate_no_fallback_returns_none_when_unset(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'GATE_URL', 'http://primary:8001')
+    monkeypatch.setattr(egress_proxy, 'GATE_FALLBACK_URL', '')
+    monkeypatch.setattr(egress_proxy, '_DETECT_CACHE', egress_proxy.OrderedDict())
+    monkeypatch.setattr(egress_proxy, '_detect_against',
+                        _fallback_detect_against(egress_proxy.httpx.ConnectError('primary down')))
+    spans = asyncio.run(egress_proxy._detect_neural(None, 'Jean lives here', 0.5))
+    assert spans is None, 'with no fallback configured, an unreachable primary degrades (None), not crashes'
+
+
+def test_gate_fallback_ignored_when_same_as_primary(monkeypatch):
+    """A fallback identical to the primary is not a real second gate -- do not retry the same dead URL."""
+    monkeypatch.setattr(egress_proxy, 'GATE_URL', 'http://127.0.0.1:8001')
+    monkeypatch.setattr(egress_proxy, 'GATE_FALLBACK_URL', 'http://127.0.0.1:8001')
+    monkeypatch.setattr(egress_proxy, '_DETECT_CACHE', egress_proxy.OrderedDict())
+    calls = []
+
+    async def _da(aclient, gate_url, text, min_score):
+        calls.append(gate_url)
+        raise egress_proxy.httpx.ConnectError('down')
+
+    monkeypatch.setattr(egress_proxy, '_detect_against', _da)
+    spans = asyncio.run(egress_proxy._detect_neural(None, 'x', 0.5))
+    assert spans is None and calls == ['http://127.0.0.1:8001'], 'identical fallback must not double-call the dead gate'
+
+
+# ---------------------------------------------------------------------------
+# BODY-SIZE CAP: reject oversized bodies (413) before the detector fan-out,
+# via Content-Length pre-check and a post-read backstop.
+# ---------------------------------------------------------------------------
+def test_body_cap_rejects_oversized_by_content_length(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'MAX_BODY_BYTES', 1000)
+    req = _FakeRequest({'x': 'y'}, headers={'content-length': '5000'})
+    _body, err = asyncio.run(egress_proxy._read_json_body(req))
+    assert _body is None and _response_status(err) == 413, 'oversized Content-Length must 413 before the body is read'
+
+
+def test_body_cap_rejects_oversized_after_read(monkeypatch):
+    """No/again-lying Content-Length: the post-read length check is the backstop."""
+    monkeypatch.setattr(egress_proxy, 'MAX_BODY_BYTES', 50)
+    req = _FakeRequest({'blob': 'A' * 500})   # no content-length header on the fake request
+    _body, err = asyncio.run(egress_proxy._read_json_body(req))
+    assert _body is None and _response_status(err) == 413, 'oversized actual body must 413 even without a Content-Length'
+
+
+def test_body_cap_allows_normal_body_and_flags_bad_json(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'MAX_BODY_BYTES', 32 * 1024 * 1024)
+    ok, err = asyncio.run(egress_proxy._read_json_body(_FakeRequest({'model': 'm', 'messages': []})))
+    assert err is None and ok == {'model': 'm', 'messages': []}
+
+    class _BadReq:
+        headers = {}
+        async def body(self):
+            return b'{not json'
+    body2, err2 = asyncio.run(egress_proxy._read_json_body(_BadReq()))
+    assert body2 is None and _response_status(err2) == 400, 'malformed JSON must 400'
+
+
+# ---------------------------------------------------------------------------
+# CORS MIDDLEWARE: the control route runs EXACTLY once, even if response-header
+# mutation throws (regression: the old except re-invoked call_next -> a mutating
+# write could double-execute).
+# ---------------------------------------------------------------------------
+class _CorsReq:
+    def __init__(self, path, method='POST', origin=None):
+        self.url = types.SimpleNamespace(path=path)
+        self.method = method
+        self.headers = {'origin': origin} if origin else {}
+
+
+class _RaisingHeaders(dict):
+    def __setitem__(self, k, v):
+        raise RuntimeError('header assignment blew up after the route already ran')
+
+
+def test_cors_middleware_runs_route_once_even_if_header_mutation_fails(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'CONTROL_CORS_ORIGINS', frozenset({'http://console'}))
+    count = {'n': 0}
+
+    async def call_next(_request):
+        count['n'] += 1
+        return types.SimpleNamespace(headers=_RaisingHeaders())   # header set will raise
+
+    resp = asyncio.run(egress_proxy._control_cors(_CorsReq('/api/settings', origin='http://console'), call_next))
+    assert count['n'] == 1, 'the (state-mutating) control route must execute exactly once even when header set fails'
+    assert resp is not None
+
+
+def test_cors_preflight_answered_without_running_route(monkeypatch):
+    monkeypatch.setattr(egress_proxy, 'CONTROL_CORS_ORIGINS', frozenset({'http://console'}))
+    count = {'n': 0}
+
+    async def call_next(_request):
+        count['n'] += 1
+        return types.SimpleNamespace(headers={})
+
+    resp = asyncio.run(egress_proxy._control_cors(_CorsReq('/api/allowlist', method='OPTIONS', origin='http://console'), call_next))
+    assert count['n'] == 0, 'a preflight OPTIONS must be answered by the middleware, never forwarded to the route'
+    assert _response_status(resp) == 204
+
+
+def test_cors_non_control_path_forwarded_untouched(monkeypatch):
+    count = {'n': 0}
+
+    async def call_next(_request):
+        count['n'] += 1
+        return types.SimpleNamespace(headers={})
+
+    asyncio.run(egress_proxy._control_cors(_CorsReq('/v1/messages'), call_next))
+    assert count['n'] == 1, 'a non-control route is forwarded exactly once with no CORS handling'

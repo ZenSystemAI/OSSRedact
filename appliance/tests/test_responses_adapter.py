@@ -16,6 +16,7 @@ network and NO proxy.
 100% SYNTHETIC data. No real PII anywhere.
 Run: .venv-test/bin/python -m pytest appliance/tests/test_responses_adapter.py -q
 """
+import sys
 import os
 import re
 import json
@@ -27,6 +28,11 @@ import pytest
 # --- import the appliance responses_adapter by absolute path (bare name could be shadowed by a future
 #     same-named module elsewhere in the repo; load it explicitly the way test_egress_e2e loads its modules).
 _APPLIANCE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# responses_adapter imports sibling appliance modules (tool_arg_policy -> privacy_gate, all pure-stdlib), so the
+# appliance dir must be importable even when THIS file runs in isolation -- the bare spec-load below does not put
+# it on the path itself.
+if _APPLIANCE not in sys.path:
+    sys.path.insert(0, _APPLIANCE)
 _RA_PATH = os.path.join(_APPLIANCE, 'responses_adapter.py')
 _spec = importlib.util.spec_from_file_location('responses_adapter_under_test', _RA_PATH)
 ra = importlib.util.module_from_spec(_spec)
@@ -2258,10 +2264,16 @@ def test_response_rehydrate_is_single_pass_for_placeholder_shaped_values():
     sample = 'secret=<SECRET_001> email=<EMAIL_001>'
     assert ra.rehydrate_text(sample, replay) == 'secret=tok_<EMAIL_001>_x email=alice@example.test'
 
-    args = json.dumps({'secret': '<SECRET_001>', 'email': '<EMAIL_001>'})
-    assert json.loads(ra.rehydrate_json_string(args, replay)) == {
-        'secret': 'tok_<EMAIL_001>_x',
+    # TOOL-ARG single-pass: a NON-FLOOR token rehydrates (Half A) and its placeholder-shaped value is not rescanned.
+    nf_replay = {'<PERSON_001>': 'tok_<EMAIL_001>_x', '<EMAIL_001>': 'alice@example.test'}
+    nf_args = json.dumps({'name': '<PERSON_001>', 'email': '<EMAIL_001>'})
+    assert json.loads(ra.rehydrate_json_string(nf_args, nf_replay)) == {
+        'name': 'tok_<EMAIL_001>_x',
         'email': 'alice@example.test',
+    }
+    # B5: a FLOOR/secret token is WITHHELD from executed tool args -> stays the inert literal.
+    assert json.loads(ra.rehydrate_json_string(json.dumps({'secret': '<SECRET_001>'}), replay)) == {
+        'secret': '<SECRET_001>',
     }
 
     resp = {'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': sample}]}]}

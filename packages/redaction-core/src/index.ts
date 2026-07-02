@@ -52,3 +52,12 @@ export { normalizeAllowValue, buildAllowSet, isAllowlisted, applyAllowlist } fro
 // Label metadata + tier classification
 export type { LabelMeta, Tier } from './labels.js'
 export { LABEL_REGISTRY, labelMeta, labelTier, MANUAL_LABELS, FLOOR_LABELS } from './labels.js'
+
+// Fail-closed contract for a degraded (Tier-0-only) in-browser deep scan -- shared by every browser surface.
+export {
+  NEURAL_ONLY_LABELS,
+  isNeuralOnlyLabel,
+  DEEP_DEGRADED_WARNING,
+  DEEP_DEGRADED_BADGE,
+  DEEP_DEGRADED_EXPORT_CONFIRM,
+} from './degrade.js'

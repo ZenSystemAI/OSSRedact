@@ -1,6 +1,6 @@
 {
   "name": "@ossredact/core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tier-0 deterministic PII detector and span/redaction core for OSSRedact. Pure TypeScript, browser-safe, zero runtime dependencies.",
   "license": "MIT",
   "author": "ZenSystemAI",

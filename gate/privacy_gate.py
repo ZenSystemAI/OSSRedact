@@ -462,7 +462,7 @@ class GPUTier:
 FLOOR_LABELS = frozenset({
     'secret', 'password', 'api_key', 'access_token',                  # credentials
     'payment_card', 'card_cvv', 'card_expiry',                        # cards
-    'sensitive_account_id', 'bank_account', 'iban', 'routing_number', # bank / account
+    'sensitive_account_id', 'account_number', 'bank_account', 'iban', 'routing_number', # bank / account
     'government_id', 'tax_id', 'date_of_birth',                       # government / identity
 })
 

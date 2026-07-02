@@ -9,8 +9,9 @@ import type { Span, RegionBox, EntityMap } from './lib/types'
 import { tier0Spans } from './lib/tier0'
 import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
 import { labelTier, type Tier } from './lib/labels'
+import { DEEP_DEGRADED_WARNING, DEEP_DEGRADED_EXPORT_CONFIRM } from './lib/degrade'
 import { deepDetect, deepProviderLabel, gateHealth, prepareDeepDetect, type DeepProvider, type GateHealth } from './lib/gate'
-import { verifyDocx } from './lib/docx'
+import { verifyDocx, docxLeakParts } from './lib/docx'
 import { verifyXlsx } from './lib/xlsx'
 import { download, downloadBlob, findPlaceholders, survivingValues, type LoadedDoc } from './lib/formats'
 import { putMap, sha256Hex, getRemember, type Fingerprint } from './lib/mapStore'
@@ -29,6 +30,14 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [gate, setGate] = useState<GateHealth | null>(null)
+  // Fail-closed deep-scan state for the active document:
+  //   'clean'    - a deep (neural) scan ran successfully; names/orgs/addresses were scanned.
+  //   'degraded' - a deep scan was ATTEMPTED but the model was unavailable -> Tier-0-only output that may leak
+  //                names/orgs/addresses. The user thought they ran deep, so export requires an explicit confirm.
+  //   'none'     - deep never ran (Tier-0 auto-detect baseline). A persistent banner informs the user, but the
+  //                default structured-only export is not confirm-gated (they never requested a deep scan).
+  // Reset to 'none' on a new doc, clear, or re-running Tier-0 auto-detect.
+  const [deepStatus, setDeepStatus] = useState<'clean' | 'degraded' | 'none'>('none')
   // Browser-model download progress (0..100) while the one-time ~300 MB fetch is in flight; null otherwise.
   const [loadPct, setLoadPct] = useState<number | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -160,6 +169,7 @@ export default function App() {
     if (!doc) return
     const fresh = toSpans(mergeSpans(tier0Spans(doc.text)), 'auto', mutedLabels)
     setSpans((prev) => combineWithManual(prev, fresh))
+    setDeepStatus('none') // re-running the Tier-0 baseline; a prior deep result no longer describes these spans
   }, [doc, mutedLabels])
 
   // Pick the deep-detect provider. On-prem installs use /gate when reachable; the hosted website demo
@@ -189,9 +199,11 @@ export default function App() {
       const fresh = toSpans(raw, 'neural', mutedLabels)
       setSpans((prev) => combineWithManual(prev, fresh))
       setGate((g) => ({ ...(g ?? {}), ok: true, provider }))
+      setDeepStatus('clean')
       flash(`${deepProviderLabel(provider)} found ${fresh.length} spans (Tier-0 + neural)`)
     } catch (e) {
       setGate((g) => ({ ...(g ?? {}), ok: false }))
+      setDeepStatus('degraded')
       flash(`Deep detect unavailable -- using local Tier-0 only. (${e instanceof Error ? e.message : e})`)
     } finally {
       setBusy(false)
@@ -246,6 +258,9 @@ export default function App() {
     const activeUpdated = updated.find((u) => u.id === activeId)
     if (activeUpdated) setSpans(activeUpdated.spans)
     if (gateOk) setGate((g) => ({ ...(g ?? {}), ok: true, ...(provider ? { provider } : {}) }))
+    // Fail-closed: if ANY entry fell back to Tier-0, the shared-map export (zip) contains under-redacted
+    // content, so treat the batch as degraded (export is confirm-gated); only an all-clean run is 'clean'.
+    setDeepStatus(degraded > 0 ? 'degraded' : 'clean')
     if (degraded === work.length) {
       setGate((g) => ({ ...(g ?? {}), ok: false }))
       flash(`Deep detect unavailable -- all ${work.length} files use local Tier-0 only.`)
@@ -338,7 +353,17 @@ export default function App() {
     return redactedBatchText(doc.text, spans, placeholderOf, map)
   }, [doc, inBatch, spans, placeholderOf, map])
 
+  // Fail-closed export gate: when a deep scan was attempted but degraded to Tier-0, the output may leak
+  // names/orgs/addresses. Require an explicit confirmation before it leaves the tool (copy/download/print).
+  // Returns true to proceed. 'none' (deep never requested) is not gated -- the persistent banner informs the
+  // user, who chose the structured-only baseline; only the "I ran deep but it silently fell back" case blocks.
+  function confirmDegradedExport(): boolean {
+    if (deepStatus !== 'degraded') return true
+    return typeof window === 'undefined' || window.confirm(DEEP_DEGRADED_EXPORT_CONFIRM)
+  }
+
   function copyRedacted() {
+    if (!confirmDegradedExport()) return
     const redacted = redactedCurrentText()
     if (redacted == null) return
     navigator.clipboard.writeText(redacted).then(
@@ -390,6 +415,7 @@ export default function App() {
 
   async function downloadRedacted() {
     if (!doc) return
+    if (!confirmDegradedExport()) return
     // format-preserving office doc: rewrite the redacted slices inside the original zip and re-verify (fail-closed)
     const office = doc.rebuildDocx
       ? { rebuild: doc.rebuildDocx, verify: verifyDocx, ext: 'docx' }
@@ -401,7 +427,10 @@ export default function App() {
       const blob = await office.rebuild(repls)
       const leaked = await office.verify(blob, Object.values(map)) // block if any redacted value survives
       if (leaked.length) {
-        flash(`BLOCKED: ${leaked.length} redacted value(s) still present in the .${office.ext}. Not saved.`)
+        // Name the part(s) still holding a leaked value so a blocked export points somewhere, not a dead end.
+        const parts = office.ext === 'docx' ? await docxLeakParts(blob, leaked) : []
+        const where = parts.length ? ` in ${parts.join(', ')}` : ''
+        flash(`BLOCKED: ${leaked.length} redacted value(s) still present${where} in the .${office.ext}. Not saved.`)
         return
       }
       downloadBlob(exportName('redacted', office.ext), blob)
@@ -448,6 +477,8 @@ export default function App() {
   // PDF entries are rasterized one-at-a-time (Phase 2) -- see exportEntryBlob.
   const downloadBatchZip = useCallback(async () => {
     if (!inBatch) return
+    // Fail-closed: a batch where deep detect degraded on any file ships under-redacted content in the zip.
+    if (deepStatus === 'degraded' && typeof window !== 'undefined' && !window.confirm(DEEP_DEGRADED_EXPORT_CONFIRM)) return
     setBusy(true)
     try {
       const { sharedMap, perEntry } = resolveBatch()
@@ -480,7 +511,7 @@ export default function App() {
       setBatchProgress(null)
       setBusy(false)
     }
-  }, [inBatch, resolveBatch, persistBatchMap, flash])
+  }, [inBatch, resolveBatch, persistBatchMap, flash, deepStatus])
 
   // Rebuild one entry's redacted blob and run its FORMAT-SPECIFIC fail-closed verify. Returns null if the
   // verify leaks (caller blocks the whole zip). Office: rewrite slices + verifyDocx/verifyXlsx. Text: splice
@@ -553,6 +584,7 @@ export default function App() {
   // print region renders fixed-width blocks from the swept redacted text via the browser's Save-as-PDF.
   const handleRedactedPdf = useCallback(async () => {
     if (!doc) return
+    if (deepStatus === 'degraded' && typeof window !== 'undefined' && !window.confirm(DEEP_DEGRADED_EXPORT_CONFIRM)) return
     if (doc.kind !== 'pdf' || !doc.pages || !doc.bytes) {
       window.print()
       return
@@ -595,7 +627,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [doc, spans, regions, map, flash])
+  }, [doc, spans, regions, map, flash, deepStatus])
 
   function maskedForPrint(): string {
     const redacted = redactedCurrentText()
@@ -613,6 +645,7 @@ export default function App() {
     setRegions([])
     setView('text')
     setSelectedId(null)
+    setDeepStatus('none')
   }
 
   return (
@@ -638,6 +671,7 @@ export default function App() {
             onClearDetections={() => {
               setSpans([])
               setSelectedId(null)
+              setDeepStatus('none')
             }}
             onCopyRedacted={copyRedacted}
             onDownloadRedacted={downloadRedacted}
@@ -646,6 +680,24 @@ export default function App() {
             onPrint={handleRedactedPdf}
             onReset={reset}
           />
+          {deepStatus !== 'clean' && hasRedactions && (
+            <div
+              role={deepStatus === 'degraded' ? 'alert' : 'status'}
+              className="flex items-start gap-2 px-4 py-2 text-xs"
+              style={{
+                borderBottom: '1px solid var(--border)',
+                background: deepStatus === 'degraded' ? 'rgba(220, 38, 38, 0.12)' : 'var(--color-surface)',
+                color: deepStatus === 'degraded' ? 'var(--color-danger, #dc2626)' : 'var(--color-muted)',
+              }}
+            >
+              <span aria-hidden style={{ lineHeight: '1.2' }}>{deepStatus === 'degraded' ? '⚠' : 'ℹ'}</span>
+              <span>
+                {deepStatus === 'degraded'
+                  ? DEEP_DEGRADED_WARNING
+                  : 'Structured data only (secrets, IDs, cards, emails, dates). Names, organizations, and addresses are NOT scanned until you run Deep detect.'}
+              </span>
+            </div>
+          )}
           {inBatch && (
             <div
               className="flex items-center gap-2 flex-wrap px-4 py-2"

@@ -19,6 +19,7 @@ placeholder grammar or the JSON-safe rehydration in egress_proxy.py, mirror it h
 import json, re
 
 import responses_adapter
+import tool_arg_policy   # B5: withhold FLOOR/secret-class placeholders from EXECUTED tool-call arguments
 
 # Free-text block-type aliases (mirror egress_proxy.py): only `text` was recognized, so an `input_text` /
 # `output_text` block or a bare-string content element extracted ZERO fields -> whole body forwarded UNSCANNED.
@@ -229,9 +230,12 @@ def _dump_rehydrated_dup_safe(v, replay):
 
 
 def rehydrate_json_string(acc, replay):
-    """Rehydrate placeholders inside a tool-call arguments JSON string, including object keys."""
+    """Rehydrate placeholders inside a tool-call arguments JSON string, including object keys. ALWAYS
+    tool-argument context (the streaming tool_calls flush + the non-streaming _is_json_args_key values funnel
+    here): B5 withholds FLOOR/secret-class tokens so a secret in an executed argument stays the inert literal."""
     if not acc or not acc.strip():
         return acc
+    replay = tool_arg_policy.tool_arg_replay(replay)
     try:
         obj = json.loads(acc, object_pairs_hook=_dup_preserving_pairs)
     except Exception:
@@ -362,8 +366,13 @@ async def stream_rehydrate_openai(upstream_aiter, replay):
 # ---------------------------------------------------------------------------
 # Upstream forwarding headers (OpenAI uses Authorization: Bearer + optional org/project/beta).
 # ---------------------------------------------------------------------------
-FWD_HEADERS_OPENAI = {'authorization', 'content-type', 'openai-organization', 'openai-project', 'openai-beta'}
+FWD_HEADERS_OPENAI = {'authorization', 'content-type', 'openai-organization', 'openai-project', 'openai-beta',
+                      'user-agent'}
+# Forward the genuine client UA + Stainless telemetry verbatim (2026-06-21): a WAF/bot-protected upstream treats
+# httpx's synthesized `user-agent: python-httpx` as a bot. Mirrors the Anthropic + Responses routes; never pin fakes.
+FWD_HEADER_PREFIXES_OPENAI = ('x-stainless-',)
 
 
 def fwd_headers_openai(req):
-    return {k: v for k, v in req.headers.items() if k.lower() in FWD_HEADERS_OPENAI}
+    return {k: v for k, v in req.headers.items()
+            if k.lower() in FWD_HEADERS_OPENAI or k.lower().startswith(FWD_HEADER_PREFIXES_OPENAI)}

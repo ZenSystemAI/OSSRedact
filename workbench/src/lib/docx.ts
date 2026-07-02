@@ -5,8 +5,10 @@
 // place -- formatting, styles, images, tables survive. Everything runs in-browser.
 //
 // Leak hardening: ALL body parts are scanned + redacted (not just document.xml), tracked-change deletions
-// (<w:del>/<w:moveFrom>) are stripped so deleted PII can't survive, and App runs verifyDocx() as a
-// fail-closed gate (re-opens the output and blocks the download if any redacted value remains).
+// (<w:del>/<w:moveFrom>) are stripped so deleted PII can't survive, non-body parts that can MIRROR body PII
+// (customXml data stores, the glossary doc, cached chart + SmartArt-diagram data) get a value-sweep so the
+// mapped originals are removed there too, and App runs verifyDocx() as a fail-closed gate that re-opens the
+// output and blocks the download if any redacted value remains in word/*, docProps/*, OR customXml/*.
 
 import JSZip from 'jszip'
 
@@ -158,6 +160,59 @@ async function scrubCommentMetadata(zip: JSZip) {
   }
 }
 
+// Non-body parts that can mirror body PII: content-control / mail-merge custom-XML data stores, the
+// glossary (building-block / AutoText) document, and cached chart + SmartArt-diagram data. None are in
+// BODY_PART_RE (they have no run-offset map), so they get a straight value SWEEP instead of positional
+// replacement: every mapped original value is replaced with its placeholder inside XML TEXT NODES *and*
+// attribute VALUES (customXml frequently stores its data in attributes). Element/attribute NAMES -- the
+// structure -- are never touched, so each part stays well-formed after re-serialization.
+const NONBODY_SWEEP_RE =
+  /^(customXml\/item\d+\.xml|word\/glossary\/document\.xml|word\/charts\/[^/]+\.xml|word\/diagrams\/[^/]+\.xml)$/
+
+function sweepValue(s: string, pairs: [string, string][]): string {
+  if (!s) return s
+  let out = s
+  for (const [value, ph] of pairs) if (out.includes(value)) out = out.split(value).join(ph)
+  return out
+}
+
+// Replace every mapped original value with its placeholder inside the text nodes and attribute values of
+// each non-body part. `pairs` is value->placeholder, sorted longest value first so a value nested inside a
+// longer one resolves after the longer value is already masked.
+async function scrubValueParts(zip: JSZip, pairs: [string, string][]) {
+  if (!pairs.length) return
+  for (const name of Object.keys(zip.files)) {
+    if (zip.files[name].dir || !NONBODY_SWEEP_RE.test(name)) continue
+    const xml = await zip.file(name)!.async('string')
+    const doc = new DOMParser().parseFromString(xml, 'application/xml')
+    let changed = false
+    const visit = (el: Element) => {
+      for (const attr of Array.from(el.attributes)) {
+        const rep = sweepValue(attr.value, pairs)
+        if (rep !== attr.value) {
+          attr.value = rep
+          changed = true
+        }
+      }
+      for (const child of Array.from(el.childNodes)) {
+        if (child.nodeType === 3 || child.nodeType === 4) {
+          // TEXT_NODE or CDATA_SECTION_NODE
+          const cur = child.nodeValue ?? ''
+          const rep = sweepValue(cur, pairs)
+          if (rep !== cur) {
+            child.nodeValue = rep
+            changed = true
+          }
+        } else if (child.nodeType === 1) {
+          visit(child as Element)
+        }
+      }
+    }
+    if (doc.documentElement) visit(doc.documentElement)
+    if (changed) zip.file(name, new XMLSerializer().serializeToString(doc))
+  }
+}
+
 export type LoadedDocx = {
   text: string
   rebuild: (repls: Replacement[]) => Promise<Blob>
@@ -181,6 +236,9 @@ export async function loadDocx(file: File): Promise<LoadedDocx> {
     chunks.push(text)
     docOffset += text.length + 2
   }
+  // The combined body text -- offsets in `repls` index into THIS string (App passes doc.text back), so a
+  // repl's slice IS the original value. Used to sweep those values out of the non-body parts on rebuild.
+  const combinedText = chunks.join('\n\n')
 
   const rebuild = async (repls: Replacement[]): Promise<Blob> => {
     let off = 0
@@ -192,23 +250,54 @@ export async function loadDocx(file: File): Promise<LoadedDocx> {
       zip.file(n, new XMLSerializer().serializeToString(xmlDoc))
       off += text.length + 2
     }
+    // Derive value->placeholder pairs from the body replacements (offsets index into combinedText, so the
+    // slice is the exact original value), then sweep those values out of the non-body parts.
+    const valueToPh = new Map<string, string>()
+    for (const r of repls) {
+      const value = combinedText.slice(r.start, r.end)
+      if (value && r.text && !valueToPh.has(value)) valueToPh.set(value, r.text)
+    }
+    const pairs = [...valueToPh.entries()].sort((a, b) => b[0].length - a[0].length)
+
     await scrubDocProps(zip)
     await scrubCommentMetadata(zip)
+    await scrubValueParts(zip, pairs)
     return zip.generateAsync({ type: 'blob', mimeType: DOCX_MIME })
   }
 
-  return { text: chunks.join('\n\n'), rebuild }
+  return { text: combinedText, rebuild }
+}
+
+// Parts scanned by the fail-closed gate. customXml/* is included: a content-control / mail-merge data
+// store previously matched NEITHER the redaction nor the verify regex -> PII there leaked while the export
+// reported clean. word/* also covers glossary + chart + diagram parts (verified AND now swept).
+const VERIFY_PART_RE = /^(word|docProps|customXml)\/.*\.xml$/
+
+async function docxSearchableParts(blob: Blob): Promise<Record<string, string>> {
+  const zip = await JSZip.loadAsync(blob)
+  const parts: Record<string, string> = {}
+  for (const n of Object.keys(zip.files)) {
+    if (!VERIFY_PART_RE.test(n) || zip.files[n].dir) continue
+    parts[n] = searchableXml(await zip.file(n)!.async('string'))
+  }
+  return parts
 }
 
 // Fail-closed gate: re-open the produced .docx and confirm none of the original sensitive values survive in
-// ANY xml part (run-split values are caught by checking the tag-stripped text). Returns the leaked values.
+// any scanned xml part (run-split values are caught by checking the tag-stripped text). Returns leaked values.
 export async function verifyDocx(blob: Blob, values: string[]): Promise<string[]> {
-  const zip = await JSZip.loadAsync(blob)
-  let all = ''
-  for (const n of Object.keys(zip.files)) {
-    if (!/^(word|docProps)\/.*\.xml$/.test(n) || zip.files[n].dir) continue
-    const xml = await zip.file(n)!.async('string')
-    all += searchableXml(xml)
-  }
+  const parts = await docxSearchableParts(blob)
+  const all = Object.values(parts).join('\n')
   return values.filter((v) => v && all.includes(v))
+}
+
+// Which scanned parts still contain any of the given (leaked) values, so the BLOCKED message can name WHERE
+// the leak is instead of leaving the operator at a dead end. Sorted, deduped part names.
+export async function docxLeakParts(blob: Blob, values: string[]): Promise<string[]> {
+  const present = values.filter((v) => !!v)
+  if (!present.length) return []
+  const parts = await docxSearchableParts(blob)
+  return Object.keys(parts)
+    .filter((n) => present.some((v) => parts[n].includes(v)))
+    .sort()
 }

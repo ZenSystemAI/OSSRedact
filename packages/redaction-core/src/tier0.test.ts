@@ -148,6 +148,63 @@ describe('tier0Spans', () => {
   })
 
   // -------------------------
+  // Date-shaped digit runs (tier0:date_shaped) -- a hyphenated / compact digit run that is really a DATE,
+  // not an account id (a coding agent passes '2026-07-01' / '20260701' constantly). Port of privacy_gate.py
+  // _date_shaped + the DIGIT_RUN date branch. Space-grouped runs stay account-shaped.
+  // -------------------------
+  describe('date-shaped digit runs', () => {
+    // the value is tagged sensitive_date somewhere, and NOTHING in the doc is tagged sensitive_account_id
+    const dateNotAccount = (text: string, value: string) => {
+      const spans = labeledSpans(text)
+      expect(spans.some((s) => s.label === 'sensitive_date' && s.sub.includes(value))).toBe(true)
+      expect(spans.some((s) => s.label === 'sensitive_account_id')).toBe(false)
+    }
+
+    it('hyphenated ISO Y-M-D -> sensitive_date, not sensitive_account_id', () => {
+      dateNotAccount('2026-07-01', '2026-07-01')
+    })
+    it('compact YYYYMMDD -> sensitive_date, not sensitive_account_id', () => {
+      dateNotAccount('20260701', '20260701')
+    })
+    it('ISO date glued to a prefix token (context-1m-2025-08-07) -> sensitive_date', () => {
+      dateNotAccount('context-1m-2025-08-07', '2025-08-07')
+    })
+    it('hyphenated D-M-Y -> sensitive_date, not sensitive_account_id', () => {
+      dateNotAccount('01-07-2026', '01-07-2026')
+    })
+    it('ISO date with a trailing log hour -> sensitive_date', () => {
+      dateNotAccount('at 2026-07-01 23 UTC', '2026-07-01 23')
+    })
+
+    it('space-grouped run stays sensitive_account_id (not date-shaped)', () => {
+      const spans = labeledSpans('ref 2026 07 01 99')
+      expect(spans.some((s) => s.label === 'sensitive_account_id' && s.sub.replace(/\D/g, '') === '2026070199')).toBe(true)
+      expect(spans.some((s) => s.label === 'sensitive_date')).toBe(false)
+    })
+
+    it('a real (Luhn-valid) SIN stays government_id, never a date', () => {
+      const spans = labeledSpans('046-454-286')
+      expect(spans.some((s) => s.label === 'government_id')).toBe(true)
+      expect(spans.some((s) => s.label === 'sensitive_date')).toBe(false)
+    })
+
+    it('an 8-digit account with an out-of-range month stays sensitive_account_id (acct 20269999)', () => {
+      const spans = labeledSpans('acct 20269999')
+      expect(spans.some((s) => s.label === 'sensitive_account_id' && s.sub === '20269999')).toBe(true)
+      expect(spans.some((s) => s.label === 'sensitive_date')).toBe(false)
+    })
+
+    it('card and IBAN vectors are unaffected by date-shaping', () => {
+      const card = labeledSpans('Card: 4539148803436467')
+      expect(card.some((s) => s.label === 'payment_card')).toBe(true)
+      expect(card.some((s) => s.label === 'sensitive_date')).toBe(false)
+      const iban = labeledSpans('IBAN GB82WEST12345698765432')
+      expect(iban.some((s) => s.label === 'iban')).toBe(true)
+      expect(iban.some((s) => s.label === 'sensitive_date')).toBe(false)
+    })
+  })
+
+  // -------------------------
   // Amount-bleed regression (plans 022 / 014)
   // -------------------------
   it('amount-bleed regression: detects account number but NOT transaction amounts', () => {

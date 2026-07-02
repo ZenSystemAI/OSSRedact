@@ -12,12 +12,22 @@ MAPS_DIR = os.environ.get('GATEWAY_MAPS_DIR', os.path.expanduser('~/.ossredact/m
 KEY_FILE = os.environ.get('GATEWAY_MAP_KEY', os.path.join(MAPS_DIR, '.mapkey'))
 TTL_S = int(os.environ.get('GATEWAY_MAP_TTL_H', '24')) * 3600
 MAX_ENTITIES = int(os.environ.get('GATEWAY_MAP_MAX', '5000'))
+# Eviction TOMBSTONE bound: when v2p evicts to stay <= MAX_ENTITIES, the value->placeholder binding is preserved
+# in a compact tomb so a re-sent value reuses its ORIGINAL placeholder (prompt-cache stability) instead of
+# re-minting. Default 1x MAX_ENTITIES (a session with >5000 distinct redacted values is unusual); operator-tunable.
+MAX_TOMB = int(os.environ.get('GATEWAY_MAP_TOMB_MAX', str(MAX_ENTITIES)))
+# Absolute map-age cap (default 7d): the idle TTL below keeps an ACTIVE session's placeholders stable, but a
+# long-lived SHARED sys-<hash> fallback map (multi-tenant, one upstream key) must still rotate -- this cap restores
+# the daily-rotation defence-in-depth that a pure idle TTL would remove.
+HARD_MAX_S = int(os.environ.get('GATEWAY_MAP_HARD_MAX_H', '168')) * 3600
+TOUCH_REFRESH_S = TTL_S // 4   # debounce window for last_used touch-saves (refresh an active map without writing every turn)
 _CASE_SENSITIVE_LABEL_KEYS = {'password', 'secret', 'username', 'person', 'name', 'accesstoken', 'apikey', 'filepath'}
 # Canonical placeholder contract shared with packages/redaction-core/src/placeholder.ts.
 # Any change here must update the TypeScript side and both guard tests:
 # <LABEL_NNN>, label [A-Z0-9_]+, 3 or more decimal digits.
 PLACEHOLDER_CONTRACT_PATTERN = r'^<([A-Z0-9_]+)_\d{3,}>$'
 _PH_LABEL_RE = re.compile(PLACEHOLDER_CONTRACT_PATTERN)
+_PH_LABEL_NUM_RE = re.compile(r'^<([A-Z0-9_]+)_(\d{3,})>$')   # label + numeric suffix, for counter high-water reconciliation
 
 _LOCKS = {}
 _LOCKS_GUARD = threading.Lock()
@@ -69,6 +79,63 @@ def map_file_lock(session, project='default'):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def gc_maps(ttl_days=None, now=None):
+    """Best-effort garbage-collect the maps dir. Removes (a) *.json.enc whose mtime is older than the TTL (with
+    their sibling .lock), and (b) ORPHANED *.lock whose .json.enc no longer exists. Orphan locks are only removed
+    when they are themselves older than 1h, so a lock freshly created for a map whose .enc has not yet been written
+    is never swept out from under an active load->mint->save cycle. Returns {'enc': n, 'lock': n} removed counts.
+
+    Rationale: every session mints a per-(session,project) .enc + a persistent .lock; the lock file was never
+    unlinked, so orphaned locks accumulated without bound (audit: 3502 .lock vs 2567 .enc). Expired maps are stale
+    at-rest PII that should not linger either. TTL default = the absolute map-age hard cap (GATEWAY_MAP_HARD_MAX_H,
+    7d) so GC never deletes a map that could still be live; override with GATEWAY_MAPS_TTL_DAYS. 0 disables."""
+    if ttl_days is None:
+        ttl_days = float(os.environ.get('GATEWAY_MAPS_TTL_DAYS', str(HARD_MAX_S / 86400)))
+    if ttl_days <= 0 or not os.path.isdir(MAPS_DIR):
+        return {'enc': 0, 'lock': 0}
+    now = now if now is not None else time.time()
+    ttl_s = ttl_days * 86400
+    removed = {'enc': 0, 'lock': 0}
+
+    def _age(p):
+        try:
+            return now - os.path.getmtime(p)
+        except OSError:
+            return -1.0
+
+    def _unlink(p):
+        try:
+            os.unlink(p)
+            return True
+        except OSError:
+            return False
+
+    try:
+        names = os.listdir(MAPS_DIR)
+    except OSError:
+        return removed
+    for name in names:
+        if not name.endswith('.json.enc'):
+            continue
+        path = os.path.join(MAPS_DIR, name)
+        age = _age(path)
+        if age > ttl_s:
+            if _unlink(path):
+                removed['enc'] += 1
+            if _unlink(path + '.lock'):
+                removed['lock'] += 1
+    # Second pass: sweep locks whose .enc is gone (orphans), guarded by a 1h floor to avoid a load-in-flight race.
+    for name in os.listdir(MAPS_DIR):
+        if not name.endswith('.json.enc.lock'):
+            continue
+        lock_path = os.path.join(MAPS_DIR, name)
+        enc_path = lock_path[:-len('.lock')]
+        if not os.path.exists(enc_path) and _age(lock_path) > 3600:
+            if _unlink(lock_path):
+                removed['lock'] += 1
+    return removed
 
 
 def _load_key():
@@ -146,8 +213,10 @@ class EntityMap:
         self.v2p = {}
         self.p2v = {}
         self.v2p_cf = {}   # casefold(value) -> placeholder, in-memory dedup index (rebuilt on load)
+        self.tomb = {}     # eviction tombstone: key(value) -> placeholder, preserves minting stability past eviction
         self.counters = {}
         self.created = time.time()
+        self.last_used = self.created
         self.new_this_load = 0
         self.evicted_this_load = set()
         self._lock = _key_lock(self.path)
@@ -162,7 +231,13 @@ class EntityMap:
                 return
             nonce, ct = blob[:12], blob[12:]
             data = json.loads(_AES.decrypt(nonce, ct, None))
-            if time.time() - data.get('created', 0) > TTL_S:
+            created = data.get('created', 0)
+            last_used = data.get('last_used', created)   # backward-compat: old maps had no last_used
+            now = time.time()
+            # Expire on IDLE (unused within TTL_S) so an ACTIVE long session's placeholders never reset
+            # (the cache-stability goal), OR on absolute AGE (created older than HARD_MAX_S) so a long-lived
+            # SHARED sys-<hash> fallback map still rotates (defence in depth for multi-tenant single-key reuse).
+            if (now - last_used) > TTL_S or (now - created) > HARD_MAX_S:
                 try:
                     os.remove(self.path)
                 except OSError:
@@ -170,6 +245,7 @@ class EntityMap:
                 return
             self.v2p = data.get('v2p', {})
             self.p2v = data.get('p2v', {})
+            self.tomb = data.get('tomb', {})
             self.counters = data.get('counters', {})
             # Older maps may contain case-variant aliases that all point at the first placeholder. Drop only
             # those stale aliases in memory so a future exact-case value can mint its own token.
@@ -178,15 +254,26 @@ class EntityMap:
                     self.v2p.pop(value, None)
             self.v2p_cf = {k.casefold(): p for k, p in self.v2p.items()
                            if not _case_sensitive_placeholder(p)}  # rebuild non-sensitive dedup index
+            # Counter high-water reconciliation: the monotonic counter is the SOLE guard against re-minting a
+            # tombstoned <LABEL_NNN> for a NEW value (which would then rehydrate to the wrong value). If a
+            # persisted map's counters ever lag a placeholder still live in p2v or tomb, lift each label's
+            # counter to the max suffix seen so no number is ever reissued.
+            for ph in list(self.p2v.keys()) + list(self.tomb.values()):
+                m = _PH_LABEL_NUM_RE.match(ph)
+                if m and int(m.group(2)) > self.counters.get(m.group(1), 0):
+                    self.counters[m.group(1)] = int(m.group(2))
             self.created = data.get('created', time.time())
+            self.last_used = data.get('last_used', self.created)
         except Exception as e:
             print(f"[entity_map load err] {type(e).__name__}", flush=True)  # never log values
 
     def save(self):
         try:
             _ensure_maps_dir()
-            data = json.dumps({'v2p': self.v2p, 'p2v': self.p2v,
-                               'counters': self.counters, 'created': self.created}).encode()
+            self.last_used = time.time()   # refresh the idle clock on every persist (incl. touch-saves)
+            data = json.dumps({'v2p': self.v2p, 'p2v': self.p2v, 'tomb': self.tomb,
+                               'counters': self.counters, 'created': self.created,
+                               'last_used': self.last_used}).encode()
             nonce = os.urandom(12)
             ct = _AES.encrypt(nonce, data, None)
             tmp = self.path + '.tmp'
@@ -221,6 +308,23 @@ class EntityMap:
                     if len(self.v2p) < MAX_ENTITIES:
                         self.v2p[value] = ph   # bind this exact form too for O(1) future exact lookups
                     return ph, False
+            # Eviction TOMBSTONE: a value evicted to bound memory kept its ORIGINAL placeholder here, so a
+            # re-sent value reuses that exact token instead of re-minting a different one (which would shift the
+            # redacted prefix bytes -> Anthropic prompt-cache MISS). Re-activate it into the active maps for this
+            # turn's known-value sweep + rehydration. Evict FIRST (mirror the mint path) so the re-insert can
+            # never push v2p past MAX_ENTITIES; gate v2p_cf on case-sensitivity exactly like minting so a
+            # case-sensitive value never pollutes the shared casefold dedup index.
+            tkey = value if case_sensitive else value.casefold()
+            tph = self.tomb.get(tkey)
+            if tph is not None:
+                self._evict_if_full()
+                self.v2p[value] = tph
+                self.p2v[tph] = value
+                if not case_sensitive:
+                    self.v2p_cf[value.casefold()] = tph
+                self.tomb.pop(tkey, None)
+                self.evicted_this_load.discard(tph)   # reactivated -> no longer a cache-bust signal
+                return tph, False
             lab = re.sub(r'[^A-Z0-9]', '', label.upper()) or 'PII'
             self.counters[lab] = self.counters.get(lab, 0) + 1
             ph = f"<{lab}_{self.counters[lab]:03d}>"
@@ -237,7 +341,11 @@ class EntityMap:
 
     def _evict_if_full(self):
         """FIFO-evict oldest entries until there is room for one more value (call under self._lock).
-        Bounds memory for long/looping sessions while keeping rehydration correct for recent entities."""
+        Bounds memory for long/looping sessions while keeping rehydration correct for recent entities. The
+        evicted value->placeholder BINDING is MOVED to the tomb (not discarded) so a re-sent value reuses its
+        original placeholder instead of re-minting -- placeholder bytes stay stable across eviction (prompt
+        cache). The rehydration entry (p2v) IS dropped: an evicted-and-not-resent value would show a raw
+        placeholder in a response (over-redaction, the safe error), never a wrong value."""
         while len(self.v2p) >= MAX_ENTITIES and self.v2p:
             old_val = next(iter(self.v2p))             # oldest inserted (dict preserves insertion order)
             old_ph = self.v2p.pop(old_val)
@@ -245,6 +353,20 @@ class EntityMap:
             self.p2v.pop(old_ph, None)
             if self.v2p_cf.get(old_val.casefold()) == old_ph:
                 self.v2p_cf.pop(old_val.casefold(), None)
+            # Key the tomb by the SAME class-derivation the lookup uses (exact for case-sensitive labels, else
+            # casefold); pop-then-set moves a re-evicted key to most-recent for correct FIFO.
+            tkey = old_val if _case_sensitive_placeholder(old_ph) else old_val.casefold()
+            self.tomb.pop(tkey, None)
+            self.tomb[tkey] = old_ph
+        while len(self.tomb) > MAX_TOMB:           # bound the tombstone (FIFO); ancient values re-mint (safe tail)
+            self.tomb.pop(next(iter(self.tomb)), None)
+
+    def needs_touch(self):
+        """True when an ACTIVE map (has entries) has not been persisted within the debounce window. Lets the
+        egress refresh last_used on a long stretch of PII-free turns so an in-use session never idle-expires
+        (which would re-mint every placeholder -> prompt-cache miss). Debounced so clean turns don't write
+        on every request."""
+        return bool(self.v2p or self.tomb) and (time.time() - self.last_used) > TOUCH_REFRESH_S
 
     def replay(self):
         """placeholder->value for response rehydration (full session map: the model may reference any

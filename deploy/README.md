@@ -12,6 +12,19 @@ services live under `gate/`.
 - `ossredact-egress.service` -- systemd unit for the public client-facing proxy on loopback port 8011.
 - `export_quantize_v11_cpu.py` -- exports an xlm-r fp32 checkpoint to ONNX, then **dynamic**
   (weights-only) INT8. Set `MDIR` / `CALIB` to your model + calibration set.
+- `pre-push-guard.sh` -- repo-safety pre-push hook logic (see "Repo safety" below).
+- `install-git-hooks.sh` -- installs `pre-push-guard.sh` into this clone's `.git/hooks/pre-push`.
+- `check-gate-drift.sh` -- md5 the gate detect-service files a REMOTE gate host runs (set `GATE_HOST` to
+  its ssh host/alias) vs the repo. A remote host is an rsync copy, not a git checkout, so it can silently
+  diverge; run before relying on it. The egress proxy is NOT checked -- it runs the workstation working
+  tree directly and cannot drift.
+- `requirements-gate-cpu.lock` -- FROZEN `pip freeze` manifest of the production CPU gate + egress venv.
+  `requirements.txt` is floor-pins only, so a fresh install could silently pull a transformers/onnxruntime
+  bump that changes what PII is caught -- this locks the validated versions. Regen command is in the
+  file's header. For an always-on GPU gate on a remote box (recommended: the workstation egress points
+  `GATEWAY_GATE_URL` at it, with the loopback CPU gate as `GATEWAY_GATE_FALLBACK_URL`), adapt
+  `ossredact-gate-cpu.service`: point `ExecStart` at `gate/gate_service_gpu.py`, pin the card with
+  `CUDA_VISIBLE_DEVICES=<gpu-uuid>`, bind a trusted interface, and freeze that venv the same way.
 
 ## Why dynamic (weights-only) INT8, not static QDQ
 Static QDQ (per-tensor AND per-channel AND embedding-excluded) all collapsed PII recall on xlm-r
@@ -52,6 +65,22 @@ A running gate can be repointed from one tier to another with a systemd drop-in:
 `gate_service_cpu.py`. The public install path uses `ossredact-gate-cpu.service` directly and sets
 `CPU_GATE_PORT=8001`, matching the egress proxy's `GATEWAY_GATE_URL` default. For a model this small, CPU INT8 detect latency
 (~42ms) beats an Intel-NPU OpenVINO tier (~112ms) -- the OpenVINO dispatch overhead dominates.
+
+## Repo safety: pre-push guard (run once per clone)
+`origin` is a PUBLIC repo. Only a clean local `main` (== `origin/main`) is push-safe; `master` and
+every advisor/feat/worktree branch embed dev-only paths (`plans/`, `AGENTS.md`, ...) in their history.
+`.gitignore` guards `git add`, NOT `git push`, so a pre-push hook is the backstop.
+
+```bash
+bash deploy/install-git-hooks.sh   # also repairs a stale core.hooksPath if present
+```
+
+This installs a `pre-push` hook (a self-contained copy of `pre-push-guard.sh`, so it works on any
+checkout) that ABORTS a push to the public origin when (1) the target is anything other than local
+`main` -> `origin/main`, or (2) the pushed ref's tip tree or added commits touch a dev-only path
+(`plans/`, `AGENTS.md`, `.agents/`, `extension/`, `*PRELAUNCH-AUDIT*`). Normal `git push origin main`
+(incremental) is allowed; `git push --all` / pushing any other branch is blocked. Re-run the installer
+after editing the guard. Override only when certain: `git push --no-verify`.
 
 ## Notes
 - `NPUTier(model_dir)` loads `model_dir/model.int8.onnx` + the tokenizer + `config.json` from the

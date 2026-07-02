@@ -12,6 +12,12 @@ WorkingDirectory=/opt/ossredact/appliance
 Environment=GATEWAY_HOST=127.0.0.1
 Environment=GATEWAY_PORT=8011
 Environment=GATEWAY_GATE_URL=http://127.0.0.1:8001
+# Optional availability hedge: if GATEWAY_GATE_URL points at a REMOTE gate (e.g. a GPU tier on another host),
+# set a second gate here so a primary outage fails over to it instead of 503'ing every request. Point it at a
+# LOCAL/loopback gate so it survives a network outage too. The fallback runs the full floor + neural base, so
+# fail-closed is preserved. Leave unset when the gate is already local. Connection failures fail over; a
+# reachable gate's HTTP error does not.
+# Environment=GATEWAY_GATE_FALLBACK_URL=http://127.0.0.1:8001
 ExecStart=/opt/ossredact/.venv/bin/python /opt/ossredact/appliance/egress_proxy.py
 Restart=always
 RestartSec=5

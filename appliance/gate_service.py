@@ -29,6 +29,7 @@ CACHE_DIR = os.environ.get('GATEWAY_NPU_CACHE_DIR', os.path.join(APPLIANCE_DIR, 
 MODEL_NAME = 'ZenSystemAI/ossredact-pii-base (OpenVINO FP16, Intel NPU)'  # public HF repo id; same base model family as the CPU/GPU gates, version ships as an HF revision tag
 START = time.time()
 HOST = os.environ.get('GATEWAY_NPU_HOST', '127.0.0.1')
+PORT = int(os.environ.get('GATEWAY_NPU_PORT', '8001'))   # env-overridable, like the CPU_GATE_PORT/GPU_GATE_PORT siblings
 
 
 class OVTier:
@@ -171,4 +172,4 @@ def healthz():
 
 
 if __name__ == '__main__':
-    uvicorn.run(app, host=HOST, port=8001, log_level='warning')
+    uvicorn.run(app, host=HOST, port=PORT, log_level='warning')

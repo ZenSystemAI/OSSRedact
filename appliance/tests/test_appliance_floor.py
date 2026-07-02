@@ -92,3 +92,39 @@ def test_appliance_demo_show_does_not_print_raw_input_or_map_value(capsys):
     assert "Contact <EMAIL_001>" in out
     assert "MAP_KEYS: ['<EMAIL_001>']" in out
     assert "ROUNDTRIP OK: True" in out
+
+
+# ---- Date-shaped digit runs classify as sensitive_date, not sensitive_account_id (RC5 follow-up) ----
+# DIGIT_RUN_RE swallows hyphenated/compact dates (8-10 digits -> the 7-19 account bucket), which minted
+# SENSITIVEACCOUNTID for every datestamp/filename/beta tag and survived coding mode's `date` exclusion.
+def test_iso_date_is_date_not_account_id():
+    t = 'deployed on 2026-07-01 at noon'
+    assert ('sensitive_date', '2026-07-01') in labset(t)
+    assert 'sensitive_account_id' not in labels(t)
+
+
+def test_iso_date_with_glued_log_hour_is_date():
+    # "2026-07-01 09:30:00" -- the run stops at the colon, swallowing the hour into the digit run
+    t = 'at 2026-07-01 09:30:00 the job ran'
+    assert 'sensitive_account_id' not in labels(t)
+    assert any(l == 'sensitive_date' for l, v in labset(t))
+
+
+def test_dmy_and_compact_dates_are_dates():
+    assert 'sensitive_account_id' not in labels('due 01-07-2026 ok')
+    assert ('sensitive_date', '20260701') in labset('build 20260701 shipped')
+
+
+def test_beta_tag_date_suffix_not_account_id():
+    # the real-world regression: a feature-flag tag with a trailing date got a SENSITIVEACCOUNTID placeholder
+    t = 'enable context-1m-2025-08-07 today'
+    assert 'sensitive_account_id' not in labels(t)
+
+
+def test_space_grouped_runs_and_sins_still_caught():
+    # space-grouped digits are account-shaped (real groupings use spaces) -- NOT reclassified as dates
+    assert 'sensitive_account_id' in labels('ref 2026 07 01 99 noted')
+    # SIN (9 digits, hyphen-grouped) keeps its government_id floor -- widths reject the D-M-Y shape
+    assert 'government_id' in labels('SIN 046-454-286 on file')
+    # compact 8-digit runs that cannot be a real date stay account ids
+    assert 'sensitive_account_id' in labels('acct 20269999 ok')

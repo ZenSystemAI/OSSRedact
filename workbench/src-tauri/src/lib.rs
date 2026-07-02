@@ -22,6 +22,9 @@ use tauri_plugin_autostart::MacosLauncher;
 /// Loopback base for the always-on egress daemon's control API (allowlist / live-activity SSE /
 /// healthz). Injected into the webview so the bundled frontend (daemon.ts) talks to the local egress.
 /// The egress daemon binds this port as a separate service; the shell only connects.
+/// This is the DEFAULT only: the operator can override it at runtime via the OSSREDACT_DAEMON env var
+/// (e.g. point a packaged app at an off-device gate without rebuilding), and can also set/clear the
+/// address inside the console's "Gate connection" panel (which persists in the webview and wins over this).
 const DAEMON_BASE: &str = "http://127.0.0.1:8011";
 
 /// Label of the main app window. Must match the window `label` declared in tauri.conf.json (the
@@ -40,8 +43,15 @@ const MENU_QUIT: &str = "quit";
 /// daemonBase() trims a trailing slash and prefixes it onto `/api/*` and `/healthz`, so the
 /// console issues requests to e.g. http://127.0.0.1:8011/api/allowlist.
 fn daemon_init_script() -> String {
-    // {DAEMON_BASE:?} emits a JSON/JS string literal (quoted, escaped) -- safe to embed in JS.
-    format!("window.__OSSREDACT_DAEMON__ = {DAEMON_BASE:?};")
+    // Runtime override (OSSREDACT_DAEMON) lets a packaged app target an off-device gate without a rebuild;
+    // otherwise the loopback default. The in-console "Gate connection" override still wins over this (daemon.ts
+    // checks its persisted value first). {base:?} emits a quoted/escaped JS string literal -- safe to embed.
+    let base = std::env::var("OSSREDACT_DAEMON")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DAEMON_BASE.to_string());
+    format!("window.__OSSREDACT_DAEMON__ = {base:?};")
 }
 
 /// Show + focus the main window (the window already exists -- just hidden -- so this only reveals it).
@@ -82,6 +92,205 @@ fn supervise_daemon_todo(_app: &AppHandle) {
     // Intentionally empty. See the TODO above.
 }
 // ---------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------------
+// Firewall control commands (invoked from the console UI). The point-and-click on/off + routing that the
+// service-model app previously left to the CLI. All LOCAL + loopback: `systemctl --user` manages the two
+// user services (NO sudo), and the routing toggle flips ANTHROPIC_BASE_URL in ~/.claude/settings.json.
+// ---------------------------------------------------------------------------------------------------
+const FW_SERVICES: [&str; 2] = ["ossredact-gate-cpu.service", "ossredact-egress.service"];
+const ROUTE_BASE: &str = "http://127.0.0.1:8011";
+const ROUTE_KEY: &str = "ANTHROPIC_BASE_URL";
+const ROUTE_DISABLED_KEY: &str = "_ANTHROPIC_BASE_URL_DISABLED_GATE_DEBUG";
+// When ANTHROPIC_BASE_URL points at anything other than api.anthropic.com, Claude Code treats the
+// endpoint as "not first-party" and pessimistically caps the context window at 200k -- even for models
+// that are natively 1M. The visible cost is the context bar reading ~5x high (it glows red /
+// auto-compacts near 140k of real tokens instead of ~700k). The firewall forwards every request
+// verbatim to the real Anthropic API, so the 1M window genuinely applies.
+//
+// _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL does NOT fix this (probe-verified on CC 2.1.197,
+// 2026-07-01: gated /context still read 97k/200k with it set). It only patches the host check;
+// the window sizing also requires the provider classification to be first-party, and a custom
+// base URL fails that leg regardless. The key is kept solely so enable/disable scrub it from
+// installs that wrote it while it was believed to work.
+//
+// What DOES work is the `[1m]` model-id suffix (e.g. `claude-fable-5[1m]`): the suffix check runs
+// before any provider gating, so the bar reads against 1M, and CC sends the matching 1M context
+// beta upstream (accepted through the proxy; probe-verified end-to-end, /context read 97k/1m and
+// the request returned 200 with a prompt-cache hit). On a direct first-party connection CC strips
+// the suffix itself, so leaving it on the model permanently is safe in both modes -- which is why
+// enable adds it and disable leaves it alone.
+const ASSUME_FIRST_PARTY_KEY: &str = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL";
+// Models safe to suffix with [1m]: native-1M families per the CC model registry (fable-5, opus-4-8)
+// plus sonnet-5 (native 1M per its release notes) and the aliases CC resolves through the same
+// suffix-aware path. Anything else (haiku, explicit dated ids, unknown strings) is left untouched --
+// wrongly suffixing a non-1M model is worse than a mis-sized bar.
+const ONE_M_MODELS: [&str; 7] = [
+    "fable",
+    "opus",
+    "sonnet",
+    "opusplan",
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+];
+
+/// Translate a raw `systemctl --user` failure into actionable guidance. The common non-obvious case is a
+/// missing user session bus (`Failed to connect to bus` / `Failed to connect to user scope bus`): the app was
+/// launched outside an active `systemd --user` session (SSH without lingering, some autostart/kiosk contexts),
+/// so the point-and-click toggle cannot reach the user manager. Surface what to do instead of the bare dbus error.
+fn friendly_systemctl_err(stderr: &str) -> String {
+    let s = stderr.trim();
+    let low = s.to_lowercase();
+    if low.contains("connect to bus") || low.contains("scope bus") || low.contains("dbus") {
+        return format!(
+            "No systemd user session available, so the firewall can't be toggled from here.\n\
+             Start it from a normal desktop login, or run `loginctl enable-linger {}` once so the user \
+             services can run without an active session. (raw: {})",
+            std::env::var("USER").unwrap_or_else(|_| "<user>".to_string()),
+            s
+        );
+    }
+    if s.is_empty() {
+        "systemctl --user failed with no output (is the user service manager running?)".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// "active" iff BOTH user services report active, else "inactive".
+fn firewall_status_str() -> String {
+    for svc in FW_SERVICES {
+        let active = std::process::Command::new("systemctl")
+            .args(["--user", "is-active", svc])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+            .unwrap_or(false);
+        if !active {
+            return "inactive".to_string();
+        }
+    }
+    "active".to_string()
+}
+
+/// Start / stop / restart the two OSSRedact user services, or report status. Returns the resulting status
+/// string ("active" | "inactive"). No sudo -- these are `systemctl --user` services.
+#[tauri::command]
+fn firewall_control(action: String) -> Result<String, String> {
+    match action.as_str() {
+        "start" | "stop" | "restart" => {
+            let out = std::process::Command::new("systemctl")
+                .arg("--user")
+                .arg(&action)
+                .args(FW_SERVICES)
+                .output()
+                .map_err(|e| format!("systemctl --user {action}: {e}"))?;
+            if out.status.success() {
+                Ok(firewall_status_str())
+            } else {
+                Err(friendly_systemctl_err(&String::from_utf8_lossy(&out.stderr)))
+            }
+        }
+        "status" => Ok(firewall_status_str()),
+        other => Err(format!("unknown firewall action: {other}")),
+    }
+}
+
+fn claude_settings_path() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".claude")
+        .join("settings.json"))
+}
+
+/// Toggle whether Claude Code routes through the firewall, by flipping ANTHROPIC_BASE_URL in
+/// ~/.claude/settings.json's `env` block. "get" reports current state; "enable"/"disable" set it and return
+/// the new state (true = routing on). Applies to NEW Claude Code sessions.
+#[tauri::command]
+fn routing_config(action: String) -> Result<bool, String> {
+    routing_config_impl(action)
+}
+
+fn routing_config_impl(action: String) -> Result<bool, String> {
+    let path = claude_settings_path()?;
+    // A fresh user has no ~/.claude/settings.json yet. Treat an absent file as "{}" (start from an
+    // empty object) and create it (plus the ~/.claude/ dir) on write below; a MALFORMED file that
+    // exists still surfaces a parse error so silent corruption is never masked.
+    let txt = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".to_string(),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let mut v: serde_json::Value =
+        serde_json::from_str(&txt).map_err(|e| format!("parse settings.json: {e}"))?;
+
+    if action == "get" {
+        let on = v
+            .get("env")
+            .and_then(|e| e.as_object())
+            .map(|e| e.contains_key(ROUTE_KEY))
+            .unwrap_or(false);
+        return Ok(on);
+    }
+    if action != "enable" && action != "disable" {
+        return Err(format!("unknown routing action: {action}"));
+    }
+
+    if !v.get("env").map(|e| e.is_object()).unwrap_or(false) {
+        v.as_object_mut()
+            .ok_or("settings.json is not a JSON object")?
+            .insert("env".to_string(), serde_json::json!({}));
+    }
+    let env = v
+        .get_mut("env")
+        .and_then(|e| e.as_object_mut())
+        .ok_or("settings.json env is not an object")?;
+
+    if action == "enable" {
+        env.remove(ROUTE_DISABLED_KEY);
+        env.insert(
+            ROUTE_KEY.to_string(),
+            serde_json::Value::String(ROUTE_BASE.to_string()),
+        );
+        // Scrub the flag written by older builds -- it never affected the window (see const note).
+        env.remove(ASSUME_FIRST_PARTY_KEY);
+    } else {
+        env.remove(ROUTE_KEY);
+        env.remove(ASSUME_FIRST_PARTY_KEY);
+        // keep a disabled marker so the prior intent stays visible / easily re-enabled
+        env.insert(
+            ROUTE_DISABLED_KEY.to_string(),
+            serde_json::Value::String(ROUTE_BASE.to_string()),
+        );
+    }
+
+    if action == "enable" {
+        // Keep the context bar / auto-compact sized to the true 1M window through the proxy: append
+        // [1m] to the configured model when it is a known native-1M id/alias. CC strips the suffix
+        // on direct first-party connections, so disable intentionally leaves it in place.
+        if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
+            let trimmed = model.trim();
+            if !trimmed.to_lowercase().ends_with("[1m]")
+                && ONE_M_MODELS.contains(&trimmed.to_lowercase().as_str())
+            {
+                let suffixed = format!("{trimmed}[1m]");
+                v.as_object_mut()
+                    .ok_or("settings.json is not a JSON object")?
+                    .insert("model".to_string(), serde_json::Value::String(suffixed));
+            }
+        }
+    }
+
+    let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    // create_dir_all is idempotent: no-op when ~/.claude/ already exists, creates it (and any
+    // missing ancestors) for the fresh-user absent-file path so the write does not fail.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, pretty + "\n").map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(action == "enable")
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -196,6 +405,8 @@ pub fn run() {
                 }
             }
         })
+        // Console-invoked firewall controls (point-and-click on/off + routing).
+        .invoke_handler(tauri::generate_handler![firewall_control, routing_config])
         .run(tauri::generate_context!())
         .expect("error while running the OSSRedact tray application");
 }
@@ -207,4 +418,177 @@ pub fn run() {
 fn tray_image() -> Option<Image<'static>> {
     const TRAY_PNG: &[u8] = include_bytes!("../icons/32x32.png");
     Image::from_bytes(TRAY_PNG).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Guard that restores `HOME` when dropped so a test cannot leak a fake HOME into the process.
+    /// All routing tests live in ONE test fn so the process-global HOME never races across parallel
+    /// tests (no `serial_test` dependency).
+    struct HomeGuard(Option<String>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn fake_home(tag: &str) -> (std::path::PathBuf, HomeGuard) {
+        let dir = std::env::temp_dir()
+            .join(format!("ossredact-routing-test-{}-{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp home");
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+        (dir, HomeGuard(prev))
+    }
+
+    fn settings_path(home: &std::path::Path) -> std::path::PathBuf {
+        home.join(".claude").join("settings.json")
+    }
+
+    fn read_json(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).expect("read settings"))
+            .expect("parse settings")
+    }
+
+    #[test]
+    fn routing_config_round_trip_and_siblings_preserved() {
+        // --- Absent file: enable creates it; disable writes the marker; get reflects each state ---
+        let (home, _guard) = fake_home("absent");
+        let path = settings_path(&home);
+        assert!(!path.exists(), "precondition: no settings.json yet");
+
+        assert!(routing_config_impl("enable".into()).unwrap(), "enable returns true");
+        assert!(path.exists(), "enable created the file (and ~/.claude/)");
+        assert!(
+            routing_config_impl("get".into()).unwrap(),
+            "get reports routing on after enable"
+        );
+        let v = read_json(&path);
+        assert_eq!(
+            v["env"][ROUTE_KEY].as_str(),
+            Some(ROUTE_BASE),
+            "enable wrote ANTHROPIC_BASE_URL = ROUTE_BASE"
+        );
+        assert!(
+            !v["env"].as_object().unwrap().contains_key(ASSUME_FIRST_PARTY_KEY),
+            "enable does NOT write the assume-first-party flag (probe-verified inert on CC 2.1.197)"
+        );
+        assert!(
+            !v["env"].as_object().unwrap().contains_key(ROUTE_DISABLED_KEY),
+            "enable removed the disabled marker"
+        );
+
+        assert!(!routing_config_impl("disable".into()).unwrap(), "disable returns false");
+        assert!(
+            !routing_config_impl("get".into()).unwrap(),
+            "get reports routing off after disable"
+        );
+        let v = read_json(&path);
+        assert!(
+            !v["env"].as_object().unwrap().contains_key(ROUTE_KEY),
+            "disable removed ANTHROPIC_BASE_URL"
+        );
+        assert!(
+            !v["env"].as_object().unwrap().contains_key(ASSUME_FIRST_PARTY_KEY),
+            "disable removed the assume-first-party flag (un-routed CC is first-party on its own)"
+        );
+        assert_eq!(
+            v["env"][ROUTE_DISABLED_KEY].as_str(),
+            Some(ROUTE_BASE),
+            "disable wrote the _ANTHROPIC_BASE_URL_DISABLED_GATE_DEBUG marker"
+        );
+        let _ = fs::remove_dir_all(&home);
+
+        // --- Pre-existing sibling keys survive with order preserved (serde_json preserve_order) ---
+        let (home2, _guard2) = fake_home("siblings");
+        let path2 = settings_path(&home2);
+        fs::create_dir_all(path2.parent().unwrap()).unwrap();
+        // theme before env before notes -> a stable, non-trivial order to preserve on rewrite.
+        fs::write(&path2, r#"{"theme":"dark","env":{"FOO":"bar"},"notes":"keep-me"}"#).unwrap();
+        assert!(routing_config_impl("enable".into()).unwrap());
+        let v2 = read_json(&path2);
+        let top: Vec<&str> = v2.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert_eq!(top, vec!["theme", "env", "notes"], "top-level key order preserved");
+        assert_eq!(v2["theme"].as_str(), Some("dark"), "sibling key survives");
+        assert_eq!(v2["notes"].as_str(), Some("keep-me"), "sibling key survives");
+        assert_eq!(v2["env"]["FOO"].as_str(), Some("bar"), "pre-existing env key survives");
+        assert_eq!(v2["env"][ROUTE_KEY].as_str(), Some(ROUTE_BASE), "route key added");
+        let _ = fs::remove_dir_all(&home2);
+
+        // --- A malformed file that EXISTS still surfaces a parse error (absent-file path does not mask it) ---
+        let (home3, _guard3) = fake_home("malformed");
+        let path3 = settings_path(&home3);
+        fs::create_dir_all(path3.parent().unwrap()).unwrap();
+        fs::write(&path3, "{not json").unwrap();
+        let err = routing_config_impl("get".into()).unwrap_err();
+        assert!(
+            err.contains("parse settings.json"),
+            "malformed file surfaces parse error: {err}"
+        );
+        let _ = fs::remove_dir_all(&home3);
+
+        // --- Known native-1M model gets [1m] appended on enable; disable leaves it alone ---
+        let (home, _guard) = fake_home("model-1m");
+        let path = settings_path(&home);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                r#"{{"model":"claude-fable-5","env":{{"{ASSUME_FIRST_PARTY_KEY}":"stale"}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(routing_config_impl("enable".into()).unwrap());
+        let v = read_json(&path);
+        assert_eq!(
+            v["model"].as_str(),
+            Some("claude-fable-5[1m]"),
+            "enable appended [1m] so the context bar reads the true 1M window through the proxy"
+        );
+        assert!(
+            !v["env"].as_object().unwrap().contains_key(ASSUME_FIRST_PARTY_KEY),
+            "enable scrubbed the stale assume-first-party flag from an older install"
+        );
+        assert!(!routing_config_impl("disable".into()).unwrap());
+        let v = read_json(&path);
+        assert_eq!(
+            v["model"].as_str(),
+            Some("claude-fable-5[1m]"),
+            "disable leaves the suffix (CC strips it itself on direct first-party connections)"
+        );
+        let _ = fs::remove_dir_all(&home);
+
+        // --- Already-suffixed stays as-is; unknown model and absent model are never touched ---
+        let (home2, _guard2) = fake_home("model-other");
+        let path2 = settings_path(&home2);
+        fs::create_dir_all(path2.parent().unwrap()).unwrap();
+        fs::write(&path2, r#"{"model":"claude-fable-5[1m]"}"#).unwrap();
+        assert!(routing_config_impl("enable".into()).unwrap());
+        assert_eq!(
+            read_json(&path2)["model"].as_str(),
+            Some("claude-fable-5[1m]"),
+            "already-suffixed model unchanged (no [1m][1m])"
+        );
+        fs::write(&path2, r#"{"model":"claude-haiku-4-5-20251001"}"#).unwrap();
+        assert!(routing_config_impl("enable".into()).unwrap());
+        assert_eq!(
+            read_json(&path2)["model"].as_str(),
+            Some("claude-haiku-4-5-20251001"),
+            "non-1M / unknown model left untouched"
+        );
+        fs::write(&path2, r#"{}"#).unwrap();
+        assert!(routing_config_impl("enable".into()).unwrap());
+        assert!(
+            !read_json(&path2).as_object().unwrap().contains_key("model"),
+            "absent model key is not invented"
+        );
+        let _ = fs::remove_dir_all(&home2);
+    }
 }

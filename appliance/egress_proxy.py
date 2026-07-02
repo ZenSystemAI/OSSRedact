@@ -14,9 +14,9 @@ Co-located with the NER gate (:8001) on the same host; binds :8011. Built up acr
   S7 : secrets layer wired into the cheap gate (always-on, ignores PII policy).
   S8 : gateway-config.yaml policy resolution (session > project > default).
 """
-import os, sys, json, time, re, hashlib, asyncio
+import os, sys, json, time, re, hashlib, hmac, asyncio, threading
 from collections import deque, OrderedDict
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, urlencode
 import yaml
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -27,13 +27,14 @@ APPLIANCE_DIR = os.environ.get('GATEWAY_APPLIANCE_DIR') or os.path.dirname(os.pa
 if APPLIANCE_DIR not in sys.path:
     sys.path.insert(0, APPLIANCE_DIR)
 from privacy_gate import tier0_spans, merge_spans, post_merge_address, explain, FLOOR_LABELS  # cheap Tier-0 (no model load)
-from entity_map import EntityMap, derive_session, map_file_lock
+from entity_map import EntityMap, derive_session, map_file_lock, gc_maps
 import redact_core
 import allowlist as allowlist_mod   # the do-not-redact dictionary (value-exact, opt-in)
 import denylist as denylist_mod     # the always-redact dictionary (term scanner, opt-in)
 from secrets_scan import secret_spans                                   # deterministic secrets (always-on)
 import openai_adapter   # OpenAI /v1/chat/completions schema translation (Codex / omp / OpenAI-compatible)
 import responses_adapter   # OpenAI /v1/responses schema translation (Codex CLI speaks /v1/responses ONLY)
+import tool_arg_policy   # B5: withhold FLOOR/secret-class placeholders from EXECUTED tool-call arguments
 from name_carrier import name_shaped, carrier_person_spans   # plan 026: rare-name carrier-wrap booster (NER recall)
 
 ANTHROPIC_UPSTREAM = os.environ.get('GATEWAY_ANTHROPIC_UPSTREAM', 'https://api.anthropic.com')
@@ -44,6 +45,20 @@ OPENAI_UPSTREAM = os.environ.get('GATEWAY_OPENAI_UPSTREAM', 'https://api.openai.
 # only on the plan path. Override for a self-hosted/enterprise ChatGPT backend.
 CHATGPT_UPSTREAM = os.environ.get('GATEWAY_CHATGPT_UPSTREAM', 'https://chatgpt.com/backend-api/codex')
 GATE_URL = os.environ.get('GATEWAY_GATE_URL', 'http://127.0.0.1:8001')
+# AVAILABILITY: an optional SECOND gate tried only when the primary is unreachable. The primary can be a remote
+# high-quality tier (e.g. a GPU large model on the tailnet); if that box or the network path is down, a fail-closed
+# egress otherwise 503s EVERY request -- a total LLM outage -- even when a healthy local gate exists. Point this at
+# the loopback CPU gate (http://127.0.0.1:8001) so a primary outage DEGRADES to the local base tier instead of a
+# hard stop. Only connection-level failures fail over (a reachable gate returning 4xx/5xx is a real error, not an
+# outage, and is NOT masked by retrying elsewhere). The fallback still runs the full floor + neural base model, so
+# fail-CLOSED semantics are preserved end to end -- this trades a quality tier for availability, never redaction.
+# UNSET (default) => single-gate behaviour, unchanged. Must differ from GATE_URL to take effect.
+GATE_FALLBACK_URL = os.environ.get('GATEWAY_GATE_FALLBACK_URL', '').strip()
+# Reject a request body larger than this BEFORE it is parsed and fanned out to the detector (one /detect call per
+# 600-char chunk per field). Without a cap a single multi-MB field becomes thousands of sequential detector calls
+# that pin the shared gate and stall other sessions. 32 MiB comfortably covers a full 1M-token context turn; raise
+# via GATEWAY_MAX_BODY_BYTES if a legitimate payload is ever larger. 0 disables the cap.
+MAX_BODY_BYTES = int(os.environ.get('GATEWAY_MAX_BODY_BYTES', str(32 * 1024 * 1024)))
 # Per-request cap on CONCURRENT neural /detect calls. Detection is read-only and per-field independent, so fields
 # CAN be scanned in parallel -- BUT a live sweep against the deployed detector (2026-06-21, validation/
 # RESULT-gate-latency-2026-06-21.md) showed the detector is ~6-8ms/call (loopback + warm GPU) and is a SINGLE CUDA
@@ -56,6 +71,20 @@ DRYRUN = os.environ.get('GATEWAY_DRYRUN', '0') == '1'        # don't forward ups
 EXPOSE_MAP = os.environ.get('GATEWAY_TEST_EXPOSE_MAP', '0') == '1'   # test-only: include replay map in dryrun
 PORT = int(os.environ.get('GATEWAY_PORT', '8011'))
 HOST = os.environ.get('GATEWAY_HOST', '127.0.0.1')
+# OFF-DEVICE control plane (opt-in). By default the control API (/api/*, settings UI) is loopback-ONLY: a
+# remote GUI can read /healthz but cannot manage a gate it does not share a machine with. Set a shared secret
+# here and an authenticated remote peer (the OSSRedact desktop console pointing at this gate over a trusted
+# network -- e.g. a tailnet) may reach the control routes by presenting it. Loopback peers still need no token
+# (the local settings UI is unchanged). UNSET => exactly the prior loopback-only behaviour (zero new exposure).
+# SECURITY: enabling this exposes the live-activity proof feed (REAL PII values) to any peer holding the token,
+# so set it only on a trusted/encrypted network and treat the token like a credential. Compared constant-time.
+CONTROL_TOKEN = os.environ.get('GATEWAY_CONTROL_TOKEN', '').strip()
+# Extra browser ORIGINS allowed to read control responses cross-origin (comma-separated, exact match), on top of
+# the always-allowed loopback + Tauri origins. Needed only for a BROWSER-served console pointed at a remote gate
+# (the desktop app's tauri origin is already allowed). Pair with CONTROL_TOKEN; an origin here still cannot reach
+# a control route without the token. Example: GATEWAY_CORS_ORIGINS=http://my-pc:5180,https://console.example.ts.net
+CONTROL_CORS_ORIGINS = frozenset(
+    o.strip().rstrip('/') for o in os.environ.get('GATEWAY_CORS_ORIGINS', '').split(',') if o.strip())
 LOG_REQUESTS = os.environ.get('GATEWAY_LOG_REQUESTS', '1') == '1'   # logs COUNTS/LABELS/placeholder TOKENS only
 EXPLAIN = os.environ.get('GATEWAY_EXPLAIN', '0') == '1'   # opt-in: per-span provenance (no values) in meta['explain']
 # FAIL CLOSED when the neural gate is unreachable (FIX-ROUND-3 HIGH). Post-FIX-2 EVERY non-trivial field is
@@ -64,6 +93,8 @@ EXPLAIN = os.environ.get('GATEWAY_EXPLAIN', '0') == '1'   # opt-in: per-span pro
 # 503 instead of leaking. Default ON; set GATEWAY_FAIL_OPEN=1 ONLY to deliberately trade privacy for availability.
 FAIL_CLOSED = os.environ.get('GATEWAY_FAIL_OPEN', '0') != '1'
 START = time.time()
+# Surfaced on /healthz so a connecting GUI can show which gate build it reached (override per deploy).
+SERVICE_VERSION = os.environ.get('GATEWAY_VERSION', '0.2.0')
 # Placeholder TOKEN matcher for the wire_placeholders LOG line (observability only; never model-visible). A label
 # may carry INTERNAL underscores (gate-form <PHONE_NUMBER_001> / <SENSITIVE_ACCOUNT_ID_001>), so [A-Z0-9_]+ before
 # the final '_\d{3,}' separator (FIX-ROUND-2 LOW: the old [A-Z0-9]+ missed multi-underscore labels, so the log
@@ -91,11 +122,12 @@ app = FastAPI(title='OSSRedact egress proxy')
 # desktop app (Tauri webview, origin tauri://localhost or http://tauri.localhost) and
 # a locally-served web console (http://localhost:PORT) reach this daemon CROSS-ORIGIN,
 # so the browser/webview needs CORS headers to read the control responses + open the
-# SSE feed. This does NOT widen access: every control route is ALSO loopback-PEER
-# guarded (_is_loopback on req.client.host), so a remote origin can never reach them
-# regardless of CORS. The redaction routes (/v1/*) are deliberately untouched -- they
-# get no CORS headers and pass straight through. Origins are allow-listed to localhost
-# / 127.0.0.1 / [::1] / tauri.localhost only (never reflected for arbitrary origins).
+# SSE feed. CORS alone does NOT grant access: every control route is ALSO peer-guarded
+# (_control_allowed = loopback OR a valid GATEWAY_CONTROL_TOKEN), so an unauthenticated
+# remote origin can never reach them regardless of CORS. The redaction routes (/v1/*) are
+# deliberately untouched -- they get no CORS headers and pass straight through. Origins are
+# allow-listed to localhost / 127.0.0.1 / [::1] / tauri.localhost, plus any explicit
+# GATEWAY_CORS_ORIGINS (for a browser console on a remote gate) -- never reflected blindly.
 # ---------------------------------------------------------------------------
 _CORS_ORIGIN_RE = re.compile(
     r'^(https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?|https?://tauri\.localhost|tauri://localhost)$', re.I)
@@ -105,33 +137,58 @@ def _is_control_path(path):
     return path == '/healthz' or path.startswith('/api')
 
 
+def _cors_allows(origin):
+    # Always allow loopback + Tauri (the regex). Additionally allow any operator-configured exact origin so a
+    # browser-served console on another host can read a remote gate's control responses (still token-gated).
+    if not origin:
+        return False
+    return bool(_CORS_ORIGIN_RE.match(origin)) or origin.rstrip('/') in CONTROL_CORS_ORIGINS
+
+
 @app.middleware('http')
 async def _control_cors(request: Request, call_next):
-    # Fast path: anything that is not a control route is forwarded with ZERO header changes.
+    # Classify the path defensively: a classifier bug must never break the relay, but it must ALSO never cause the
+    # downstream route to run twice. call_next() (which executes the route, including state-changing control writes)
+    # is invoked on EXACTLY ONE code path below; the only work wrapped in a try/except after it is header mutation,
+    # which cannot re-run the route. (Prior code re-called call_next in an outer except -> a post-route error could
+    # double-execute a mutating write.)
     try:
-        if not _is_control_path(request.url.path):
-            return await call_next(request)
-        origin = request.headers.get('origin')
-        allow = bool(origin and _CORS_ORIGIN_RE.match(origin))
-        if request.method == 'OPTIONS':
-            # CORS preflight (e.g. POST /api/allowlist with content-type: application/json). Answer here
-            # without touching the route; only emit allow-headers when the origin is permitted.
-            hdrs = {}
-            if allow:
-                hdrs = {'access-control-allow-origin': origin, 'vary': 'Origin',
-                        'access-control-allow-methods': 'GET, POST, OPTIONS',
-                        'access-control-allow-headers': 'content-type, x-ossredact-control',
-                        'access-control-max-age': '600'}
-            return PlainTextResponse('', status_code=204, headers=hdrs)
-        resp = await call_next(request)
+        is_control = _is_control_path(request.url.path)
+    except Exception as e:
+        print(f"[cors middleware path-classify error] {type(e).__name__}", flush=True)
+        is_control = False
+    if not is_control:
+        # Fast path: not a control route -> forwarded with ZERO header changes.
+        return await call_next(request)
+
+    origin = request.headers.get('origin')
+    try:
+        allow = _cors_allows(origin)
+    except Exception as e:
+        print(f"[cors middleware origin-check error] {type(e).__name__}", flush=True)
+        allow = False
+
+    if request.method == 'OPTIONS':
+        # CORS preflight (e.g. POST /api/allowlist with content-type: application/json). Answer here without
+        # touching the route; only emit allow-headers when the origin is permitted.
+        hdrs = {}
         if allow:
+            hdrs = {'access-control-allow-origin': origin, 'vary': 'Origin',
+                    'access-control-allow-methods': 'GET, POST, OPTIONS',
+                    # x-ossredact-control-token lets an authenticated remote console reach the control API.
+                    'access-control-allow-headers': 'content-type, x-ossredact-control, x-ossredact-control-token',
+                    'access-control-max-age': '600'}
+        return PlainTextResponse('', status_code=204, headers=hdrs)
+
+    resp = await call_next(request)   # the route runs exactly once
+    if allow:
+        try:
             resp.headers['access-control-allow-origin'] = origin
             resp.headers['vary'] = 'Origin'
-        return resp
-    except Exception as e:
-        # A CORS bug must never break the firewall. Log for observability, then fall back to the raw response.
-        print(f"[cors middleware error] {type(e).__name__}", flush=True)
-        return await call_next(request)
+        except Exception as e:
+            # Header mutation failed -- return the already-produced response as-is; never re-run the route.
+            print(f"[cors middleware header error] {type(e).__name__}", flush=True)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +473,56 @@ SECRETS_ENTROPY = os.environ.get('GATEWAY_SECRETS_ENTROPY', '1') == '1'
 # (would break the coding assistant). Narrower than the secrets FP filter so real UUIDs/accounts stay redacted.
 _BENIGN_HASH = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 
+# file_path over-redaction precision (operator policy GATEWAY_PATH_POLICY). The NER tags the WHOLE absolute path as
+# `file_path`, but the only identity-bearing part is the home-dir username (/home/<user>/, /Users/<user>/). Tagging
+# the whole path breaks the coding agent's file ops (it gets a placeholder, not a usable path) AND busts the
+# Anthropic prompt cache (paths are everywhere -> mint+sweep churn). So narrow each file_path span to JUST the
+# home-dir username (kept under the file_path label, which is CASE-SENSITIVE in entity_map -> /home/steven round-
+# trips exactly, no /home/Steven mangle), and DROP the span when the path has no home-dir username (/etc, /var,
+# /assets, relative/project paths -- structurally not PII, and the model needs them to work). PII a detector tags
+# INDEPENDENTLY (an email, a card, a key with a cue, a denylisted term) keeps its OWN span and is still redacted; a
+# value that ONLY the whole-path span covered (e.g. a bare high-entropy blob the secret floor skips next to a '/',
+# or a client name the NER did not tag) passes through as non-username path text -- the operator's accepted
+# tradeoff, narrowable further via the denylist. (This pre-existing entropy-blob-in-path gap is NOT widened here: it
+# also passed under the legacy filepath-excluded default.) Policy: `username` (default)
+# narrows; `passthrough` drops every file_path span (paths reach the model verbatim, username included); `full`
+# keeps the model's whole-path span (the legacy over-redaction).
+PATH_POLICY = os.environ.get('GATEWAY_PATH_POLICY', 'username')
+# Home-dir username matcher. Case-INSENSITIVE (macOS resolves /users/ == /Users/; /HOME/ occurs), tolerant of
+# repeated separators (/home// path-join artifact) and BOTH separators, and accepts the Windows drive form
+# (C:\Users\<user>\) and the tilde home (~<user>/). .search() takes the FIRST home root so a mid-path "/Users/"
+# directory is not mistaken for a second home (the NER emits one span per path anyway).
+_HOME_USER_RE = re.compile(
+    r'(?:[\\/]+home[\\/]+|(?:[A-Za-z]:)?[\\/]+users[\\/]+|~)([^\\/\s]+)', re.IGNORECASE)
+
+
+def _is_filepath_label(label):
+    return re.sub(r'[^a-z0-9]', '', str(label or '').casefold()) in ('filepath', 'path')
+
+
+def _narrow_path_spans(spans, text):
+    """Apply GATEWAY_PATH_POLICY to file_path spans. Non-file_path spans pass through unchanged. A narrowed
+    username keeps the original span's label/tier/conf, so it stays a case-sensitive file_path placeholder."""
+    if PATH_POLICY == 'full':
+        return spans
+    out = []
+    for s in spans:
+        if not _is_filepath_label(s.get('label')):
+            out.append(s)
+            continue
+        if PATH_POLICY == 'passthrough':
+            continue   # drop -> the whole path reaches the model verbatim
+        m = _HOME_USER_RE.search(text[s['start']:s['end']])
+        if m is None:
+            continue   # no home-dir username in this path -> not PII -> drop (path passes through verbatim)
+        username = text[s['start'] + m.start(1):s['start'] + m.end(1)]
+        if _PH_TOKEN_RE.fullmatch(username):
+            continue   # the "username" is itself a leaked placeholder (/home/<FILEPATH_001>/...) echoed back --
+                       # narrowing onto it would remint <FILEPATH_005> over <FILEPATH_001> and leak a raw token
+                       # to the local chat on rehydrate (RC4). Already redacted -> leave it, do not re-mint.
+        out.append({**s, 'start': s['start'] + m.start(1), 'end': s['start'] + m.end(1)})
+    return out
+
 
 def cheap_gate(text):
     """Deterministic, always-on, microseconds. Tier-0 regex+Luhn PII + secrets (always redacted)."""
@@ -467,30 +574,58 @@ def _detect_cache_key(text, min_score):
     return digest, len(text), float(min_score)
 
 
+async def _detect_against(aclient, gate_url, text, min_score):
+    """Run the full chunked /detect against ONE gate. Returns offset-corrected spans, or raises on any failure
+    (connection or HTTP). The whole text is scanned against a single gate so a mid-text failover cannot splice
+    spans from two gates with divergent label sets."""
+    allspans = []
+    for off, chunk in _chunks(text):
+        r = await aclient.post(gate_url + '/detect', json={'text': chunk, 'min_score': min_score})
+        r.raise_for_status()
+        for s in r.json().get('spans', []):
+            sp = {'start': s['start'] + off, 'end': s['end'] + off, 'label': s['label'],
+                  'tier': s.get('tier', 1), 'conf': s.get('conf', 0.5), 'rule': s.get('rule', 'npu')}
+            for k in ('validator', 'cue', 'subtype', 'members'):
+                if s.get(k) is not None:
+                    sp[k] = s[k]
+            allspans.append(sp)
+    return allspans
+
+
+def _is_connection_error(exc):
+    """Distinguish 'gate unreachable' (fail over / degrade) from 'gate answered with an error' (a real fault we
+    must NOT paper over by retrying a different gate). httpx raises ConnectError/ConnectTimeout/ReadTimeout/
+    PoolTimeout etc. (all httpx.TransportError) when it never got a valid HTTP response; HTTPStatusError means a
+    reachable gate returned 4xx/5xx."""
+    return isinstance(exc, httpx.TransportError)
+
+
 async def _detect_neural(aclient, text, min_score=0.5):
-    """Call the NPU gate /detect (chunked); offset spans back to field coords. Cache by a digest of text+score so
+    """Call the neural gate /detect (chunked); offset spans back to field coords. Cache by a digest of text+score so
     repeating prompts / prior turns aren't re-scanned while raw text is not retained as a cache key. Returns spans,
-    or None if the gate is unreachable (caller then keeps Tier-0 only and flags degraded)."""
+    or None if the gate is unreachable (caller then keeps Tier-0 only and flags degraded).
+
+    When GATEWAY_GATE_FALLBACK_URL is set and the PRIMARY gate is unreachable (connection-level, not an HTTP error),
+    the whole detection is retried once against the fallback gate before giving up -- so a remote-primary outage
+    degrades to the local base tier instead of failing the request closed."""
     key = _detect_cache_key(text, min_score)
     cached = _DETECT_CACHE.get(key)
     if cached is not None:
         _DETECT_CACHE.move_to_end(key)   # mark most-recently-used (LRU)
         return cached
-    allspans = []
     try:
-        for off, chunk in _chunks(text):
-            r = await aclient.post(GATE_URL + '/detect', json={'text': chunk, 'min_score': min_score})
-            r.raise_for_status()
-            for s in r.json().get('spans', []):
-                sp = {'start': s['start'] + off, 'end': s['end'] + off, 'label': s['label'],
-                      'tier': s.get('tier', 1), 'conf': s.get('conf', 0.5), 'rule': s.get('rule', 'npu')}
-                for k in ('validator', 'cue', 'subtype', 'members'):
-                    if s.get(k) is not None:
-                        sp[k] = s[k]
-                allspans.append(sp)
+        allspans = await _detect_against(aclient, GATE_URL, text, min_score)
     except Exception as e:
-        print(f"[gate /detect error] {type(e).__name__}", flush=True)   # never log text
-        return None
+        use_fallback = GATE_FALLBACK_URL and GATE_FALLBACK_URL != GATE_URL and _is_connection_error(e)
+        if not use_fallback:
+            print(f"[gate /detect error] {type(e).__name__}", flush=True)   # never log text
+            return None
+        print(f"[gate /detect primary unreachable: {type(e).__name__}; failing over to fallback gate]", flush=True)
+        try:
+            allspans = await _detect_against(aclient, GATE_FALLBACK_URL, text, min_score)
+        except Exception as e2:
+            print(f"[gate /detect fallback error] {type(e2).__name__}", flush=True)   # never log text
+            return None
     # LRU insert: keep the HOT working set resident instead of FREEZING at capacity. The old `if len < MAX` insert
     # guard stopped caching ENTIRELY once 4096 keys filled and never evicted, so a long-lived gateway went cold on
     # every field forever (a latency cliff -- repeated large system prompts / prior-turn text stopped hitting). Now
@@ -505,21 +640,75 @@ async def _detect_neural(aclient, text, min_score=0.5):
 
 
 # ----------------------------------------------------------------------------
+# Prompt-cache freeze: keep Anthropic's cached prefix byte-stable across turns.
+# ----------------------------------------------------------------------------
+# Claude Code re-sends the WHOLE conversation (system prompt + memory + prior turns) with REAL PII every turn, so
+# the proxy must re-redact it every turn. For Anthropic's prompt cache to HIT, the redacted prefix bytes must be
+# IDENTICAL turn-over-turn. Per-value placeholders are already stable (entity_map), but the pass-3 known-value
+# SWEEP applies the WHOLE entity map -- which GROWS across the session -- so a value first learned on a LATER turn
+# gets retroactively swept into the otherwise-identical system/memory text, shifting the prefix bytes and busting
+# the cache (the operator's "context balloons one shot / 5h usage climbs fast" symptom: the full ~100k prefix is
+# re-processed every turn instead of cache-read).
+#
+# Fix ("redact once, freeze"): memoize each field's FINAL redacted text per (session, map-generation). The first
+# time a field's exact source text is redacted in a session it runs the full pipeline and is stored; every later
+# turn the SAME source text replays the stored bytes VERBATIM (skipping the growing sweep), so the prefix is
+# byte-identical and the cache hits. Privacy is unchanged: already-sent content gains nothing from a re-sweep (it
+# already went upstream when it was the live tail), and BRAND-NEW content (the latest user message + tool results)
+# still gets the full current-map sweep. The map-created-ts in the key auto-invalidates the memo on map rotation /
+# idle-expiry. In-memory, LRU-bounded; the key is a one-way hash and the value carries only placeholders -- raw
+# PII is never stored. Disable with GATEWAY_FREEZE_PREFIX=0 (reverts to re-sweeping every field every turn).
+FREEZE_PREFIX = os.environ.get('GATEWAY_FREEZE_PREFIX', '1') == '1'
+_FREEZE_CACHE = OrderedDict()   # (session, project, gen, cfg, src_hash) -> final redacted text ; LRU, recent at end
+_FREEZE_MAX = int(os.environ.get('GATEWAY_FREEZE_MAX', '4096'))
+
+
+# `cfg` is the live-config fingerprint (RC3): folding it into the key means a config change -- mode toggle,
+# allowlist/denylist edit, policy YAML edit -- INVALIDATES the memoized redaction for a re-sent field, so it is
+# re-swept under the NEW policy instead of replaying stale bytes minted under the old one. The fingerprint is
+# STABLE while config is unchanged (the mtimes/sig don't move), so a config-stable session keeps hitting the
+# freeze and the Anthropic prompt-cache prefix stays byte-identical; only a real config change busts it.
+def _freeze_key(session, project, gen, cfg, src):
+    h = hashlib.sha256(src.encode('utf-8', 'surrogatepass')).hexdigest()
+    return (session, project, gen, cfg, h)
+
+
+def _freeze_get(session, project, gen, cfg, src):
+    key = _freeze_key(session, project, gen, cfg, src)
+    val = _FREEZE_CACHE.get(key)
+    if val is not None:
+        _FREEZE_CACHE.move_to_end(key)
+    return val
+
+
+def _freeze_put(session, project, gen, cfg, src, final):
+    key = _freeze_key(session, project, gen, cfg, src)
+    _FREEZE_CACHE[key] = final
+    _FREEZE_CACHE.move_to_end(key)
+    while len(_FREEZE_CACHE) > _FREEZE_MAX:
+        _FREEZE_CACHE.popitem(last=False)
+
+
+# ----------------------------------------------------------------------------
 # Policy (SPECS §4): per-project + per-session PII config, secrets always on.
 # Resolution: session override > project override > default. Config is mtime-watched (live edits).
 # ----------------------------------------------------------------------------
 CONFIG_PATH = os.environ.get('GATEWAY_CONFIG', os.path.expanduser('~/.ossredact/gateway-config.yaml'))
-# operational labels excluded by DEFAULT (high-volume, low-sensitivity; redacting them adds noise + can
-# degrade the coding assistant -- e.g. file paths break agent file ops). Toggle per-project if a DLP setup needs them.
-# organization is deliberately NOT excluded: the v11r9c+ model detects it reliably and leaking an employer/client
-# defeats the firewall's purpose. Code-heavy sessions can re-add 'org' per-project/session if it's noise there.
-DEFAULT_EXCLUDE = ['filepath', 'username']
+# operational labels excluded by DEFAULT (high-volume, low-sensitivity; redacting the WHOLE value adds noise + can
+# degrade the coding assistant). 'filepath' is deliberately NOT blanket-excluded anymore: the model tags the whole
+# absolute path, but _narrow_path_spans (GATEWAY_PATH_POLICY=username, the default) reduces a file_path span to JUST
+# the home-dir username and passes the rest of the path through verbatim -- so agent file ops keep working WHILE the
+# identity-bearing username is still protected. (Re-adding 'filepath' here forces full passthrough, equivalent to
+# GATEWAY_PATH_POLICY=passthrough; GATEWAY_PATH_POLICY=full restores the legacy whole-path redaction.) 'username' (a
+# bare model 'username' label, not the in-path case) stays excluded as low-sensitivity. organization is deliberately
+# NOT excluded: the v11r9c+ model detects it reliably and leaking an employer/client defeats the firewall's purpose.
+DEFAULT_EXCLUDE = ['username']
 DEFAULT_CONFIG = {'secrets': {'enabled': True, 'entropy_backstop': True},
                   'pii': {'default': {'enabled': True, 'exclude': DEFAULT_EXCLUDE}, 'projects': {}, 'sessions': {}}}
 # friendly category -> model/Tier-0 labels (for the optional restrictive allowlist + the exclude list)
 CATEGORY_LABELS = {
     'person': ['person'], 'address': ['address'], 'phone': ['phone_number'], 'email': ['email'],
-    'account': ['sensitive_account_id', 'bank_account', 'iban', 'routing_number'],
+    'account': ['sensitive_account_id', 'account_number', 'bank_account', 'iban', 'routing_number'],
     'nas': ['government_id'], 'tax': ['tax_id'], 'card': ['payment_card', 'card_cvv', 'card_expiry'],
     'dob': ['date_of_birth'], 'date': ['sensitive_date'], 'postal': ['postal_code'], 'ip': ['ip_address'],
     'org': ['organization'], 'filepath': ['file_path'], 'username': ['username'],
@@ -703,6 +892,15 @@ def current_denylist():
     return _DENYLIST
 
 
+def _config_fingerprint():
+    """A small hashable snapshot of the live redaction config (RC3): the mode word plus the mtimes/signature the
+    policy YAML, allowlist, and denylist were last refreshed at. Folded into the FREEZE key so a config change
+    invalidates memoized per-field redactions. Call AFTER current_allowlist()/current_denylist()/load_config()
+    (which refresh these globals) so it reflects the request's config. Stable while config is unchanged -> the
+    freeze keeps hitting and the upstream prompt-cache prefix stays byte-identical; only an edit moves it."""
+    return (current_mode(), _CONFIG_MTIME, _ALLOWLIST_MTIME, _DENYLIST_SIG)
+
+
 def _denylist_spans(text, pattern):
     """Always-redact dictionary hits in egress span shape: conf 1.0, tier 0, rule 'denylist' (so the
     already-token-exact match is NOT word-expanded). DENY_LABEL 'custom' -> a <CUSTOM_n> placeholder."""
@@ -720,13 +918,22 @@ def resolve_pii_policy(ctx):
     if sess:
         pol = {**pol, **sess}
     # Global MODE overlay (applied last so the UI toggle always wins over config defaults). 'off' disables
-    # soft-PII redaction wholesale (the floor stays -- see policy_allows_pii); 'coding' lets organizations
-    # through; 'privacy' is the default (no change). The floor is never affected here.
+    # soft-PII redaction wholesale (the floor stays -- see policy_allows_pii); 'coding' lets organizations,
+    # dates/versions AND IP addresses through; 'privacy' is the default (no change). The floor is never affected.
     mode = current_mode()
     if mode == 'off':
         pol = {**pol, 'enabled': False}
-    elif mode == 'coding' and 'org' not in (pol.get('exclude') or []):
-        pol = {**pol, 'exclude': list(pol.get('exclude') or []) + ['org']}
+    elif mode == 'coding':
+        # Coding-agent traffic is dense with NON-PII tokens the prose model / tier-0 mistake for soft PII:
+        # organizations (frameworks / vendors), dates that are timestamps / copyright years / log dates / semver
+        # like 2.4.11 (DATE_RE cannot tell those from a D.M.YY date by value, RC5), and IP literals that are bind
+        # / localhost / config addresses (0.0.0.0, 127.0.0.1, ::1). Redacting them mangles diffs, version checks,
+        # config, and networking code. Let those CATEGORIES through (org->organization, date->sensitive_date,
+        # ip->ip_address). The hard floor is untouched -- date_of_birth and every credential / card / account /
+        # gov-id stay FLOOR_NEVER_EXEMPT and redact in coding mode -- and privacy mode still redacts all of these.
+        extra = [c for c in ('org', 'date', 'ip') if c not in (pol.get('exclude') or [])]
+        if extra:
+            pol = {**pol, 'exclude': list(pol.get('exclude') or []) + extra}
     return pol
 
 
@@ -753,6 +960,21 @@ def policy_allows_pii(label, ctx):
     cats = pol.get('categories')          # optional restrictive allowlist (redact ONLY these)
     if cats is not None:
         return label in cats or cat in cats
+    return True
+
+
+def _sweep_keeps(value, ph, ctx, allow):
+    """Pass-3 cross-turn sweep veto (RC3), mirroring the pass-2 span policy so a mode toggle / allowlist edit
+    takes effect on values ALREADY in the session map -- instead of the sweep eternally replaying a placeholder
+    minted under an older policy. Keep replaying value->ph only if the placeholder's own label is still
+    redactable under the current policy/mode AND the value is not user-allowlisted. The hard floor is never
+    exempt: policy_allows_pii returns True for FLOOR_NEVER_EXEMPT, and the allowlist check skips floor labels, so
+    a credential / card / gov-id / DOB minted earlier keeps being swept in every mode."""
+    label = _ph_label(ph)
+    if not policy_allows_pii(label, ctx):
+        return False
+    if label not in FLOOR_NEVER_EXEMPT and allow and allowlist_mod.is_allowlisted(value, allow):
+        return False
     return True
 
 
@@ -922,23 +1144,27 @@ async def redact_body(body, ctx, extract=extract_text_fields, detector=None):
     session = derive_session(ctx.get('session', ''), sys_text, ctx.get('auth_fp', ''))
     ctx['session_resolved'] = session
     project = ctx.get('project', 'default')
-    # Load only long enough to decide the true empty fast-path. Do not hold a blocking file lock across the
-    # awaited detector calls below; the fresh load/mint/sweep/save mutation happens under the lock after detection.
-    with map_file_lock(session, project):
-        has_known = bool(EntityMap(session, project).v2p)
-
-    # truly-nothing path: ONLY skip when there are literally zero non-empty extracted text fields AND no prior
-    # session entities to backstop. A request with ANY scannable field is neural-scanned below (FIX 2): an NER-only
-    # name (no Tier-0 hit, below the prose-length bar -- e.g. a 2-word name in a short field) must NOT skip the scan.
-    if not any_scannable and not has_known:
-        # FAIL-CLOSED backstop (prime directive): a body that surfaced ZERO scannable text fields but still carries
-        # a deterministic SECRET in some shape the walker did not recognize must NOT be forwarded raw. Scan the
-        # serialized body for the secret floor; on a hit, raise -> _redact_or_block returns 503 (refuse) instead of
-        # leaking. Secret-floor precision (keyword/provider/entropy + benign filter) keeps structural JSON from
-        # false-blocking. This is the last line behind the input_text/array-of-strings/unknown-block coverage above.
-        if secret_spans(json.dumps(body, ensure_ascii=False)):
-            raise RuntimeError('fail-closed: unscannable body shape carries a secret')
-        return {'n_fields': len(fields), 'redaction': 'skip', 'n_spans': 0}, {}
+    # truly-nothing fast-path: ONLY when there are literally zero non-empty extracted text fields. A request with
+    # ANY scannable field is neural-scanned below (FIX 2): an NER-only name (no Tier-0 hit, below the prose-length
+    # bar -- e.g. a 2-word name in a short field) must NOT skip the scan. has_known (prior session entities to
+    # backstop) is consulted ONLY on this no-scannable-fields branch, so on the COMMON path (any scannable text)
+    # we skip the file lock + full session-map load/decrypt here entirely -- pass 2 re-loads the map under the lock
+    # authoritatively anyway, so nothing but this empty-body decision ever depended on the early read. (perf)
+    if not any_scannable:
+        # Load only long enough to decide the true empty fast-path; release the lock immediately (no awaited
+        # detector calls happen on this branch). When prior session entities exist we still fall through to the
+        # full mint/sweep pass below to backstop any in-request repeats.
+        with map_file_lock(session, project):
+            has_known = bool(EntityMap(session, project).v2p)
+        if not has_known:
+            # FAIL-CLOSED backstop (prime directive): a body that surfaced ZERO scannable text fields but still
+            # carries a deterministic SECRET in some shape the walker did not recognize must NOT be forwarded raw.
+            # Scan the serialized body for the secret floor; on a hit, raise -> _redact_or_block returns 503
+            # (refuse) instead of leaking. Secret-floor precision (keyword/provider/entropy + benign filter) keeps
+            # structural JSON from false-blocking. Last line behind the input_text/array/unknown-block coverage.
+            if secret_spans(json.dumps(body, ensure_ascii=False)):
+                raise RuntimeError('fail-closed: unscannable body shape carries a secret')
+            return {'n_fields': len(fields), 'redaction': 'skip', 'n_spans': 0}, {}
 
     allow = current_allowlist()   # user do-not-redact values (secrets stay non-exempt below)
     deny = current_denylist()     # user always-redact terms (force-redacted even when the model misses them)
@@ -992,6 +1218,7 @@ async def redact_body(body, ctx, extract=extract_text_fields, detector=None):
             dspans = _denylist_spans(t, deny)
             if not spans and not dspans:
                 return None
+            spans = _narrow_path_spans(spans, t)  # file_path over-redaction precision (GATEWAY_PATH_POLICY)
             spans = expand_word_spans(t, spans)   # cover the whole word when the model tagged only a fragment
             spans = post_merge_address(merge_spans(spans), t)
             spans = [s for s in spans if not _BENIGN_HASH.fullmatch(t[s['start']:s['end']])]  # allowlist hashes
@@ -1065,19 +1292,50 @@ async def redact_body(body, ctx, extract=extract_text_fields, detector=None):
                         rec['field'] = fi
                         explain_recs.append(rec)
 
-        # pass 3: known-entity backstop with the now-complete map (catches model misses, cross-turn + in-request)
+        # pass 3: known-entity backstop with the now-complete map (catches model misses, cross-turn + in-request),
+        # then FREEZE each field's final redacted bytes for this session so a re-sent prefix replays verbatim next
+        # turn (Anthropic prompt-cache stability -- see _FREEZE_CACHE). A field whose exact source text was already
+        # redacted this session+generation replays the stored output and SKIPS the growing sweep; brand-new text
+        # runs the full sweep and is then memoized. Degraded turns (gate unreachable -> fail-closed) are never
+        # memoized, so a partial redaction can't be frozen and replayed.
         n_swept = 0
-        known_re = build_known_re(emap)
-        if known_re is not None:
-            for f in fields:
-                cur = f.text
-                red2, kn = sweep_known(cur, known_re, emap)
+        gen = emap.created
+        cfg = _config_fingerprint()   # RC3: invalidates the freeze on any mode / allow / deny / policy change
+        degraded = bool(ctx.get('_degraded'))
+        can_freeze = FREEZE_PREFIX and not degraded
+        orig_by_id = {id(fo): to for (fo, to, _t0, _pr) in per_field}
+        # Values tagged under a REAL (non-file_path) PII label this request. A path username that collides exactly
+        # with one of these (e.g. an NER-tagged lowercase person 'mason') must stay in the sweep even though the
+        # path mint gave it a file_path placeholder, so an untagged recurrence elsewhere cannot leak (see redact_core).
+        keep_values = {t[s['start']:s['end']] for (_fi, _f, t, spans) in detected_fields
+                       for s in spans if not _is_filepath_label(s.get('label'))}
+        # RC3: the cross-turn sweep must honor CURRENT policy/allowlist, else a value minted under an older mode
+        # (e.g. an org minted in privacy) is replayed to its placeholder forever -- undoing what pass-2 correctly
+        # let through after a 'coding' toggle, and ignoring a value the user just allowlisted. keep_sweep mirrors
+        # the pass-2 span policy via the placeholder's own label; the hard floor is never exempt.
+        keep_sweep = lambda value, ph: _sweep_keeps(value, ph, ctx, allow)
+        known_re = build_known_re(emap, keep_values=keep_values, keep_placeholder=keep_sweep)
+        for f in fields:
+            src = orig_by_id.get(id(f))
+            if can_freeze and src is not None:
+                frozen = _freeze_get(session, project, gen, cfg, src)
+                if frozen is not None:
+                    if f.text != frozen:
+                        f.write(frozen)          # replay first-sight redaction -> prefix bytes stay identical
+                    continue
+            if known_re is not None:
+                red2, kn = sweep_known(f.text, known_re, emap, keep_values=keep_values, keep_placeholder=keep_sweep)
                 if kn:
                     f.write(red2)
                     n_swept += kn
+            if can_freeze and src is not None:
+                _freeze_put(session, project, gen, cfg, src, f.text)
 
         total += n_swept
-        if total:
+        # Save on redaction, OR touch-save a long-lived active session so its idle-TTL clock advances even
+        # across PII-free turns (otherwise an in-use session idle-expires and every placeholder re-mints =
+        # prompt-cache miss). needs_touch() is debounced, so clean turns do not write on every request.
+        if total or emap.needs_touch():
             emap.save()
         meta = {'n_fields': len(fields),
                 'redaction': 'redacted' if total else 'scanned-clean',
@@ -1110,11 +1368,17 @@ def rehydrate_text(s, replay):
     return redact_core.rehydrate(s, replay)
 
 
-def _rehydrate_json(v, replay):
+def _rehydrate_json(v, replay, tool_replay=None, floor_safe=False):
+    # B5 Half A: `floor_safe` marks that we are inside a tool-call ARGUMENT subtree (an Anthropic tool_use /
+    # server_tool_use block's `input`, recursively). In that subtree we rehydrate with `tool_replay` -- the map
+    # with FLOOR/secret-class tokens withheld -- so a secret left in an executed tool argument stays the inert
+    # <LABEL_NNN> literal instead of the real value. Assistant TEXT and tool RESULTS keep the full `replay`.
+    if tool_replay is None:
+        tool_replay = tool_arg_policy.tool_arg_replay(replay)
     if isinstance(v, str):
-        return rehydrate_text(v, replay)
+        return rehydrate_text(v, tool_replay if floor_safe else replay)
     if isinstance(v, list):
-        return [_rehydrate_json(x, replay) for x in v]
+        return [_rehydrate_json(x, replay, tool_replay, floor_safe) for x in v]
     if isinstance(v, dict):
         # OPAQUE REASONING block: never rehydrate a thinking/redacted_thinking block. Its `thinking` text is
         # covered by the `signature` MAC and the client re-sends the block verbatim next turn; rehydrating it
@@ -1129,12 +1393,20 @@ def _rehydrate_json(v, replay):
         if ((_bt == 'thinking' and isinstance(v.get('signature'), str))
                 or (_bt == 'redacted_thinking' and isinstance(v.get('data'), str))):
             return v
+        # A tool_use/server_tool_use block: its `input` subtree is the EXECUTED tool argument -> floor-suppress
+        # it (but NOT an echoed result subtree). Once floor_safe, it propagates to every nested value.
+        node_is_call = (not floor_safe) and tool_arg_policy.is_tool_call_node(v)
+        key_replay = tool_replay if floor_safe else replay
         rebuilt = {}
         for k, x in v.items():
-            nk = rehydrate_text(k, replay) if isinstance(k, str) else k
+            # Key-based (is_tool_arg_key) catches an `input`/`arguments` argument whose block type is not matched
+            # by is_tool_call_node (Anthropic's mcp_tool_use block); type-based catches tool_use/server_tool_use.
+            child_fs = (floor_safe or tool_arg_policy.is_tool_arg_key(k)
+                        or (node_is_call and not tool_arg_policy.is_tool_result_key(k)))
+            nk = rehydrate_text(k, key_replay) if isinstance(k, str) else k
             if nk in rebuilt and nk != k:
                 nk = _disambiguate_key(nk if isinstance(nk, str) else k, rebuilt, k)
-            rebuilt[nk] = _rehydrate_json(x, replay)
+            rebuilt[nk] = _rehydrate_json(x, replay, tool_replay, child_fs)
         return rebuilt
     return v
 
@@ -1209,9 +1481,13 @@ def rehydrate_anthropic_response(obj, replay):
 
 
 def rehydrate_json_string(acc, replay):
-    """Rehydrate placeholders inside assembled tool_use arguments JSON, including object keys."""
+    """Rehydrate placeholders inside assembled tool_use arguments JSON, including object keys. This is the
+    streaming tool_use input_json_delta funnel, so it is ALWAYS tool-argument context: B5 withholds FLOOR/
+    secret-class tokens (and, under strict mode, every token) so a secret left in an executed argument stays
+    the inert <LABEL_NNN> literal."""
     if not acc or not acc.strip():
         return acc
+    replay = tool_arg_policy.tool_arg_replay(replay)
     try:
         obj = json.loads(acc, object_pairs_hook=_dup_preserving_pairs)
     except Exception:
@@ -1340,12 +1616,40 @@ async def stream_rehydrate(upstream_aiter, replay):
 # Upstream forwarding: pass auth + anthropic-* + content-type verbatim. Drop
 # hop-by-hop / host / content-length (httpx recomputes). Never store auth.
 # ----------------------------------------------------------------------------
+# Plan/OAuth FINGERPRINT passthrough (2026-06-21): Anthropic's subscription enforcement (live since Jan 2026)
+# classifies a Max/Pro OAuth request by its CLIENT FINGERPRINT -- the Claude Code user-agent (claude-cli/<ver>),
+# the x-app identity, and the Stainless SDK telemetry (x-stainless-lang/os/arch/runtime/package-version/...). The
+# original allowlist dropped all three, so httpx synthesized `user-agent: python-httpx` and the request looked
+# like a non-Claude-Code tool -> the OAuth token was rejected. That is the "blocked on the plan but fine with an
+# API key" symptom (an API key is not fingerprint-gated, so the same allowlist is harmless there). We now forward
+# the GENUINE fingerprint headers verbatim, so a proxied request is header-identical to the official client it IS
+# (Anthropic explicitly permits a custom base_url / gateway in front of the real client). We never pin fake values.
+# CAVEAT: this does NOT make the request transport-identical -- the TLS/JA3 + HTTP/2 fingerprint is still httpx's,
+# not the client's. If header passthrough alone proves insufficient against Anthropic's multi-signal enforcement,
+# the documented next step is a curl_cffi (curl-impersonate) upstream leg; see plans/ + the review writeup.
 FWD_HEADERS = {'authorization', 'anthropic-version', 'anthropic-beta',
-               'anthropic-dangerous-direct-browser-access', 'content-type', 'x-api-key'}
+               'anthropic-dangerous-direct-browser-access', 'content-type', 'x-api-key',
+               'user-agent', 'x-app'}
+# Prefix-matched families (the allowlist is otherwise exact-match). x-stainless-* is the Stainless SDK telemetry
+# Claude Code sends; forwarding the family keeps it intact as new x-stainless-* members appear across CLI versions.
+FWD_HEADER_PREFIXES = ('x-stainless-',)
 
 
 def fwd_headers(req):
-    return {k: v for k, v in req.headers.items() if k.lower() in FWD_HEADERS}
+    return {k: v for k, v in req.headers.items()
+            if k.lower() in FWD_HEADERS or k.lower().startswith(FWD_HEADER_PREFIXES)}
+
+
+def is_codex_plan_request(headers):
+    """True if a /v1/responses request is Codex ChatGPT/Codex-PLAN traffic (-> chatgpt.com backend) rather than
+    Platform API-key traffic (-> api.openai.com). MULTI-SIGNAL on purpose: a ChatGPT OAuth token has no
+    api.responses.write scope, so a plan request that reaches api.openai.com 401s with "missing scopes". The
+    original code keyed on chatgpt-account-id ALONE, so a plan request that dropped that one header silently
+    misrouted to the platform API and failed. Any one of the Codex-plan markers below identifies the plan path,
+    so the routing is resilient to any single header changing across Codex versions."""
+    return bool(headers.get('chatgpt-account-id')
+                or (headers.get('originator', '') or '').lower() == 'codex_cli_rs'
+                or headers.get('openai-sentinel-token'))
 
 
 _DROP_UPSTREAM_RESPONSE_HEADERS = {
@@ -1372,6 +1676,103 @@ def _upstream_response_headers(headers):
         if lk in _SAFE_UPSTREAM_RESPONSE_HEADERS or lk.startswith(_SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES):
             out[k] = v
     return out
+
+
+# Usage/cache observability: log the upstream response's token usage so prompt-cache seamlessness is MEASURABLE
+# (cache_read > 0 on turn 2+ = the redacted prefix is hitting Anthropic's cache; cache_read == 0 every turn = the
+# prefix is busting). Usage numbers carry no PII. Toggle with GATEWAY_LOG_USAGE=0.
+LOG_USAGE = os.environ.get('GATEWAY_LOG_USAGE', '1') == '1'
+
+
+# --- RC1 / context-window instrumentation (PII-FREE, sentinel-gated) -------------------------------------------
+# Enable with `touch ~/.ossredact/instrument.on`; disable by removing it (checked live per request, like the mode
+# file -- so it works no matter how the gate process is launched). Appends JSON lines to ~/.ossredact/instrument.jsonl:
+#   - inbound vs forwarded `anthropic-beta`  -> does CC even SEND the 1M beta (context-1m-*) to a non-first-party
+#     base_url, and does the gate forward it verbatim? (RC1: CC gates 1M behind a first-party base_url check.)
+#   - RAW upstream response header NAMES + which are dropped by _SAFE_UPSTREAM_RESPONSE_HEADERS -> is Anthropic
+#     sending a window/context-signalling header that the response allow-list strips? (Codex's RC1 sub-hypothesis.)
+#   - usage (input/cache_read/cache_creation) per turn -> cache_read>0 on turn 2+ = redacted prefix is cache-STABLE
+#     (growth is benign tail); cache_read==0 every turn = prefix is BUSTING (the operator's "balloon"/growth).
+# Logs header NAMES, anthropic-* header VALUES (operational, non-PII), and token COUNTS only. NEVER bodies/PII.
+_INSTR_FLAG = os.path.expanduser('~/.ossredact/instrument.on')
+_INSTR_FILE = os.environ.get('GATEWAY_INSTRUMENT_FILE') or os.path.expanduser('~/.ossredact/instrument.jsonl')
+
+
+def _instr_on():
+    try:
+        return os.path.exists(_INSTR_FLAG)
+    except Exception:
+        return False
+
+
+def _beta_view(headers):
+    """PII-free view of the context/feature flags CC sent (anthropic-beta is a CSV of feature tokens, not PII)."""
+    return {'anthropic_beta': headers.get('anthropic-beta'),
+            'anthropic_version': headers.get('anthropic-version'),
+            'has_session': bool(headers.get('x-claude-code-session-id')),
+            'user_agent': (headers.get('user-agent') or '')[:80]}
+
+
+def _resp_header_view(headers):
+    """Upstream response header NAMES (all) + VALUES for anthropic-*/request-id, and which names the response
+    allow-list would DROP -- to surface any window-signalling header Anthropic sends that never reaches CC."""
+    names = sorted(k.lower() for k in headers.keys())
+    vals = {k.lower(): v for k, v in headers.items()
+            if k.lower().startswith('anthropic-') or k.lower() in ('request-id', 'x-request-id')}
+    dropped = [n for n in names if n not in _SAFE_UPSTREAM_RESPONSE_HEADERS
+               and not n.startswith(_SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES)
+               and n not in _DROP_UPSTREAM_RESPONSE_HEADERS]
+    return {'resp_header_names': names, 'anthropic_resp_headers': vals, 'dropped_by_allowlist': dropped}
+
+
+def _instr(event):
+    if not _instr_on():
+        return
+    try:
+        event['ts'] = round(time.time(), 3)
+        with open(_INSTR_FILE, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(event, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _find_usage_obj(text):
+    """Extract the first balanced {...} after a "usage" key (Anthropic puts it in the non-stream body and in the
+    streaming message_start event). Bounded scan; returns a dict or None. Never raises."""
+    i = text.find('"usage"')
+    if i == -1:
+        return None
+    j = text.find('{', i)
+    if j == -1:
+        return None
+    depth = 0
+    for k in range(j, min(len(text), j + 4000)):
+        c = text[k]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[j:k + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _log_usage(label, usage):
+    if not (LOG_USAGE and isinstance(usage, dict)):
+        return
+    it = usage.get('input_tokens')
+    cr = usage.get('cache_read_input_tokens')
+    cc = usage.get('cache_creation_input_tokens')
+    cc_n = cc if isinstance(cc, int) else (sum(v for v in cc.values() if isinstance(v, int)) if isinstance(cc, dict) else 0)
+    cr_n = cr if isinstance(cr, int) else 0
+    if it is None and cr_n == 0 and cc_n == 0:
+        return
+    verdict = 'HIT' if cr_n > 0 else 'MISS'
+    print(f"[egress] usage {label} input={it} cache_read={cr_n} cache_creation={cc_n} prompt_cache={verdict}", flush=True)
 
 
 def _finalize_upstream_response(r, replay, json_rehydrate):
@@ -1402,6 +1803,11 @@ async def _stream_or_error_response(url, payload, headers, replay, stream_transf
     client, r = await _open_stream(url, payload, headers)
     ct = r.headers.get('content-type', '')
     resp_headers = _upstream_response_headers(r.headers)
+    if _instr_on():
+        ev = {'route': (live_ctx or {}).get('route', 'stream'), 'phase': 'response', 'status': r.status_code,
+              'stream': True}
+        ev.update(_resp_header_view(r.headers))
+        _instr(ev)
 
     if 'text/event-stream' not in ct.lower():
         try:
@@ -1421,14 +1827,33 @@ async def _stream_or_error_response(url, payload, headers, replay, stream_transf
         return Response(content=content, status_code=r.status_code,
                         media_type=ct or 'application/octet-stream', headers=resp_headers)
 
+    route_label = (live_ctx or {}).get('route', 'stream')
+
     async def gen():
+        ubuf = []
+        ustate = {'size': 0, 'logged': False}
+
+        def _maybe_log(b):
+            if ustate['logged'] or not LOG_USAGE or ustate['size'] > 32768:
+                return
+            bb = b if isinstance(b, (bytes, bytearray)) else str(b).encode('utf-8', 'ignore')
+            ubuf.append(bb)
+            ustate['size'] += len(bb)
+            u = _find_usage_obj(b''.join(ubuf).decode('utf-8', 'ignore'))
+            if u is not None:
+                _log_usage(route_label, u)
+                ustate['logged'] = True
+                ubuf.clear()
+
         try:
             if not replay:
                 async for chunk in r.aiter_raw():
+                    _maybe_log(chunk)
                     yield chunk
             else:
                 src = _tally_rehydrations(r.aiter_raw(), replay, live_ctx) if live_ctx else r.aiter_raw()
                 async for out in stream_transform(src, replay):
+                    _maybe_log(out)
                     yield out
         finally:
             await r.aclose()
@@ -1481,13 +1906,29 @@ async def _redact_or_block(body, ctx, **kw):
         return None, None, JSONResponse({'error': 'redaction_failed', 'detail': type(e).__name__}, status_code=503)
 
 
+async def _read_json_body(req: Request):
+    """Read + parse a request body under the size cap. Returns (body, None) on success, or (None, error_response)
+    with a 413 (too large) or 400 (bad JSON). The Content-Length header is checked first so an honest oversized
+    client is rejected before the body is buffered; the post-read length check is the belt-and-suspenders backstop
+    for a missing/lying Content-Length. Applied to every route that fans a body out to the detector."""
+    if MAX_BODY_BYTES:
+        clen = req.headers.get('content-length')
+        if clen and clen.isdigit() and int(clen) > MAX_BODY_BYTES:
+            return None, JSONResponse({'error': 'request body too large', 'max_bytes': MAX_BODY_BYTES}, status_code=413)
+    raw = await req.body()
+    if MAX_BODY_BYTES and len(raw) > MAX_BODY_BYTES:
+        return None, JSONResponse({'error': 'request body too large', 'max_bytes': MAX_BODY_BYTES}, status_code=413)
+    try:
+        return json.loads(raw), None
+    except Exception:
+        return None, JSONResponse({'error': 'invalid json body'}, status_code=400)
+
+
 @app.post('/v1/messages')
 async def messages(req: Request):
-    raw = await req.body()
-    try:
-        body = json.loads(raw)
-    except Exception:
-        return JSONResponse({'error': 'invalid json body'}, status_code=400)
+    body, err = await _read_json_body(req)
+    if err is not None:
+        return err
     ctx = {'session': req.headers.get('x-claude-code-session-id', ''),
            'project': req.headers.get('x-ossredact-project', 'default'),
            'auth_fp': _auth_fingerprint(req.headers)}
@@ -1517,11 +1958,23 @@ async def messages(req: Request):
     url = ANTHROPIC_UPSTREAM + '/v1/messages'
     payload = json.dumps(body)
     live_ctx = {'route': '/v1/messages', 'client': client, 'ctx': ctx}
+    if _instr_on():
+        _instr({'route': '/v1/messages', 'phase': 'request', 'inbound': _beta_view(req.headers),
+                'forwarded_anthropic_beta': headers.get('anthropic-beta'),
+                'beta_forwarded_verbatim': req.headers.get('anthropic-beta') == headers.get('anthropic-beta'),
+                'stream': stream, 'n_spans': meta.get('n_spans'), 'req_bytes': len(payload)})
     if not stream:
         async with httpx.AsyncClient(timeout=600) as hclient:
             r = await hclient.post(url, content=payload, headers=headers)
+        if _instr_on():
+            ev = {'route': '/v1/messages', 'phase': 'response', 'status': r.status_code}
+            ev.update(_resp_header_view(r.headers))
+            ev['usage'] = _find_usage_obj(r.content.decode('utf-8', 'ignore'))
+            _instr(ev)
         if replay:
             _live_response('/v1/messages', client, ctx, replay, set(_PH_TOKEN_RE.findall(r.content.decode('utf-8', 'ignore'))))
+        if LOG_USAGE:
+            _log_usage('/v1/messages', _find_usage_obj(r.content.decode('utf-8', 'ignore')))
         return _finalize_upstream_response(r, replay, rehydrate_anthropic_response)
 
     # streaming: open upstream first so upstream auth/rate-limit/error statuses are not masked as local 200s.
@@ -1529,15 +1982,114 @@ async def messages(req: Request):
                                            rehydrate_anthropic_response, live_ctx=live_ctx)
 
 
+@app.post('/v1/messages/count_tokens')
+async def messages_count_tokens(req: Request):
+    """Anthropic token-counting pre-flight. Claude Code calls this before a turn to size its context bar; with
+    no route here it 404s and CC falls back to inflated completion-usage estimates. The body carries the SAME
+    message content as /v1/messages, so it is redacted on the same contract (same session/auth_fp keying, so the
+    placeholders match the real turn) before being forwarded -- both to keep PII off the count endpoint and so the
+    returned count reflects the redacted payload that will actually be sent. The response is just {input_tokens: N}
+    with no PII, so it is returned verbatim (no rehydration). An explicit redacted route, never a generic /v1/*
+    passthrough, so a count request can never bypass redaction. Always non-streaming."""
+    body, err = await _read_json_body(req)
+    if err is not None:
+        return err
+    ctx = {'session': req.headers.get('x-claude-code-session-id', ''),
+           'project': req.headers.get('x-ossredact-project', 'default'),
+           'auth_fp': _auth_fingerprint(req.headers)}
+    meta, replay, fail = await _redact_or_block(body, ctx)
+    if fail is not None:
+        return fail
+    client = _client_label(req, '/v1/messages/count_tokens')
+    _live_request('/v1/messages/count_tokens', client, ctx, meta, replay, False)
+
+    if LOG_REQUESTS and meta.get('redaction') not in ('skip', None) and not meta.get('degraded'):
+        wire_phs = sorted(set(_PH_TOKEN_RE.findall(json.dumps(body, ensure_ascii=False))))
+        print(f"[egress] count_tokens redaction={meta['redaction']} spans={meta['n_spans']} "
+              f"labels={meta.get('by_label', {})} wire_placeholders={wire_phs} degraded={meta.get('degraded')}", flush=True)
+
+    if DRYRUN:
+        resp = {'_dryrun': True, 'meta': meta, 'upstream_body': body}
+        if EXPOSE_MAP:
+            resp['_replay'] = replay
+        return JSONResponse(resp)
+
+    blocked = _degraded_block(meta)
+    if blocked is not None:
+        return blocked
+
+    headers = fwd_headers(req)
+    url = ANTHROPIC_UPSTREAM + '/v1/messages/count_tokens'
+    payload = json.dumps(body)
+    async with httpx.AsyncClient(timeout=600) as hclient:
+        r = await hclient.post(url, content=payload, headers=headers)
+    # The count response ({input_tokens: N}) carries no PII -> empty replay returns it verbatim (with the
+    # standard upstream-header sanitisation), no rehydration.
+    return _finalize_upstream_response(r, {}, rehydrate_anthropic_response)
+
+
+# Claude Code's bootstrap request sends exactly these query keys (binary buildBootstrapRequestConfig/nza:
+# {params:{entrypoint, model}}). We forward ONLY these upstream -- `model` is required (it selects which model's
+# autocompact window the clientdata returns); anything else is dropped so the un-redacted bootstrap route can never
+# be used to smuggle PII upstream via the query string.
+_BOOTSTRAP_QUERY_ALLOW = frozenset({'entrypoint', 'model'})
+
+
+@app.get('/api/claude_cli/bootstrap')
+async def claude_cli_bootstrap(req: Request):
+    """Claude Code CLIENT-CONFIG passthrough (NOT a redaction route, NOT a loopback control route).
+
+    On startup Claude Code fetches GET ${ANTHROPIC_BASE_URL}/api/claude_cli/bootstrap to populate its clientdata,
+    which includes the per-model autocompact context window (CC's autoCompactWindowsCache). With NO route here the
+    request 404s, so for a model that is NOT in CC's hardcoded fallback window set -- notably the default
+    claude-opus-4-8 -- the autocompact-window SOURCE resolves to "auto", and CC enables compaction only when
+    source != "auto" (its `nLe()` predicate gates BOTH the proactive and reactive autocompaction paths). The
+    conversation then grows unbounded: we observed a cached prefix marching to ~579k tokens, prompt-cache HIT every
+    turn, that NEVER auto-compacted -- the operator's "context balloons one-shot / coherent past 100% / no
+    autocompact, nothing like gate-off" symptom. Gate-OFF this exact fetch hits api.anthropic.com directly and
+    succeeds, which is precisely why the blowup is gate-specific. (Forwarding clientdata also fixes the 1M-context
+    case: in CC's resolver the clientdata branch precedes the model-default branch, so a real window arrives even
+    when the 1M path would otherwise skip the model-default fallback into "auto".)
+
+    Privacy: this is config metadata. The REQUEST carries only auth + client-fingerprint headers (via fwd_headers)
+    and version/config query selectors -- NO conversation content, NO user PII -- and the RESPONSE is CC's own
+    account/client config coming BACK from Anthropic (not user data going TO it). So it is forwarded VERBATIM
+    (query string + fingerprint headers out, bytes in) and NEVER redacted (redaction would corrupt the config and
+    protects nothing). It is an EXACT GET route, never a generic /api/* catch-all: every other unhandled /api path
+    still 404s and any non-GET method here returns 405 -- both fail CLOSED, so no arbitrary path or request body
+    can reach upstream unredacted through this addition. Mirrors the explicit-route precedent of
+    /v1/messages/count_tokens (B2): an allowlisted upstream forward, never a blanket passthrough.
+
+    Query is ALLOWLISTED, not passed through verbatim: CC's bootstrap request config (binary nza()) sends exactly
+    `?entrypoint=<cli>&model=<model-id>` -- non-PII config selectors, and `model` is REQUIRED (it tells Anthropic
+    which model's autocompact window to return). Forwarding only those two keys (dropping any other param) closes
+    the theoretical bypass where an arbitrary caller could smuggle PII upstream via `?x=<pii>` on this un-redacted
+    route, while keeping the real client working. A 30s timeout: CC blocks on this fetch at startup, so a fast
+    failure (-> CC's own fallback) beats a long hang."""
+    url = ANTHROPIC_UPSTREAM + '/api/claude_cli/bootstrap'
+    allowed = [(k, v) for k, v in req.query_params.multi_items() if k in _BOOTSTRAP_QUERY_ALLOW]
+    if allowed:
+        url += '?' + urlencode(allowed)  # entrypoint/model only -- never the raw query (no PII smuggling vector)
+    headers = fwd_headers(req)            # auth + anthropic-* + user-agent + x-stainless-* fingerprint, no body
+    async with httpx.AsyncClient(timeout=30) as hclient:
+        r = await hclient.get(url, headers=headers)
+    if _instr_on():
+        ev = {'route': '/api/claude_cli/bootstrap', 'phase': 'response', 'status': r.status_code,
+              'inbound': _beta_view(req.headers), 'forwarded_anthropic_beta': headers.get('anthropic-beta'),
+              'query_forwarded': allowed, 'resp_bytes': len(r.content)}
+        ev.update(_resp_header_view(r.headers))
+        _instr(ev)
+    # Verbatim config bytes (empty replay -> no rehydration), with the standard upstream-header sanitisation.
+    return _finalize_upstream_response(r, {}, rehydrate_anthropic_response)
+
+
 @app.post('/v1/chat/completions')
 async def chat_completions(req: Request):
     """OpenAI-compatible route. Same redact-on-egress / rehydrate-on-response contract as /v1/messages, using
     the shared redact_body() with the OpenAI field extractor + the OpenAI response/stream rehydrators."""
-    raw = await req.body()
-    try:
-        body = json.loads(raw)
-    except Exception:
-        return JSONResponse({'error': 'invalid json body'}, status_code=400)
+    body, err = await _read_json_body(req)
+    if err is not None:
+        return err
     ctx = {'session': req.headers.get('x-session-id') or req.headers.get('x-claude-code-session-id', ''),
            'project': req.headers.get('x-ossredact-project', 'default'),
            'auth_fp': _auth_fingerprint(req.headers)}
@@ -1584,11 +2136,9 @@ async def responses(req: Request):
     """OpenAI Responses-API route -- Codex CLI speaks /v1/responses ONLY. Same redact-on-egress /
     rehydrate-on-response contract as /v1/chat/completions, using the shared redact_body() with the Responses
     field extractor (string/array `input` + `instructions`) and the Responses response/stream rehydrators."""
-    raw = await req.body()
-    try:
-        body = json.loads(raw)
-    except Exception:
-        return JSONResponse({'error': 'invalid json body'}, status_code=400)
+    body, err = await _read_json_body(req)
+    if err is not None:
+        return err
     ctx = {'session': req.headers.get('x-session-id') or req.headers.get('x-claude-code-session-id', ''),
            'project': req.headers.get('x-ossredact-project', 'default'),
            'auth_fp': _auth_fingerprint(req.headers)}
@@ -1623,9 +2173,9 @@ async def responses(req: Request):
 
     headers = responses_adapter.fwd_headers_responses(req)
     # Plan path (Codex ChatGPT/Codex subscription) -> ChatGPT backend /responses; API-key path -> platform
-    # /v1/responses. The chatgpt-account-id header is present only on the plan path (Codex forwards it for
-    # plan authorization; the OAuth token alone is rejected without it), so it is the reliable discriminator.
-    if req.headers.get('chatgpt-account-id'):
+    # /v1/responses. Detection is multi-signal (chatgpt-account-id OR originator=codex_cli_rs OR a sentinel
+    # token); see is_codex_plan_request() for why a single-header discriminator silently misrouted plan traffic.
+    if is_codex_plan_request(req.headers):
         url = CHATGPT_UPSTREAM + '/responses'
     else:
         url = OPENAI_UPSTREAM + '/v1/responses'
@@ -1645,19 +2195,79 @@ async def responses(req: Request):
 
 @app.get('/healthz')
 def healthz():
-    return {'status': 'ok', 'service': 'ossredact-egress', 'dryrun': DRYRUN,
-            'gate': _safe_diagnostic_url(GATE_URL), 'uptime_s': round(time.time() - START, 1)}
+    # Public (no guard): liveness + positive identification for GUI discovery. `service` lets a probing
+    # console confirm it really found an OSSRedact gate; `remote_control` tells it whether this gate accepts
+    # authenticated off-device control (token configured) or is loopback-only. No secret is ever exposed.
+    out = {'status': 'ok', 'service': 'ossredact-egress', 'version': SERVICE_VERSION, 'dryrun': DRYRUN,
+           'gate': _safe_diagnostic_url(GATE_URL), 'remote_control': bool(CONTROL_TOKEN),
+           'uptime_s': round(time.time() - START, 1)}
+    if GATE_FALLBACK_URL and GATE_FALLBACK_URL != GATE_URL:
+        out['gate_fallback'] = _safe_diagnostic_url(GATE_FALLBACK_URL)   # visible so an operator can see the failover target
+    return out
+
+
+def _start_maps_gc():
+    """Garbage-collect the entity-map dir on launch, then every GATEWAY_MAPS_GC_INTERVAL_H hours, on a daemon
+    thread. The maps dir accumulated one persistent .lock per session forever (orphaned after the .enc TTL'd out)
+    plus stale at-rest maps; this bounds it. Runs off the event loop so a slow dir scan never delays serving.
+    Started from __main__ (the real server launch), so it is inert during tests. GATEWAY_MAPS_TTL_DAYS=0 disables
+    the sweep; GATEWAY_MAPS_GC_INTERVAL_H=0 runs it once at launch and not again."""
+    def _sweep(tag):
+        try:
+            r = gc_maps()
+            if r['enc'] or r['lock']:
+                print(f"[egress] maps GC ({tag}): removed {r['enc']} expired maps + {r['lock']} locks", flush=True)
+        except Exception as e:
+            print(f"[egress] maps GC error: {type(e).__name__}", flush=True)
+
+    interval_h = float(os.environ.get('GATEWAY_MAPS_GC_INTERVAL_H', '6'))
+
+    def _run():
+        _sweep('startup')
+        while interval_h > 0:
+            time.sleep(interval_h * 3600)
+            _sweep('periodic')
+
+    threading.Thread(target=_run, name='ossredact-maps-gc', daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
-# Local settings UI: the do-not-redact dictionary editor (GET /). The gate may listen on 0.0.0.0 to serve a
-# fleet of agents, but EDITING the allowlist must never be reachable over the network (it would let a remote
-# actor weaken redaction), so the UI + its API are LOOPBACK-ONLY. Writes go to the UI-managed allowlist file,
-# live-reloaded on its mtime (no restart, config untouched).
+# Control-plane access. The gate may listen on 0.0.0.0 to serve a fleet of agents, but MANAGING it (editing
+# the allowlist, flipping the mode, reading the live PII proof feed) must never be open to the network by
+# default -- that would let a remote actor weaken redaction or read real PII. So control access requires a
+# LOOPBACK peer, OR (opt-in) a valid GATEWAY_CONTROL_TOKEN for authenticated off-device management. The bundled
+# settings HTML page (GET /) stays loopback-only regardless (the desktop console is the remote surface). Writes
+# go to the UI-managed files, live-reloaded on mtime (no restart, config untouched).
 # ---------------------------------------------------------------------------
 def _is_loopback(req: Request):
     host = (req.client.host if req.client else '') or ''
     return host in ('127.0.0.1', '::1', 'localhost')
+
+
+def _control_token_ok(req: Request):
+    """True iff a control token is configured AND the request presents the matching secret (constant-time).
+    The `x-ossredact-control-token` header authenticates ANY control route. The `?token=` query param is
+    honored ONLY for the SSE feed (/api/stream), where the browser EventSource cannot set a header -- every
+    other control route uses fetch and MUST use the header, keeping the leakier URL-token path (access/proxy
+    logs, Referer, caches) off all routes but the one that has no alternative. Returns False when no token is
+    configured (loopback-only stays the default)."""
+    if not CONTROL_TOKEN:
+        return False
+    presented = req.headers.get('x-ossredact-control-token') or ''
+    if not presented and req.url.path == '/api/stream':
+        presented = req.query_params.get('token') or ''
+    return bool(presented) and hmac.compare_digest(presented, CONTROL_TOKEN)
+
+
+def _control_allowed(req: Request):
+    """Authorization for the control API. A LOOPBACK peer is always trusted (the local settings UI / console
+    send no token -- unchanged). A REMOTE peer is allowed ONLY when a shared control token is configured and
+    presented. So with GATEWAY_CONTROL_TOKEN unset this is identical to the prior loopback-only behaviour."""
+    return _is_loopback(req) or _control_token_ok(req)
+
+
+_LOCAL_ONLY_403 = JSONResponse({'error': 'local-only (set GATEWAY_CONTROL_TOKEN for authenticated remote control)'},
+                               status_code=403)
 
 
 # CSRF guard for state-changing control routes. _is_loopback alone is a confused-deputy hole: a hostile web
@@ -1705,8 +2315,8 @@ def settings_ui(req: Request):
 
 @app.get('/api/allowlist')
 def api_allowlist_get(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     current_allowlist()  # ensure the in-memory set reflects the file
     return JSONResponse({'values': _read_allowlist_file(), 'active_total': len(_ALLOWLIST),
                          'config_values': len(load_config().get('allowlist') or []), 'path': _ALLOWLIST_FILE})
@@ -1714,8 +2324,8 @@ def api_allowlist_get(req: Request):
 
 @app.post('/api/allowlist')
 async def api_allowlist_set(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     if not _has_control_token(req):
         return _CSRF_403
     try:
@@ -1742,8 +2352,8 @@ async def api_allowlist_set(req: Request):
 
 @app.get('/api/denylist')
 def api_denylist_get(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     current_denylist()  # ensure the compiled pattern reflects the file
     vals = _read_denylist_file()
     return JSONResponse({'values': vals, 'active_total': len(denylist_mod.build_terms(_load_denylist_values(load_config()))),
@@ -1752,8 +2362,8 @@ def api_denylist_get(req: Request):
 
 @app.post('/api/denylist')
 async def api_denylist_set(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     if not _has_control_token(req):
         return _CSRF_403
     try:
@@ -1780,8 +2390,8 @@ async def api_denylist_set(req: Request):
 
 @app.get('/api/settings')
 def api_settings_get(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     # floor_always_on documents to the UI that the deterministic floor (secrets/cards/IDs) redacts in every
     # mode, so the 'off' option can be presented honestly as "soft PII off, credentials still protected".
     return JSONResponse({'mode': current_mode(), 'modes': list(_MODES), 'floor_always_on': True,
@@ -1790,8 +2400,8 @@ def api_settings_get(req: Request):
 
 @app.post('/api/settings')
 async def api_settings_set(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     if not _has_control_token(req):
         return _CSRF_403
     try:
@@ -1811,9 +2421,11 @@ async def api_settings_set(req: Request):
 
 
 # ---------------------------------------------------------------------------
-# Live activity API (LOOPBACK-ONLY). /api/stream is a Server-Sent Events feed of
-# the in-memory redaction ring; it shows real PII values (the proof), so it is
-# loopback-guarded and never persisted. The UI's Live tab consumes it.
+# Live activity API. /api/stream is a Server-Sent Events feed of the in-memory
+# redaction ring; it shows real PII values (the proof), so it is never persisted
+# and is loopback-guarded by default. With GATEWAY_CONTROL_TOKEN set, an
+# authenticated remote console may also read it (token via ?token= -- EventSource
+# cannot set headers). The UI's Live tab consumes it.
 # ---------------------------------------------------------------------------
 def _sse(ev):
     return ('data: ' + json.dumps(ev, ensure_ascii=False) + '\n\n').encode('utf-8')
@@ -1821,8 +2433,8 @@ def _sse(ev):
 
 @app.get('/api/stream')
 async def api_stream(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     if not LIVE_VIEW:
         return JSONResponse({'error': 'live view disabled (GATEWAY_LIVE_VIEW=0)'}, status_code=404)
     q: asyncio.Queue = asyncio.Queue(maxsize=2000)
@@ -1850,16 +2462,16 @@ async def api_stream(req: Request):
 
 @app.get('/api/live/status')
 def api_live_status(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     return JSONResponse({'enabled': LIVE_VIEW, 'buffered': len(_live_ring), 'max': _LIVE_MAX,
                          'subscribers': len(_live_subscribers), 'mode': current_mode()})
 
 
 @app.post('/api/live/clear')
 def api_live_clear(req: Request):
-    if not _is_loopback(req):
-        return JSONResponse({'error': 'local-only'}, status_code=403)
+    if not _control_allowed(req):
+        return _LOCAL_ONLY_403
     if not _has_control_token(req):
         return _CSRF_403
     _live_ring.clear()
@@ -2167,5 +2779,25 @@ if(location.hash==='#live') selectTab('live');
 </body></html>"""
 
 
+def _startup_warnings():
+    """Surface the two postures that silently widen exposure, at the real launch (this __main__ path; not on
+    import, so tests stay quiet). No values -- only the flags."""
+    if not FAIL_CLOSED:
+        print('[egress] WARNING: GATEWAY_FAIL_OPEN=1 -- Tier-0-only egress. If the neural gate is unreachable, '
+              'requests are forwarded ANYWAY, so NER-only PII (names/org/address) can leak. Unset for the '
+              'fail-closed default (recommended).', flush=True)
+    if HOST not in ('127.0.0.1', '::1', 'localhost'):
+        print(f'[egress] WARNING: bound {HOST}:{PORT} on a NON-loopback interface. The redaction routes (/v1/*) '
+              'are an UNAUTHENTICATED relay -- anyone who can reach this port can proxy through it (only /api/* '
+              'is token-gated). There is NO TLS and /api/stream carries REAL PII in cleartext. Run this ONLY on a '
+              'trusted, encrypted network (a tailnet), never the open internet, ideally behind an https underlay '
+              '(e.g. tailscale serve).', flush=True)
+        if not CONTROL_TOKEN:
+            print('[egress] note: GATEWAY_CONTROL_TOKEN is unset, so the control API (/api/*) stays loopback-only '
+                  'even though the proxy is bound non-loopback (a remote console cannot manage this gate).', flush=True)
+
+
 if __name__ == '__main__':
+    _startup_warnings()
+    _start_maps_gc()
     uvicorn.run(app, host=HOST, port=PORT, log_level='warning')

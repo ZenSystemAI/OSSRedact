@@ -25,6 +25,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+# Firewall control commands: read/modify ~/.claude/settings.json for the routing toggle.
+# preserve_order keeps the user's existing key order intact on rewrite (no cosmetic reshuffle).
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Release profile: optimize the shipped installer binary for size + speed. These only affect
 # `tauri build` (release); dev builds keep fast incremental compilation.

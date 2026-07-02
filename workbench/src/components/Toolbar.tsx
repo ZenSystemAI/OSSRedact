@@ -120,11 +120,16 @@ export default function Toolbar(p: Props) {
           )}
         </div>
 
-        <button className="btn btn-ghost" onClick={p.onPrint} disabled={!p.hasRedactions} title="Print or save the redacted document as PDF">
+        <button
+          className="btn btn-ghost"
+          onClick={p.onPrint}
+          disabled={!p.hasRedactions}
+          title={p.isPdf ? 'Export the redacted document as a PDF' : 'Open the print dialog for the redacted view (Print or Save as PDF)'}
+        >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z" />
           </svg>
-          Redacted PDF
+          {p.isPdf ? 'Redacted PDF' : 'Print'}
         </button>
 
         <button className="btn btn-ghost" onClick={p.onReset} title="Close this document">

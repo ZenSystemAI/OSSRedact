@@ -7,7 +7,10 @@ describe('connectSnippets', () => {
     const snips = connectSnippets('http://127.0.0.1:8011')
     const claude = snips.find((s) => s.id === 'claude-code')!
     expect(claude.code).toContain('export ANTHROPIC_BASE_URL=http://127.0.0.1:8011')
-    expect(claude.code).toContain('claude')
+    // The dead _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL export must NOT come back (probe-verified
+    // inert on CC 2.1.197); the [1m] model suffix is what sizes the bar to the true 1M window.
+    expect(claude.code).not.toContain('_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL')
+    expect(claude.code).toContain("claude --model 'claude-fable-5[1m]'")
 
     const codex = snips.find((s) => s.id === 'codex')!
     expect(codex.code).toContain('base_url = "http://127.0.0.1:8011/v1"')

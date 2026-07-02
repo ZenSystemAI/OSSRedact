@@ -106,6 +106,52 @@ def test_at_capacity_new_placeholder_is_stored_and_rehydratable(tmp_path, monkey
     assert phs[0] not in emap.replay()              # oldest was evicted (FIFO)
 
 
+def test_evicted_value_reuses_placeholder_and_stays_bounded(tmp_path, monkeypatch):
+    """B1: an evicted value that re-appears must reuse its ORIGINAL placeholder (prompt-cache stability), NOT
+    re-mint a new one, while v2p stays bounded and no counter number is ever reissued -- across a save/reload."""
+    monkeypatch.setenv('GATEWAY_MAP_MAX', '3')
+    monkeypatch.setenv('GATEWAY_MAP_TOMB_MAX', '100')   # isolate from tomb FIFO for this test
+    mod, _, _ = _load_entity_map(tmp_path, monkeypatch)
+    emap = mod.EntityMap('cap-reuse', 'p')
+    phs = [emap.placeholder_for(f'val-{i}', 'email')[0] for i in range(5)]   # cap=3 -> val-0,val-1 evicted to tomb
+    assert emap.counters['EMAIL'] == 5
+    assert 'val-0' not in emap.v2p and phs[0] not in emap.replay()           # evicted from the active maps
+
+    # val-0 re-appears (it is in the re-sent history): must reuse phs[0], counter must NOT advance.
+    ph0_again, is_new = emap.placeholder_for('val-0', 'email')
+    assert ph0_again == phs[0] and is_new is False, 'evicted value re-minted a different placeholder (cache-bust)'
+    assert emap.counters['EMAIL'] == 5, 'counter advanced on a tomb reuse'
+    assert len(emap.v2p) <= 3, 'reactivation pushed v2p past MAX_ENTITIES (eviction-first guard missing)'
+    assert emap.replay().get(phs[0]) == 'val-0', 'reactivated value is not rehydratable'
+
+    # Persistence round-trip: a fresh instance (next request / restart) still reuses the placeholder, and the
+    # counter high-water survives so no <EMAIL_NNN> is ever reissued for a brand-new value.
+    emap.save()
+    reloaded = mod.EntityMap('cap-reuse', 'p')
+    ph1_again, is_new1 = reloaded.placeholder_for('val-1', 'email')           # val-1 is in the persisted tomb
+    assert ph1_again == phs[1] and is_new1 is False, 'placeholder not stable across reload'
+    fresh_ph, fresh_new = reloaded.placeholder_for('brand-new@x.test', 'email')
+    assert fresh_new and fresh_ph not in phs, 'a reissued placeholder number collided with a tombstoned one'
+
+
+def test_reactivation_does_not_pollute_casefold_dedup_index(tmp_path, monkeypatch):
+    """B1 guard: re-activating a CASE-SENSITIVE tombed value (person) must not write the shared casefold dedup
+    index, or a later case-INSENSITIVE value with the same casefold would wrongly dedup onto the person token."""
+    monkeypatch.setenv('GATEWAY_MAP_MAX', '2')
+    monkeypatch.setenv('GATEWAY_MAP_TOMB_MAX', '100')
+    mod, _, _ = _load_entity_map(tmp_path, monkeypatch)
+    emap = mod.EntityMap('cf-guard', 'p')
+    bob = emap.placeholder_for('Bob', 'person')[0]                            # case-sensitive -> not in v2p_cf
+    emap.placeholder_for('X', 'person')
+    emap.placeholder_for('Y', 'person')                                       # evicts 'Bob' (cap=2) into the tomb
+    assert 'Bob' not in emap.v2p
+    re_bob, _ = emap.placeholder_for('Bob', 'person')                         # reactivate from tomb
+    assert re_bob == bob
+    # a non-sensitive value whose casefold == 'bob' must NOT inherit Bob's PERSON placeholder.
+    org_ph, org_new = emap.placeholder_for('bob', 'organization')
+    assert org_new and org_ph != bob, 'case-sensitive reactivation polluted v2p_cf -> wrong-label dedup'
+
+
 def test_person_case_variants_are_distinct_for_lossless_rehydrate(tmp_path, monkeypatch):
     """T13: a capitalized person must not own a lowercase path or username token."""
     mod, _, _ = _load_entity_map(tmp_path, monkeypatch)

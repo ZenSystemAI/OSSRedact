@@ -5,6 +5,10 @@ train_suite imports torch at module top, so this runs where torch is available:
 It also works under pytest in any env that has torch+numpy+seqeval.
 """
 import sys, os
+import pytest
+# train_suite imports torch at module top, so this whole module is skipped (not errored) in a torch-free
+# env -- lets the CI run training/tests via plain discovery without an explicit exclude list.
+pytest.importorskip('torch')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import train_suite

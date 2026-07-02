@@ -10,6 +10,7 @@ import { tier0Spans } from './lib/tier0'
 import { mergeSpans, toSpans, insertSpan, combineWithManual, buildEntityMap, redactedText, explain, newId, setLabelActive, setLabelsActive, newPlaceholderIndex } from './lib/redaction'
 import { labelTier, type Tier } from './lib/labels'
 import { DEEP_DEGRADED_WARNING, DEEP_DEGRADED_EXPORT_CONFIRM } from './lib/degrade'
+import { modelOnDevice } from './lib/neural'
 import { deepDetect, deepProviderLabel, gateHealth, prepareDeepDetect, type DeepProvider, type GateHealth } from './lib/gate'
 import { verifyDocx, docxLeakParts } from './lib/docx'
 import { verifyXlsx } from './lib/xlsx'
@@ -176,12 +177,17 @@ export default function App() {
   // falls back to the in-browser model and surfaces the one-time model download as progress.
   const ensureDeepProvider = useCallback(async (signal?: AbortSignal): Promise<DeepProvider> => {
     let announcedBrowserLoad = false
+    // Tell the truth about what the load costs: weights already in the origin cache load from
+    // disk in seconds -- announcing a "~300 MB download" there reads as a re-download every visit.
+    const cached = await modelOnDevice()
     try {
       return await prepareDeepDetect((p) => {
         if (!announcedBrowserLoad) {
           announcedBrowserLoad = true
           setLoadPct(0)
-          flash('Loading the browser model -- one-time ~300 MB download, then it runs offline.')
+          flash(cached
+            ? 'Loading the browser model from this device -- already downloaded, no network needed.'
+            : 'Loading the browser model -- one-time ~300 MB download, then it runs offline.')
         }
         if (typeof p.progress === 'number') setLoadPct(Math.min(100, Math.round(p.progress)))
       }, signal)

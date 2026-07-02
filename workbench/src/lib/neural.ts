@@ -52,6 +52,21 @@ export function neuralSupported(): boolean {
   return typeof window !== 'undefined' && typeof WebAssembly !== 'undefined'
 }
 
+/**
+ * True when the model weights are ALREADY in this origin's cache (transformers.js keeps them in
+ * the Cache API under `transformers-cache`). Lets the UI tell the truth: "already on this device,
+ * loads in seconds" instead of always advertising a ~300 MB download the browser won't make.
+ */
+export async function modelOnDevice(): Promise<boolean> {
+  try {
+    if (typeof caches === 'undefined') return false
+    const c = await caches.open('transformers-cache')
+    return (await c.match('/model/onnx/model_int8.onnx')) !== undefined
+  } catch {
+    return false
+  }
+}
+
 export function neuralStatus(): NeuralPhase {
   return phase
 }

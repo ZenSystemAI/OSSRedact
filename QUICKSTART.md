@@ -222,6 +222,13 @@ The egress proxy serves a small **local console** at its own address -- open `ht
 - **Do-not-redact dictionary** -- add/remove your own known-safe values in a UI instead of editing YAML. Changes are written to `GATEWAY_ALLOWLIST_FILE` and go live in the gate immediately (the hard floor stays non-exemptable, as above).
 - **Live activity** -- a real-time feed of every request your tools send through the gate, and exactly what it masked: **outbound**, each real value → the placeholder the cloud model actually receives; **inbound**, each placeholder in the reply → swapped back to your real value. This is the visual proof the firewall is working on *your own* sessions. It shows real values, so it is held in memory only (never written to disk) and -- like the dictionary editor -- **every console endpoint is loopback-only**, unreachable over the network even when the gate binds a LAN/tailnet address. A "Blur values" toggle masks the real column for safe screen-sharing; `GATEWAY_LIVE_VIEW=0` disables the feed entirely.
 
+Prefer the **full console** (the same UI the desktop app wraps: connect snippets, live activity, dictionary +
+denylist, settings, and the document-redaction workbench)? The gate serves it at
+`http://127.0.0.1:8011/console` -- build it once with `cd workbench && npm ci && npm run build` (or point
+`GATEWAY_CONSOLE_DIR` at an existing build). Loopback-only, same-origin, zero extra configuration. The hosted
+demo on the website intentionally does **not** connect to gates -- a public web page should never hold your
+gate's controls -- so use this, or the desktop app, to manage a running gate.
+
 ---
 
 ## 6. How a request flows (what the proxy actually does)

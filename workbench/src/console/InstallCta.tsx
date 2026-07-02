@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { isTauri } from '../tauri-bootstrap'
 import { connectBase } from '../lib/daemon'
+import { isHostedDemo, HOSTED_DOC_BASE } from '../lib/hosted'
 import { firewallControl } from '../lib/firewall'
 
 /**
@@ -12,7 +13,10 @@ import { firewallControl } from '../lib/firewall'
  */
 export default function InstallCta({ onRetry }: { onRetry: () => void }) {
   const inApp = isTauri()
-  const base = connectBase()
+  const hosted = isHostedDemo()
+  // On the hosted demo, connectBase() falls back to the PAGE origin (the website) -- document the
+  // gate's loopback default instead so nobody points an agent at the web host.
+  const base = hosted ? HOSTED_DOC_BASE : connectBase()
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   async function start() {
@@ -77,13 +81,21 @@ export default function InstallCta({ onRetry }: { onRetry: () => void }) {
         </button>
       </div>
 
-      <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-gray-400 dark:text-neutral-500">
-        Running the gate on another machine (a home server or tailnet host)? Set its address in the{' '}
-        <strong className="font-medium text-gray-500 dark:text-neutral-400">Connect</strong> tab →{' '}
-        <strong className="font-medium text-gray-500 dark:text-neutral-400">Gate connection</strong>.
-      </p>
+      {hosted ? (
+        <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-gray-400 dark:text-neutral-500">
+          This hosted page cannot control a gate. On the machine running the gate, open{' '}
+          <code className="font-mono">{HOSTED_DOC_BASE}/console</code> (the gate serves its own console), or use
+          the desktop app.
+        </p>
+      ) : (
+        <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-gray-400 dark:text-neutral-500">
+          Running the gate on another machine (a home server or tailnet host)? Set its address in the{' '}
+          <strong className="font-medium text-gray-500 dark:text-neutral-400">Connect</strong> tab →{' '}
+          <strong className="font-medium text-gray-500 dark:text-neutral-400">Gate connection</strong>.
+        </p>
+      )}
 
-      {!inApp && (
+      {!inApp && !hosted && (
         <p className="mt-4 text-xs text-gray-400 dark:text-neutral-500">
           Already running it? The service listens on <code className="font-mono">{base}</code>.
         </p>

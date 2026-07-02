@@ -12,6 +12,7 @@ import {
   type ConnectOutcome,
   type ProbeResult,
 } from '../lib/daemon'
+import { isHostedDemo, HOSTED_DOC_BASE } from '../lib/hosted'
 
 // =============================================================================
 // Pure helper (unit-tested in ConnectPanel.test.ts)
@@ -292,20 +293,42 @@ function GateConnection({ onChange }: { onChange: () => void }) {
 }
 
 /**
+ * Shown INSTEAD of the gate-connection form on the public hosted demo. The hosted page must never
+ * hold a gate's controls (see lib/hosted.ts); this explains where the real console lives.
+ */
+function HostedDemoNote() {
+  return (
+    <div className="mb-5 rounded-lg border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-black/30 p-3.5">
+      <p className="text-xs leading-relaxed text-gray-600 dark:text-neutral-300">
+        <strong className="font-semibold text-gray-900 dark:text-neutral-100">This is the hosted demo</strong> -- it
+        never connects to a firewall gate. A public website must not hold your gate&apos;s controls (the live
+        redaction feed, dictionary, and settings), so manage the gate where it runs: use the{' '}
+        <strong className="font-medium">desktop app</strong>, or open{' '}
+        <code className="font-mono">{HOSTED_DOC_BASE}/console</code> in a browser on the gate&apos;s machine (the
+        gate serves its own console). The snippets below use that machine&apos;s loopback address.
+      </p>
+    </div>
+  )
+}
+
+/**
  * The "Connect" tab: the single instruction a new user needs -- how to point their coding agent at the
  * running firewall. Shows the live daemon address (so it is correct whether served same-origin, by the
  * Tauri shell, a hosted deploy, or an operator-set off-device gate) and copy-paste blocks for Claude Code,
- * Codex, and generic SDK clients.
+ * Codex, and generic SDK clients. On the hosted demo the gate-connection form is replaced by a note and
+ * the snippets pin the documented loopback default: connectBase() would fall back to the PAGE origin,
+ * which there is the website -- an agent pointed at it would ship traffic to the web host, not a firewall.
  */
 export default function ConnectPanel() {
   // Bumped after a successful connect/reset so the address box + agent snippets recompute from the new base.
   const [, bump] = useState(0)
-  const base = connectBase()
+  const hosted = isHostedDemo()
+  const base = hosted ? HOSTED_DOC_BASE : connectBase()
   const snippets = connectSnippets(base)
 
   return (
     <div className="max-w-2xl">
-      <GateConnection onChange={() => bump((n) => n + 1)} />
+      {hosted ? <HostedDemoNote /> : <GateConnection onChange={() => bump((n) => n + 1)} />}
       <div className="mb-4">
         <h2 className="text-sm font-semibold text-gray-900 dark:text-neutral-100">Connect your coding agent</h2>
         <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-neutral-400">

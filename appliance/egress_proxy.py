@@ -20,7 +20,8 @@ from urllib.parse import urlsplit, urlunsplit, urlencode
 import yaml
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import (JSONResponse, StreamingResponse, HTMLResponse, PlainTextResponse,
+                               FileResponse, RedirectResponse)
 import uvicorn
 
 APPLIANCE_DIR = os.environ.get('GATEWAY_APPLIANCE_DIR') or os.path.dirname(os.path.abspath(__file__))
@@ -2311,6 +2312,45 @@ def settings_ui(req: Request):
     if not _is_loopback(req):
         return PlainTextResponse('The OSSRedact settings UI is local-only (loopback).', status_code=403)
     return HTMLResponse(_SETTINGS_HTML)
+
+
+# Gate-served FULL console (the React workbench/console build) -- the browser GUI for a gate host that
+# does not run the desktop app. Serving it FROM the gate makes every control fetch same-origin: no CORS
+# grant, no token, and nothing for a hosted web page to be trusted with (the PUBLIC site deliberately
+# cannot drive a gate: an allowlisted public origin would hand the control plane to whatever script the
+# site's next deploy ships). Loopback-only, same posture as the settings UI above. Files resolve at
+# request time, so a console rebuild is picked up without restarting the gate.
+CONSOLE_DIR = os.environ.get(
+    'GATEWAY_CONSOLE_DIR',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'workbench', 'dist'))
+_CONSOLE_LOCAL_ONLY = PlainTextResponse('The OSSRedact console is local-only (loopback).', status_code=403)
+_CONSOLE_MISSING = {
+    'error': 'console build not found',
+    'hint': 'build it once (cd workbench && npm ci && npm run build) or point GATEWAY_CONSOLE_DIR at a build'}
+
+
+@app.get('/console')
+def console_redirect(req: Request):
+    # The build uses RELATIVE asset URLs (vite base './'), which only resolve under a trailing slash.
+    if not _is_loopback(req):
+        return _CONSOLE_LOCAL_ONLY
+    return RedirectResponse('/console/', status_code=307)
+
+
+@app.get('/console/{rest:path}')
+def console_static(req: Request, rest: str = ''):
+    if not _is_loopback(req):
+        return _CONSOLE_LOCAL_ONLY
+    root = os.path.realpath(CONSOLE_DIR)
+    if not os.path.isfile(os.path.join(root, 'index.html')):
+        return JSONResponse(_CONSOLE_MISSING, status_code=404)
+    # Containment: resolve symlinks BEFORE the prefix check so neither ../ nor a link escapes the build dir.
+    target = os.path.realpath(os.path.join(root, rest)) if rest else root
+    if not (target == root or target.startswith(root + os.sep)):
+        return JSONResponse({'error': 'not found'}, status_code=404)
+    if not os.path.isfile(target):
+        target = os.path.join(root, 'index.html')   # SPA shell for '' and unknown paths (deep links stay harmless)
+    return FileResponse(target)
 
 
 @app.get('/api/allowlist')

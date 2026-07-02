@@ -72,7 +72,8 @@ All config is env-vars-with-defaults read at process start; no secrets in any of
 | `GATEWAY_GATE_URL` | `http://127.0.0.1:8001` | the neural gate (`/detect`) |
 | `GATEWAY_HOST` | `127.0.0.1` | proxy listen host; set explicitly for a tailnet/LAN bind |
 | `GATEWAY_CONTROL_TOKEN` | `''` (loopback-only) | shared secret that lets an authenticated **remote** GUI manage this gate; unset = control API stays loopback-only (see "Off-device control" below) |
-| `GATEWAY_CORS_ORIGINS` | `''` | extra browser origins (comma-separated, exact) allowed to read control responses cross-origin, on top of loopback + Tauri; only needed for a browser-served console on a remote gate |
+| `GATEWAY_CORS_ORIGINS` | `''` | extra browser origins (comma-separated, exact) allowed to read control responses cross-origin, on top of loopback + Tauri; only needed for a browser-served console on a remote gate. Never add the public product site: a public origin must not hold a gate's control plane |
+| `GATEWAY_CONSOLE_DIR` | `<repo>/workbench/dist` | build dir served (loopback-only) at `/console` -- the full browser console for a gate host without the desktop app. Missing build = 404 with the `npm run build` hint |
 | `GATEWAY_VERSION` | `0.2.0` | build string surfaced on `/healthz` so a connecting GUI shows which gate it reached |
 | `GATEWAY_NPU_MODEL_DIR` | `<GATEWAY_APPLIANCE_DIR>/model` | NPU model directory |
 | `GATEWAY_NPU_HOST` | `127.0.0.1` | NPU gate listen host; set explicitly for a trusted interface bind |
@@ -90,6 +91,16 @@ All config is env-vars-with-defaults read at process start; no secrets in any of
 | `GATEWAY_FAIL_OPEN` | `0` | when `0`, fail closed with 503 if the neural gate is unreachable; set `1` only to allow Tier-0-only egress |
 | `GATEWAY_SECRETS_ENTROPY` | `1` | enable the generic high-entropy secret backstop in addition to deterministic patterns |
 | `GATEWAY_TOOL_ARG_STRICT` | `0` | Phase 2 strict mode: when `1`, withhold **all** placeholders (every PII class, not just FLOOR secrets) from tool-call arguments. Off by default (Half A); see "Tool-argument secret suppression" below |
+
+## Gate-served console (no desktop app needed)
+
+The gate serves its own full browser console at **`http://127.0.0.1:8011/console`** (loopback-only, like
+the settings page at `/`). Build it once -- `cd workbench && npm ci && npm run build` -- and every control
+fetch is same-origin: no CORS grant, no token, nothing extra to configure. This is the recommended GUI for
+a gate host that cannot (or does not want to) install the desktop app. The PUBLIC hosted demo on the
+product website deliberately does NOT connect to gates at all: a public origin must never hold your gate's
+control plane (one compromised site deploy would expose every opted-in gate), so it only shows setup
+snippets and points here.
 
 ## Off-device control (remote GUI → remote gate)
 

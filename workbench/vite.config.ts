@@ -35,4 +35,8 @@ export default defineConfig({
   },
   // relative base so `dist/` can be opened/served from any path on any PC (the deploy constraint)
   base: './',
+  // Emit dist/manifest.json (every chunk/asset, incl. dynamic-import chunks the HTML never names).
+  // The website's offline service worker precaches /app/ from it -- without the manifest an offline
+  // first visit renders the shell but cannot fetch the lazily imported App/Console chunks.
+  build: { manifest: 'manifest.json' },
 })

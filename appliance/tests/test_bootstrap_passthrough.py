@@ -102,13 +102,13 @@ def test_bootstrap_query_is_allowlisted_drops_pii_smuggling(monkeypatch):
     cannot smuggle PII upstream via an extra query param."""
     c = _client(monkeypatch)
     r = c.get('/api/claude_cli/bootstrap?entrypoint=cli&model=claude-opus-4-8'
-              '&leak=steven%40example.com&cwd=%2Fhome%2Fsteven%2Fsecret',
+              '&leak=alex%40example.com&cwd=%2Fhome%2Falex%2Fsecret',
               headers={'authorization': 'Bearer t'})
     assert r.status_code == 200
     url = _CapturingGetClient.last['url']
     assert 'entrypoint=cli' in url and 'model=claude-opus-4-8' in url
     # the non-allowlisted params (and their PII values) are stripped before egress
-    for forbidden in ('leak', 'example.com', 'cwd', 'steven', '%2Fhome', '/home'):
+    for forbidden in ('leak', 'example.com', 'cwd', 'alex', '%2Fhome', '/home'):
         assert forbidden not in url, f'{forbidden!r} must not reach upstream'
 
 

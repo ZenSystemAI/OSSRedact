@@ -2036,17 +2036,17 @@ def _redact_with_path_detector(session, content):
 @_NEEDS_PROXY
 def test_filepath_narrowed_to_home_username_linux(monkeypatch):
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
-    out, _meta, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/steven/dev/app.py now.')
+    out, _meta, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/alex/dev/app.py now.')
     assert out == 'Edit /home/<FILEPATH_001>/dev/app.py now.', out
-    assert replay['<FILEPATH_001>'] == 'steven', 'username must round-trip to EXACT case (no /home/Steven mangle)'
+    assert replay['<FILEPATH_001>'] == 'alex', 'username must round-trip to EXACT case (no /home/Alex mangle)'
 
 
 @_NEEDS_PROXY
 def test_filepath_narrowed_to_home_username_mac(monkeypatch):
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
-    out, _m, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Open /Users/steven/Projects/x.ts here.')
+    out, _m, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Open /Users/alex/Projects/x.ts here.')
     assert out == 'Open /Users/<FILEPATH_001>/Projects/x.ts here.', out
-    assert replay['<FILEPATH_001>'] == 'steven'
+    assert replay['<FILEPATH_001>'] == 'alex'
 
 
 @_NEEDS_PROXY
@@ -2063,7 +2063,7 @@ def test_filepath_without_home_username_passes_through(monkeypatch):
 def test_filepath_narrowing_preserves_surrounding_html(monkeypatch):
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
     out, _m, _r = _redact_with_path_detector(
-        'p-' + os.urandom(4).hex(), '<img src="/home/steven/pics/avatar.png" alt="profile"/>')
+        'p-' + os.urandom(4).hex(), '<img src="/home/alex/pics/avatar.png" alt="profile"/>')
     assert out == '<img src="/home/<FILEPATH_001>/pics/avatar.png" alt="profile"/>', out
 
 
@@ -2073,25 +2073,25 @@ def test_filepath_narrowing_keeps_other_pii_in_same_field(monkeypatch):
     Tier-0 floor). The username AND the email both redact; only the non-PII path structure passes through."""
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
     out, _m, replay = _redact_with_path_detector(
-        'p-' + os.urandom(4).hex(), 'Edit /home/steven/app.py and ping jordan.castellano@example.test')
-    assert 'steven' not in out and 'jordan.castellano@example.test' not in out, out
+        'p-' + os.urandom(4).hex(), 'Edit /home/alex/app.py and ping jordan.castellano@example.test')
+    assert 'alex' not in out and 'jordan.castellano@example.test' not in out, out
     assert '/app.py' in out, 'non-username path structure must survive'
-    assert set(replay.values()) >= {'steven', 'jordan.castellano@example.test'}, replay
+    assert set(replay.values()) >= {'alex', 'jordan.castellano@example.test'}, replay
 
 
 @_NEEDS_PROXY
 def test_path_policy_passthrough_drops_every_filepath(monkeypatch):
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'passthrough')
-    out, _m, _r = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/steven/dev/app.py now.')
-    assert out == 'Edit /home/steven/dev/app.py now.', 'passthrough must forward the whole path verbatim'
+    out, _m, _r = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/alex/dev/app.py now.')
+    assert out == 'Edit /home/alex/dev/app.py now.', 'passthrough must forward the whole path verbatim'
 
 
 @_NEEDS_PROXY
 def test_path_policy_full_keeps_legacy_whole_path_span(monkeypatch):
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'full')
-    out, _m, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/steven/dev/app.py now.')
-    assert '/home/steven/dev/app.py' not in out and '<FILEPATH_001>' in out, out
-    assert replay['<FILEPATH_001>'] == '/home/steven/dev/app.py'
+    out, _m, replay = _redact_with_path_detector('p-' + os.urandom(4).hex(), 'Edit /home/alex/dev/app.py now.')
+    assert '/home/alex/dev/app.py' not in out and '<FILEPATH_001>' in out, out
+    assert replay['<FILEPATH_001>'] == '/home/alex/dev/app.py'
 
 
 @_NEEDS_PROXY
@@ -2102,17 +2102,17 @@ def test_narrow_path_span_vetoes_echoed_placeholder_username(monkeypatch):
     single-pass rehydrate cannot unwind, leaking a raw token to the local chat and breaking file ops. The span
     is dropped (already redacted); a real-username path in the SAME batch still narrows normally."""
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')
-    text = 'Edit /home/<FILEPATH_001>/dev/app.py and /home/steven/x.py'
+    text = 'Edit /home/<FILEPATH_001>/dev/app.py and /home/alex/x.py'
     p1, p1e = text.index('/home/<'), text.index('/dev/app.py') + len('/dev/app.py')
-    p2 = text.index('/home/steven')
+    p2 = text.index('/home/alex')
     spans = [
         {'start': p1, 'end': p1e, 'label': 'file_path', 'tier': 1, 'conf': 0.99},
-        {'start': p2, 'end': p2 + len('/home/steven/x.py'), 'label': 'file_path', 'tier': 1, 'conf': 0.99},
+        {'start': p2, 'end': p2 + len('/home/alex/x.py'), 'label': 'file_path', 'tier': 1, 'conf': 0.99},
     ]
     out = egress_proxy._narrow_path_spans(spans, text)
     narrowed = [text[s['start']:s['end']] for s in out]
     assert '<FILEPATH_001>' not in narrowed, 'must not narrow onto an existing placeholder (no remint)'
-    assert narrowed == ['steven'], f'only the real-username path narrows, got {narrowed!r}'
+    assert narrowed == ['alex'], f'only the real-username path narrows, got {narrowed!r}'
 
 
 # --- red-team must-fixes (workflow redteam-path-narrowing): username-variant leaks + sweep pollution ----------
@@ -2126,11 +2126,11 @@ def _abs_path_detector():
 
 @_NEEDS_PROXY
 @pytest.mark.parametrize('content,raw', [
-    ('Open /users/steven/dev/app.py', 'steven'),          # lowercase macOS canonical
-    ('Edit /HOME/steven/dev/app.py', 'steven'),           # uppercase HOME
-    ('Path /home//steven/dev/app.py', 'steven'),          # double-slash join artifact
-    (r'Read C:\Users\steven\proj\app.py', 'steven'),      # Windows drive form
-    ('Config in ~steven/.bashrc today', 'steven'),        # tilde home
+    ('Open /users/alex/dev/app.py', 'alex'),          # lowercase macOS canonical
+    ('Edit /HOME/alex/dev/app.py', 'alex'),           # uppercase HOME
+    ('Path /home//alex/dev/app.py', 'alex'),          # double-slash join artifact
+    (r'Read C:\Users\alex\proj\app.py', 'alex'),      # Windows drive form
+    ('Config in ~alex/.bashrc today', 'alex'),        # tilde home
 ])
 def test_home_username_variants_do_not_leak(monkeypatch, content, raw):
     monkeypatch.setattr(egress_proxy, 'PATH_POLICY', 'username')

@@ -3,7 +3,7 @@
 egress_proxy resolves the allowlist / denylist / mode files from GATEWAY_ALLOWLIST_FILE / GATEWAY_DENYLIST_FILE /
 GATEWAY_MODE_FILE (falling back to ~/.ossredact/{allowlist.txt,denylist.txt,mode}) AT IMPORT. Without this file a
 developer box or a self-hosted CI runner with a populated ~/.ossredact makes the suite non-deterministic: a live
-allowlist entry (e.g. the operator's own username 'steven') exempts the exact value a path-narrowing test asserts
+allowlist entry (e.g. the operator's own username 'alex') exempts the exact value a path-narrowing test asserts
 is redacted -> false FAILURES, and -- more dangerous -- a real PII value that happens to be allowlisted can mask a
 genuine redaction regression as a false PASS. Point every default at empty temp files (mode = privacy) BEFORE any
 test module imports egress_proxy so the redaction guarantees are runner-independent.

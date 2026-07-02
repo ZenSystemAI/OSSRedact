@@ -478,8 +478,8 @@ _BENIGN_HASH = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 # `file_path`, but the only identity-bearing part is the home-dir username (/home/<user>/, /Users/<user>/). Tagging
 # the whole path breaks the coding agent's file ops (it gets a placeholder, not a usable path) AND busts the
 # Anthropic prompt cache (paths are everywhere -> mint+sweep churn). So narrow each file_path span to JUST the
-# home-dir username (kept under the file_path label, which is CASE-SENSITIVE in entity_map -> /home/steven round-
-# trips exactly, no /home/Steven mangle), and DROP the span when the path has no home-dir username (/etc, /var,
+# home-dir username (kept under the file_path label, which is CASE-SENSITIVE in entity_map -> /home/alex round-
+# trips exactly, no /home/Alex mangle), and DROP the span when the path has no home-dir username (/etc, /var,
 # /assets, relative/project paths -- structurally not PII, and the model needs them to work). PII a detector tags
 # INDEPENDENTLY (an email, a card, a key with a cue, a denylisted term) keeps its OWN span and is still redacted; a
 # value that ONLY the whole-path span covered (e.g. a bare high-entropy blob the secret floor skips next to a '/',

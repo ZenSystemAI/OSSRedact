@@ -27,7 +27,7 @@ _TEMPLATES = [
 ]
 _F = {"name": "Marguerite Beaulieu", "name2": "Tobias Nakamura", "email": "m.beaulieu@northwind-logistics.example",
       "email2": "t.nakamura@example.org", "org": "Northwind Logistics Inc", "addr": "4471 rue Sherbrooke, Montreal QC H2X 1E9",
-      "phone": "514-555-0182", "cc": "4319", "w": "steven"}
+      "phone": "514-555-0182", "cc": "4319", "w": "alex"}
 
 
 def make_chunks(n):

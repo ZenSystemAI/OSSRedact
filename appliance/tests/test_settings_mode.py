@@ -84,15 +84,24 @@ def test_privacy_mode_still_redacts_ip(monkeypatch, tmp_path):
     assert egress_proxy.policy_allows_pii('ip_address', {}) is True
 
 
-def test_coding_mode_lets_dates_and_versions_through_but_keeps_dob(monkeypatch, tmp_path):
-    """RC5: in coding mode, ambiguous dates/versions pass through (semver like 2.4.11 reads as a D.M.YY date to
-    DATE_RE, and timestamps/log-dates/copyright-years aren't PII in code) so the coding agent isn't mangled --
-    but a CUED date_of_birth is a floor label and STILL redacts. Scoping is coding-only, not global."""
-    _set_mode(monkeypatch, tmp_path, 'coding')
-    assert egress_proxy.policy_allows_pii('sensitive_date', {}) is False   # bare/ambiguous dates pass through
-    assert egress_proxy.policy_allows_pii('date_of_birth', {}) is True     # floor DOB STILL redacts (the guard)
+def test_dates_and_versions_pass_through_in_every_mode_but_dob_keeps(monkeypatch, tmp_path):
+    """RC5 + wire-level date policy (2026-07-02): bare/ambiguous dates and versions (semver like 2.4.11 reads
+    as a D.M.YY date to DATE_RE, and timestamps/log-dates/copyright-years aren't PII) pass through at the
+    egress in EVERY mode -- each mint burned map entries + placeholder buffer for no privacy gain. The
+    Workbench keeps its own (toggleable) date filter. A CUED date_of_birth is a floor label and STILL redacts."""
+    for mode in ('coding', 'privacy', 'off'):
+        _set_mode(monkeypatch, tmp_path, mode)
+        assert egress_proxy.policy_allows_pii('sensitive_date', {}) is False, mode   # dates never burn the wire
+        assert egress_proxy.policy_allows_pii('date_of_birth', {}) is True, mode     # floor DOB STILL redacts
+
+
+def test_redact_dates_env_restores_privacy_mode_dates(monkeypatch, tmp_path):
+    """GATEWAY_REDACT_DATES=1 is the escape hatch back to the pre-2026-07-02 mode-scoped behavior."""
+    monkeypatch.setattr(egress_proxy, 'REDACT_DATES', True)
     _set_mode(monkeypatch, tmp_path, 'privacy')
-    assert egress_proxy.policy_allows_pii('sensitive_date', {}) is True     # privacy mode still redacts dates
+    assert egress_proxy.policy_allows_pii('sensitive_date', {}) is True    # privacy redacts dates again
+    _set_mode(monkeypatch, tmp_path, 'coding')
+    assert egress_proxy.policy_allows_pii('sensitive_date', {}) is False   # coding still passes them (RC5)
 
 
 def test_off_mode_passes_soft_pii_but_keeps_floor(monkeypatch, tmp_path):

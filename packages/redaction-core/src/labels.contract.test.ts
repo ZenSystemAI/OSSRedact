@@ -10,7 +10,10 @@ const LABELS_PATH = new URL('../../../training/labels_v20.json', import.meta.url
 const shippedLabels = new Set((JSON.parse(readFileSync(LABELS_PATH, 'utf8')) as LabelsV20).labels)
 
 // UI-only or backward-compatible labels that intentionally do not appear in training/labels_v20.json.
-const DOCUMENTED_ALIASES = new Set(['name', 'sensitive_date', 'manual'])
+// 'uuid' + 'sensitive_ref' (2026-07-02 fat-floor diet) are pipeline-minted labels, not model labels:
+// 'uuid' is the deterministic UUID-shape mint demoted from the floor, 'sensitive_ref' is the demoted
+// form of a MODEL-claimed account/gov identity span (see labels.ts registry comment).
+const DOCUMENTED_ALIASES = new Set(['name', 'sensitive_date', 'manual', 'uuid', 'sensitive_ref'])
 
 const CATASTROPHIC_SHIPPED_LABELS = new Set([
   'account_number',

@@ -75,10 +75,12 @@ client receives the real values back
 **Policy.** PII config is per-project and per-session (session overrides project overrides default). A single **redaction mode** sets the overall stance, toggleable live from the console:
 
 - **Privacy** (default) -- redact all detected PII, organizations included.
-- **Coding** -- let organization/framework names through (`React`, `PostgreSQL`, an employer name) so an AI coding agent keeps its context; everything else still redacts.
+- **Coding** -- additionally let organization/framework names (`React`, `PostgreSQL`, an employer name), bind/localhost IP literals, and UUID-shaped session/request ids through, so an AI coding agent keeps its context and its file/session plumbing keeps working; names, addresses, emails, phones and the floor still redact.
 - **Off** -- pass soft PII (names, addresses, emails) through, for when redaction gets in the way.
 
-The **deterministic floor is never disableable by any mode**: secrets and credentials, payment cards, IBANs/bank accounts, government/tax IDs, and date of birth **always** redact -- so even `Off` can never leak a credential or a money/government identifier. Operational labels (`file_path`, `username`) are excluded by default so the coding use case keeps working; git commit and content hashes (40/64 hex) are allowlisted and never redacted.
+Bare dates and version strings never redact at the egress in **any** mode (they are the highest-volume false-positive class on real traffic and identify nobody on their own; set `GATEWAY_REDACT_DATES=1` to restore date redaction in Privacy mode). The Workbench keeps its own per-label date filter for document review.
+
+The **deterministic floor is never disableable by any mode**: secrets and credentials, payment cards, IBANs/bank accounts, government/tax IDs, and date of birth **always** redact -- so even `Off` can never leak a credential or a money/government identifier. Floor status requires deterministic provenance: a floor-class guess coming only from the neural model is demoted to a soft `sensitive_ref` span (still redacted in Privacy and Coding, but allowlist-exemptible and safe to rehydrate into tool arguments). The `username` label is excluded by default and file paths are narrowed to the home-dir username (`GATEWAY_PATH_POLICY`) so the coding use case keeps working; git commit and content hashes (40/64 hex) are allowlisted and never redacted.
 
 ## Quickstart
 

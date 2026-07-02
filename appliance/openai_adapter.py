@@ -271,13 +271,28 @@ def rehydrate_openai_response(obj, replay):
 
 # ---------------------------------------------------------------------------
 # Streaming (SSE) rehydration. OpenAI streams single `data: {chunk}` events ending with `data: [DONE]`.
-# Text deltas (choices[].delta.content) are rehydrated incrementally with split-safe tail buffering so a
-# placeholder split across deltas is never half-emitted. tool_call argument fragments
-# (choices[].delta.tool_calls[].function.arguments) are buffered per (choice, tool) index and flushed as one
-# rehydrated chunk at finish_reason (a placeholder can straddle fragments, and a tool call is only acted on
-# once complete) -- the structural first fragment (id/name) passes through with empty args so the client still
-# learns the call early.
+# TEXT deltas -- choices[].delta.content AND choices[].delta.refusal (refusal is display text too; the
+# non-streaming walk rehydrates message.refusal with the full replay, so the stream must match -- 2026-07-02
+# parity audit: refusal fragments previously passed through RAW and a placeholder survived to the client) --
+# are rehydrated incrementally with split-safe tail buffering so a placeholder split across deltas is never
+# half-emitted; `carry` is keyed (field, choice_index) so the two text streams never mix. Tool-call ARGUMENT
+# fragments -- choices[].delta.tool_calls[].function.arguments AND the legacy `functions`-API
+# choices[].delta.function_call.arguments (same 2026-07-02 audit: legacy fragments previously passed through
+# raw, so a redacted non-FLOOR value reached the agent as a literal placeholder, the exact incident class of
+# Write(<PLACEHOLDER>/...) minting a junk directory) -- are buffered per (choice, tool) index and flushed as
+# one rehydrated chunk at finish_reason (a placeholder can straddle fragments, and a tool call is only acted on
+# once complete); the flush funnels through rehydrate_json_string -> tool_arg_policy.tool_arg_replay, so FLOOR
+# tokens stay inert literals in EXECUTED arguments (B5 Half A). The structural first fragment (id/name) passes
+# through with empty args so the client still learns the call early.
 # ---------------------------------------------------------------------------
+# Sentinel "tool index" for the legacy delta.function_call accumulator: legacy streams exactly ONE unindexed
+# call per choice, so a string sentinel shares tool_acc's (choice, tool) keyspace without ever colliding with
+# the integer tool_calls indices, and tells _flush_choice which delta shape to emit the flush under.
+_LEGACY_FC = 'function_call'
+# The two incremental display-text delta fields; both get the same split-safe carry treatment.
+_TEXT_DELTA_FIELDS = ('content', 'refusal')
+
+
 def _chunk_bytes(template, choice_index, delta):
     out = {'object': 'chat.completion.chunk',
            'choices': [{'index': choice_index, 'delta': delta, 'finish_reason': None}]}
@@ -288,15 +303,21 @@ def _chunk_bytes(template, choice_index, delta):
 
 
 def _flush_choice(template, ci, carry, tool_acc, replay):
-    """Emit (as a list of SSE chunk bytes) any held text + buffered tool args for choice ci, rehydrated."""
+    """Emit (as a list of SSE chunk bytes) any held text/refusal tails + buffered tool args for choice ci,
+    rehydrated. A held tail is by construction a PARTIAL placeholder (split_safe holds nothing else), so on an
+    abnormal flush it emits as the raw fragment -- junk bytes from a truncated stream, never a real value."""
     emits = []
-    rem = carry.pop(ci, '')
-    if rem:
-        emits.append(_chunk_bytes(template, ci, {'content': rehydrate_text(rem, replay)}))
+    for fld in _TEXT_DELTA_FIELDS:
+        rem = carry.pop((fld, ci), '')
+        if rem:
+            emits.append(_chunk_bytes(template, ci, {fld: rehydrate_text(rem, replay)}))
     for key in [k for k in tool_acc if k[0] == ci]:
         _, ti = key
         args = rehydrate_json_string(tool_acc.pop(key), replay)
-        emits.append(_chunk_bytes(template, ci, {'tool_calls': [{'index': ti, 'function': {'arguments': args}}]}))
+        if ti == _LEGACY_FC:
+            emits.append(_chunk_bytes(template, ci, {'function_call': {'arguments': args}}))
+        else:
+            emits.append(_chunk_bytes(template, ci, {'tool_calls': [{'index': ti, 'function': {'arguments': args}}]}))
     return emits
 
 
@@ -310,8 +331,11 @@ def transform_openai_event(raw, replay, carry, tool_acc):
     if line is None:
         return raw if raw.strip() else None
     if line == b'[DONE]':
+        # Final sweep for a degenerate upstream that never sent finish_reason: flush every choice that still
+        # holds a text tail (carry keys are (field, ci)) or buffered args (tool_acc keys are (ci, ti)) so
+        # nothing accumulated is silently dropped, then pass the terminal through.
         emits = []
-        for ci in sorted({k[0] for k in tool_acc} | set(carry)):
+        for ci in sorted({k[0] for k in tool_acc} | {k[1] for k in carry}):
             emits += _flush_choice(None, ci, carry, tool_acc, replay)
         emits.append(b'data: [DONE]')
         return b'\n\n'.join(emits)
@@ -326,11 +350,22 @@ def transform_openai_event(raw, replay, carry, tool_acc):
             continue
         ci = ch.get('index', 0)
         delta = ch.get('delta') or {}
-        if isinstance(delta.get('content'), str):
-            carry[ci] = carry.get(ci, '') + delta['content']
-            safe, held = split_safe(carry[ci])
-            carry[ci] = held
-            delta['content'] = rehydrate_text(safe, replay)
+        finishing = ch.get('finish_reason') is not None
+        for fld in _TEXT_DELTA_FIELDS:
+            if isinstance(delta.get(fld), str):
+                key = (fld, ci)
+                carry[key] = carry.get(key, '') + delta[fld]
+                if finishing:
+                    # Terminal chunk for this choice (compat servers -- vLLM/LiteLLM/llama.cpp -- pack the last
+                    # content delta and finish_reason together): no later delta can complete a held partial, so
+                    # emit EVERYTHING inside THIS chunk. Flushing via _flush_choice instead emitted the tail as
+                    # a separate chunk BEFORE this chunk's own safe prefix -> reordered text bytes (2026-07-02
+                    # parity audit). The drained tail is a partial token, so rehydrate_text leaves it raw.
+                    safe, held = carry.pop(key), ''
+                else:
+                    safe, held = split_safe(carry[key])
+                    carry[key] = held
+                delta[fld] = rehydrate_text(safe, replay)
         tcs = delta.get('tool_calls')
         if isinstance(tcs, list):
             for tc in tcs:
@@ -341,7 +376,15 @@ def transform_openai_event(raw, replay, carry, tool_acc):
                 if isinstance(fn, dict) and 'arguments' in fn:
                     tool_acc[(ci, ti)] = tool_acc.get((ci, ti), '') + (fn.get('arguments') or '')
                     fn['arguments'] = ''  # suppress raw fragment; full rehydrated args flushed at finish
-        if ch.get('finish_reason') is not None:
+        # Legacy `functions` API: delta.function_call.arguments fragments (one unindexed call per choice).
+        # Same buffer-then-flush as tool_calls -- letting them pass raw left placeholders un-rehydrated in
+        # EXECUTED arguments (2026-07-02 parity audit; non-streaming already rehydrates them floor-safely).
+        fc = delta.get('function_call')
+        if isinstance(fc, dict) and 'arguments' in fc:
+            key = (ci, _LEGACY_FC)
+            tool_acc[key] = tool_acc.get(key, '') + (fc.get('arguments') or '')
+            fc['arguments'] = ''  # suppress raw fragment; full rehydrated args flushed at finish
+        if finishing:
             extra += _flush_choice(obj, ci, carry, tool_acc, replay)
 
     out = b'data: ' + json.dumps(obj, ensure_ascii=False).encode('utf-8')

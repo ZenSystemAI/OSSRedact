@@ -1745,13 +1745,17 @@ def test_carrier_booster_does_not_fire_on_non_name_short_value(monkeypatch):
 # ---------------------------------------------------------------------------
 def test_allowlist_passes_user_values_through_but_never_secrets(monkeypatch):
     import allowlist as al
+    # A PLAUSIBLE credential shape (>=8 chars, mixed classes, non-identifier) so the 2026-07-02 fat-floor diet
+    # keeps the model's password claim on the floor (the old value 'hunter2' -- 7 lowercase+digit chars -- is
+    # now classed as implausible model junk and DROPPED, by design; see demote_model_floor / test_floor_diet).
+    secret_val = 'P@ssw0rd-huntr2!'
     # the user declared their own email + a token safe; the gate must never exempt a SECRET label though.
     monkeypatch.setattr(egress_proxy, 'current_allowlist',
-                        lambda: al.build_allow_set(['alex@example.com', 'hunter2']))
+                        lambda: al.build_allow_set(['alex@example.com', secret_val]))
 
     async def neural(client, text, min_score=0.5):
         spans = []
-        for val, lab in [('hunter2', 'password'), ('Jane Doe', 'person')]:
+        for val, lab in [(secret_val, 'password'), ('Jane Doe', 'person')]:
             i = text.find(val)
             if i >= 0:
                 spans.append({'start': i, 'end': i + len(val), 'label': lab, 'tier': 1, 'conf': 0.95,
@@ -1759,13 +1763,13 @@ def test_allowlist_passes_user_values_through_but_never_secrets(monkeypatch):
         return spans
 
     body = {'model': 'claude-test', 'messages': [
-        {'role': 'user', 'content': 'Email alex@example.com, password hunter2, signed Jane Doe.'}]}
+        {'role': 'user', 'content': f'Email alex@example.com, password {secret_val}, signed Jane Doe.'}]}
     meta, replay = _run_redact(monkeypatch, body, neural)
     wire = _wire_text(body)
     # allowlisted, non-secret -> passes through verbatim (never minted)
     assert 'alex@example.com' in wire, 'an allowlisted email must pass through un-redacted'
     # allowlisted BUT a secret label -> still redacted (the floor stays non-negotiable)
-    assert 'hunter2' not in wire, 'a SECRET must be redacted even when allowlisted'
+    assert secret_val not in wire, 'a SECRET must be redacted even when allowlisted'
     # not allowlisted -> normal redaction still happens
     assert 'Jane Doe' not in wire, 'a non-allowlisted name must still be redacted'
     assert _PH_RE.search(wire), 'placeholders present for the redacted values'

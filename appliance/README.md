@@ -26,6 +26,47 @@ be rebuilt from the repo alone.
 (`gate/gate_service_gpu.py`) share the same `/detect` `/redact` `/healthz` contract, so the
 egress proxy is agnostic to which one `GATEWAY_GATE_URL` points at.
 
+## Redaction modes + the hard floor (what each mode actually does)
+
+The one-switch redaction mode (`privacy` | `coding` | `off`) is read live per request from a tiny
+file (`~/.ossredact/mode`, override `GATEWAY_MODE_FILE`), managed by the console / `POST
+/api/settings`. Unknown or absent -> `privacy` (fail safe). It is applied as a global overlay on
+top of the YAML policy, so the UI toggle always wins over config defaults.
+
+| Mode | Soft categories that PASS through | What still redacts |
+|---|---|---|
+| `privacy` (default) | `username` (default exclude) + dates (wire-level policy below) | every other detected label, + the floor |
+| `coding` | privacy's list + `org` (frameworks / vendors / employers), `ip` (bind / localhost / config addresses), `uuid` (session / request ids) -- the load-bearing coding tokens a prose model mislabels on code traffic | names, addresses, emails, phones, postal codes, account-shaped values, + the floor |
+| `off` | ALL soft PII | the floor + the always-redact dictionary (`denylist`) |
+
+**Wire-level date policy (2026-07-02):** bare dates/versions (label `sensitive_date`) are **never
+redacted at the egress, in any mode**. On real agent traffic they are the highest-volume
+false-positive class (ISO/log/changelog dates, `YYYYMMDD` build stamps, semver like `2.4.11` that a
+date regex cannot tell from a `D.M.YY` date by value), and a bare date identifies nobody without the
+surrounding facts -- which are what actually get redacted. `GATEWAY_REDACT_DATES=1` restores the old
+privacy-mode date redaction. The Workbench keeps its **own** user-toggleable date filter; this
+policy is appliance-only. `date_of_birth` is a floor label and is not affected.
+
+**The hard floor** is the deterministic never-off guarantee: credentials (`secret`, `password`,
+`api_key`, `access_token`), payment cards (`payment_card`, `card_cvv`, `card_expiry`), bank/account
+(`sensitive_account_id`, `account_number`, `bank_account`, `iban`, `routing_number`),
+government/identity (`government_id`, `tax_id`, `date_of_birth`). Floor labels are force-redacted in
+**every** mode including `off`, are never allowlist-exempt, and their placeholders are **withheld
+from tool-call arguments** on rehydration (see "Tool-argument secret suppression" below). Concretely:
+an agent may see a literal `<LABEL_NNN>` in an executed argument where a floor value would have been
+-- that is anti-exfiltration by design, and the console surfaces the event.
+
+**Floor privileges require deterministic provenance (2026-07-02).** Live incident: the GPU NER,
+out-of-distribution on coding traffic, minted junk INTO floor labels -- whole file paths as
+`sensitive_account_id`, Python identifiers as `password`, code fragments as `secret` -- and because
+floor placeholders are withheld from tool arguments, an agent received a literal
+`<SENSITIVEACCOUNTID_004>` as a file path and created a junk directory. The rule since: the
+deterministic tier-0 rules own the hard guarantee; **model output is recall for SOFT PII only**.
+Model-detected account-SHAPED values surface as `<SENSITIVEREF_n>` (soft: allowlistable,
+mode-exemptible, rehydrated into tool args), and UUID-shaped ids mint the soft label `uuid`
+(deterministic detection -- stable placeholder when policy redacts it -- but exemptible by
+mode/allowlist, and passed through in `coding` mode).
+
 ## Two privacy_gate.py copies (by design)
 
 The repo deliberately holds two `privacy_gate.py` copies:
@@ -80,6 +121,11 @@ All config is env-vars-with-defaults read at process start; no secrets in any of
 | `GATEWAY_NPU_CACHE_DIR` | `<GATEWAY_APPLIANCE_DIR>/.ovcache` | OpenVINO compiled-model cache |
 | `GATEWAY_PORT` | `8011` | proxy listen port |
 | `GATEWAY_CONFIG` | `~/.ossredact/gateway-config.yaml` | live policy file (mtime-watched) |
+| `GATEWAY_MODE_FILE` | `~/.ossredact/mode` | live-read redaction mode file (`privacy` / `coding` / `off`; see "Redaction modes" above) |
+| `GATEWAY_ALLOWLIST_FILE` | `~/.ossredact/allowlist.txt` | UI-managed do-not-redact values (newline-delimited, live-reloaded; never exempts the floor) |
+| `GATEWAY_DENYLIST_FILE` | `~/.ossredact/denylist.txt` | UI-managed always-redact terms (newline-delimited, live-reloaded; only ever ADDS redaction) |
+| `GATEWAY_REDACT_DATES` | `0` | `1` restores privacy-mode date redaction; default = dates never redact at the egress (2026-07-02 wire-level policy) |
+| `GATEWAY_PATH_POLICY` | `username` | `file_path` spans: redact only the home-dir username segment; `full` = whole path, `passthrough` = none |
 | `GATEWAY_MAPS_DIR` | `~/.ossredact/maps` | session entity maps dir (`0700`, gitignored) |
 | `GATEWAY_MAP_KEY` | `<MAPS_DIR>/.mapkey` | AES key file (`0600`, gitignored; auto-generated if absent) |
 | `GATEWAY_MAP_TTL_H` | `24` | entity-map TTL (hours) |

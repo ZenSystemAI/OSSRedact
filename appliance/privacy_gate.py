@@ -17,7 +17,11 @@ import re, json, unicodedata
 from collections import defaultdict
 
 # ---------------- Tier 0: deterministic ----------------
-EMAIL_RE = re.compile(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b')
+# Email requires an ALPHABETIC TLD: the old tail ([\w.-]+) matched npm/version strings ("unpkg@1.1.0",
+# "core@0.2.0" -> EMAIL placeholders, observed live 2026-07-02), burning map entries on every package pin.
+# A real deliverable address always ends in a letters-only label; user@192.168.1.1 loses its email span but
+# the IP part stays owned by IP_RE.
+EMAIL_RE = re.compile(r'\b[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b')
 IP_RE = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
 # IPv6 (the tier-0 IP rule was IPv4-only). Standard comprehensive form: matches ONLY a full 8-group address or
 # a `::`-compressed address, so times (12:34:56) and version strings never match. Hex-only groups, so C++ scope
@@ -37,6 +41,14 @@ IPV6_RE = re.compile(
 POSTAL_RE = re.compile(r'\b[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d\b')
 # UUID (8-4-4-4-12 hex) = connection/session/request IDs (e.g. Flinks login id). Never occurs by accident
 # in natural text, so it is a deterministic catch at ~1.0 confidence, independent of the model threshold.
+# LABEL DEMOTED 2026-07-02 (RC2 fat-floor diet; mirrors gate/privacy_gate.py): minted as the SOFT label
+# 'uuid', no longer 'sensitive_account_id'. The old floor label made every UUID merge-sticky,
+# un-allowlistable, redacted even in 'off' mode, AND withheld from tool-call arguments -- but UUIDs are
+# load-bearing session/request ids in agent traffic, so redacting them broke file ops and churned the
+# prompt cache (a live agent received a literal <SENSITIVEACCOUNTID_004> as a file path and wrote a junk
+# directory). Floor privileges require deterministic provenance of a CATASTROPHIC shape; a UUID is
+# deterministic but not catastrophic. Privacy mode still redacts 'uuid' (soft default); coding/off pass it.
+# 'uuid' must NEVER enter FLOOR_LABELS.
 UUID_RE = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
 # digit runs with optional separators (space/dot/dash). Floor = 7 chars so a bare 7-digit bank account
 # (common Canadian format) is caught deterministically, not left to the model. The digit-count gate below
@@ -70,6 +82,27 @@ def _date_shaped(raw: str) -> bool:
         return 1 <= int(m.group(3)) <= 12 and 1 <= int(m.group(4)) <= 31
     return False
 PHONE_RE = re.compile(r'(?<![\w])(\+?1[ .\-]?)?\(?\d{3}\)?[ .\-]?\d{3}[ .\-]?\d{4}(?![\w])')
+# A separator-bearing NANP phone ("514-444-4444", "1 514 444 4444", "(514) 444-4444") ALSO matches the
+# generic digit run wholly or in part, minting a second span labeled sensitive_account_id -- and since that
+# label is FLOOR-sticky, the merge relabeled the phone as an account id (observed live 2026-07-02: a phone
+# typed as sensitive_account_id, turning soft PII into an un-allowlistable floor value that redacts even in
+# 'off' mode). The digit-run mint is skipped by CONTAINMENT: a separator-bearing run that lies entirely
+# inside a PHONE_RE match is the phone's own digits (the paren form splits the run to just '444-4444', so a
+# shape test on the run alone missed it -- adversarial review, same night). Separator-LESS runs stay
+# account-shaped on purpose (compact bank accounts are 7-12 digits); a compact phone is still caught by
+# PHONE_RE itself, it just doesn't displace the account label.
+# Birth cue for the DOB backstop: a date preceded (within _DOB_CUE_WINDOW chars) by a birth keyword is a
+# date_of_birth (FLOOR), not a bare sensitive_date -- required since the 2026-07-02 wire-level date policy
+# passes bare dates in every mode. EN + FR (Quebec-first product). Word-bounded so 'newborn'/'airborne'
+# never fire. The FR "born" form is `n(?:ée?|ee)` -- matches né/née/nee but NOT the bare negation "ne", one
+# of the commonest words in French (the old `n[eé]e?` matched "ne" and force-floored dates all over
+# Quebec-French prose, defeating the wire-date-pass policy -- adversarial re-review 2026-07-02).
+_DOB_CUE_RE = re.compile(r"(?i)(?:\bn(?:ée?|ee)\b|\bnaissance\b|\bborn\b|\bbirth(?:day|date)?\b|\bdob\b|"
+                         r"date\s+de\s+naissance|date\s+of\s+birth)")
+# Window widened 32 -> 48 (re-review): a cue in a table header / long field label ("date de naissance du
+# titulaire du compte: <date>") sits > 32 chars before the value. 48 covers the common Quebec-statement
+# forms without ballooning the false-positive window now that the "ne" negation match is fixed.
+_DOB_CUE_WINDOW = 48
 # Dates: FR/EN month-name dates, ISO, and numeric. The model catches dates in clean prose but is
 # unreliable in tabular statement noise (e.g. "21 mai 2026" -> only "21"), so own them deterministically.
 _MONTHS = (r'jan(?:vier|uary)?|f[eé]v(?:rier)?|feb(?:ruary)?|mar(?:s|ch)?|avr(?:il)?|apr(?:il)?|mai|may|'
@@ -470,18 +503,33 @@ def tier0_spans(text: str):
     for m in IPV6_RE.finditer(t):
         if m.group(1).count(':') >= 2: add(m.start(1), m.end(1), 'ip_address', 0.9, 'tier0:ipv6')   # >=2 colons rules out a stray 'a:b'
     for m in POSTAL_RE.finditer(t): add(m.start(), m.end(), 'postal_code', 0.9, 'tier0:postal')
-    for m in UUID_RE.finditer(t): add(m.start(), m.end(), 'sensitive_account_id', 0.99, 'tier0:uuid')
+    for m in UUID_RE.finditer(t): add(m.start(), m.end(), 'uuid', 0.99, 'tier0:uuid')   # SOFT since 2026-07-02 (see UUID_RE note)
     for m in IBAN_RE.finditer(t):
         iban = _valid_iban_candidate(m.group(1))
         if iban: add(m.start(1), m.start(1) + len(iban), 'iban', 0.99, 'tier0:iban', validator='mod97_ok')
-    for m in PHONE_RE.finditer(t): add(m.start(), m.end(), 'phone_number', 0.85, 'tier0:phone')
-    for m in DATE_RE.finditer(t): add(m.start(1), m.end(1), 'sensitive_date', 0.8, 'tier0:date')
+    phone_ranges = []
+    for m in PHONE_RE.finditer(t):
+        add(m.start(), m.end(), 'phone_number', 0.85, 'tier0:phone')
+        phone_ranges.append((m.start(), m.end()))
+    for m in DATE_RE.finditer(t):
+        s1, e1 = m.start(1), m.end(1)
+        # DOB CUE BACKSTOP (adversarial review 2026-07-02): the wire-level date policy passes bare dates in
+        # every mode, so a birth-cued date must be recognized HERE (floor date_of_birth) or it ships verbatim
+        # when the model misses it. Mirrors the JSON-key _DOB_KEY_RE guard, for prose.
+        if _DOB_CUE_RE.search(t[max(0, s1 - _DOB_CUE_WINDOW):s1]):
+            add(s1, e1, 'date_of_birth', 0.9, 'tier0:dob_cue')
+        else:
+            add(s1, e1, 'sensitive_date', 0.8, 'tier0:date')
     for m in DIGIT_RUN_RE.finditer(t):
         raw = m.group(1); digits = re.sub(r'\D', '', raw)
         n = len(digits); val = None
         if _date_shaped(raw):
-            add(m.start(1), m.end(1), 'sensitive_date', 0.8, 'tier0:date_shaped')
+            lab = 'date_of_birth' if _DOB_CUE_RE.search(t[max(0, m.start(1) - _DOB_CUE_WINDOW):m.start(1)]) else 'sensitive_date'
+            add(m.start(1), m.end(1), lab, 0.9 if lab == 'date_of_birth' else 0.8,
+                'tier0:dob_cue' if lab == 'date_of_birth' else 'tier0:date_shaped')
             continue
+        if not raw.isdigit() and any(ps <= m.start(1) and m.end(1) <= pe for ps, pe in phone_ranges):
+            continue  # separator-bearing run inside a phone match: owned by PHONE_RE (see the note above)
         if n == 16 or n == 15:
             ok = _luhn_ok(digits); lab, conf, val = 'payment_card', (0.97 if ok else 0.7), ('luhn_ok' if ok else 'luhn_fail')
         elif n == 9:

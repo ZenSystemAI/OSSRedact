@@ -1424,8 +1424,12 @@ def rehydrate_responses_response(obj, replay):
 # JSON object carries its own `type`. Assistant text arrives as `response.output_text.delta` events (fields:
 # delta, item_id, output_index, content_index); we rehydrate the delta incrementally with split-safe tail
 # buffering -- keyed per (output_index, content_index) -- so a placeholder split across deltas is never
-# half-emitted; the held tail is flushed on the matching `response.output_text.done` (and a final sweep on
-# `response.completed`). Tool-call argument fragments arrive as `response.function_call_arguments.delta`; we
+# half-emitted; the held tail is flushed on the matching `response.output_text.done`. (There is deliberately NO
+# extra sweep at `response.completed`: a conformant stream always closes each block with its `.done` first, and
+# on a truncated/nonconformant stream the held tail is at most a PARTIAL placeholder fragment -- junk bytes, not
+# a value -- whose full text the terminal snapshot carries rehydrated anyway; the verified Anthropic reference
+# (egress_proxy._transform_event) drops an unterminated block's tail at message_stop the same way -- 2026-07-02
+# parity audit.) Tool-call argument fragments arrive as `response.function_call_arguments.delta`; we
 # buffer per item_id and emit the full rehydrated JSON on `response.function_call_arguments.done` (a placeholder
 # can straddle fragments, and a tool call is only acted on once complete). Terminal `response.completed` /
 # `response.output_item.done` carry a full snapshot object -- rehydrate it too so a non-incremental reader is

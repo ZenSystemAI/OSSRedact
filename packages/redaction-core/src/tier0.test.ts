@@ -135,10 +135,10 @@ describe('tier0Spans', () => {
     expect([...found].some((e) => e.startsWith('postal_code:') && e.includes('H2X 1Y3'))).toBe(true)
   })
 
-  it('detects UUID', () => {
+  it('detects UUID (soft uuid label since the 2026-07-02 demotion)', () => {
     const text = 'Session ID: 446062b5-366a-4a17-d308-8a7cb0524be4'
     const found = lset(text)
-    expect([...found].some((e) => e.startsWith('sensitive_account_id:') && e.includes('446062b5'))).toBe(true)
+    expect([...found].some((e) => e.startsWith('uuid:') && e.includes('446062b5'))).toBe(true)
   })
 
   it('detects ISO date', () => {
@@ -653,5 +653,15 @@ describe('Unicode No-digit + percent-encoded card homoglyphs (parity with privac
   })
   it('does not over-redact a non-Luhn %20 / dotted group', () => {
     expect(tier0Spans('id 1234.5678.9012.3456').some((s) => s.rule === 'tier0:card_sep')).toBe(false)
+  })
+})
+
+describe('uuid demotion (2026-07-02)', () => {
+  it('mints UUID shapes under the SOFT uuid label, not the floor account label', () => {
+    const spans = tier0Spans('Session ID 446062b5-366a-4a17-d308-8a7cb0524be4 ouverte.')
+    const uuid = spans.filter((s) => s.rule === 'tier0:uuid')
+    expect(uuid).toHaveLength(1)
+    expect(uuid[0].label).toBe('uuid')
+    expect(spans.some((s) => s.label === 'sensitive_account_id' && s.rule === 'tier0:uuid')).toBe(false)
   })
 })

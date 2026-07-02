@@ -7,14 +7,20 @@ secrets:
   entropy_backstop: true   # flag AWS-secret-shaped high-entropy tokens (FP-filtered: uuid/sha/sequential)
 
 pii:
-  # categories: person, address, phone, email, account, nas, tax, card, dob, date, postal, ip, org, filepath, username
+  # categories: person, address, phone, email, account, nas, tax, card, dob, date, postal, ip, org, filepath, username, uuid
   # credentials (password, api_key, access_token) always redact regardless of this config.
+  # 'date' is inert at the egress: bare dates/versions are NEVER redacted in any mode (2026-07-02 wire-level
+  # policy; GATEWAY_REDACT_DATES=1 restores the old behavior). date_of_birth is floor and always redacts.
+  # The mode toggle (privacy/coding/off) overlays this file: coding additionally passes org, ip, uuid.
   default:
     enabled: true
-    exclude: [filepath, username]        # default OFF: coding-assistant noise (file paths, usernames). NOTE:
-                                         # organization IS redacted by default -- the v11r9c model detects it
-                                         # reliably and leaking an employer/client defeats the firewall. Add 'org'
-                                         # here (or per-project) only for code-heavy sessions where it's noise.
+    exclude: [username]                  # default OFF: bare usernames (coding-assistant noise). 'filepath' is
+                                         # NOT excluded by default anymore: GATEWAY_PATH_POLICY=username (the
+                                         # default) redacts only the home-dir username inside a path and passes
+                                         # the rest through, so agent file ops keep working. NOTE: organization
+                                         # IS redacted by default -- the v11r9c model detects it reliably and
+                                         # leaking an employer/client defeats the firewall. Add 'org' here (or
+                                         # per-project) only for code-heavy sessions where it's noise.
     # categories: [...]                  # OPTIONAL restrictive allowlist (redact ONLY these); omit = redact all but exclude
   projects: {}             # e.g.  myrepo: { categories: [person, email] }   or   { exclude: [] }  (redact everything)
   sessions: {}             # e.g.  <session-id>: { enabled: false }          # this session: PII off (secrets still on)

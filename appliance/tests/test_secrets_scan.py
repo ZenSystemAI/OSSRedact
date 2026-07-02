@@ -254,3 +254,35 @@ def test_sk_prefix_keys_stay_bounded_no_fp():
 def test_conn_string_at_in_password():
     assert _hits("postgres://admin:S3cr3tP@ssw0rd!xy@db.host:5432/app") == {"S3cr3tP@ssw0rd!xy"}
     assert _hits("mysql://u:simplepass@localhost/db") == {"simplepass"}
+
+
+def test_code_expression_values_are_not_secrets():
+    """generic_assign FP (live incident 2026-07-02): a cue-bearing IDENTIFIER assigned a CALL or SUBSCRIPT
+    expression minted a code fragment as a floor secret (`_NUM_SECRET_RE = re.compile(r'...` -> `re.compile(r`),
+    which then broke tool-arg rehydration for every later edit of the source line. A dotted identifier
+    immediately opening `(` / `[` is code, never a credential."""
+    assert _hits("_NUM_SECRET_RE = re.compile(r'(?i)pin')") == set()
+    assert _hits("API_KEY_RE = re.compile(r'aki[a-z]+')") == set()
+    assert _hits("SECRET_MAP = config[env_name] or default") == set()
+    assert _hits("token = base64.b64encode(payload)") == set()
+    assert _hits("client_secret = os.environ.get('CS')") == set()
+
+
+def test_code_expression_veto_does_not_weaken_real_secrets():
+    # values merely containing parens/brackets elsewhere stay eligible...
+    assert _hits("password = P@ss(word)1x") == {"P@ss(word)1x"}
+    # ...and ordinary opaque assignments still fire
+    assert _hits("JWT_SECRET=v8Xq2mZk9TbL4nRw") == {"v8Xq2mZk9TbL4nRw"}
+    assert _hits("mot_de_passe: 'Tr0ub4dor&3xyz'") == {"Tr0ub4dor&3xyz"}
+
+
+def test_cued_dotted_secret_keeps_floor_only_call_shape_vetoed():
+    """Re-review 2026-07-02: the deterministic generic_assign floor must NOT be weakened for a bare dotted /
+    constant value after a credential cue -- only the unambiguous call/subscript shape is vetoed. A real
+    dotted API token (SG.aB3c...) was leaking; it floors again."""
+    assert _hits("api_key = SG.aB3cD4eF.gH5iJ6kL") == {"SG.aB3cD4eF.gH5iJ6kL"}
+    assert _hits("apikey=v1abc.def456.ghi789xyz") == {"v1abc.def456.ghi789xyz"}
+    assert _hits("secret = a1b2c3.d4e5f6xyz") == {"a1b2c3.d4e5f6xyz"}
+    # the actual incident shape (call/subscript) is still vetoed
+    assert _hits("_NUM_SECRET_RE = re.compile(r'(?i)pin')") == set()
+    assert _hits("SECRET_MAP = config[env_name] or default") == set()

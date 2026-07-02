@@ -27,12 +27,13 @@ import uvicorn
 APPLIANCE_DIR = os.environ.get('GATEWAY_APPLIANCE_DIR') or os.path.dirname(os.path.abspath(__file__))
 if APPLIANCE_DIR not in sys.path:
     sys.path.insert(0, APPLIANCE_DIR)
-from privacy_gate import tier0_spans, merge_spans, post_merge_address, explain, FLOOR_LABELS  # cheap Tier-0 (no model load)
+from privacy_gate import tier0_spans, merge_spans, post_merge_address, explain, FLOOR_LABELS, UUID_RE  # cheap Tier-0 (no model load)
 from entity_map import EntityMap, derive_session, map_file_lock, gc_maps
 import redact_core
 import allowlist as allowlist_mod   # the do-not-redact dictionary (value-exact, opt-in)
 import denylist as denylist_mod     # the always-redact dictionary (term scanner, opt-in)
-from secrets_scan import secret_spans                                   # deterministic secrets (always-on)
+from math import log2 as _log2
+from secrets_scan import secret_spans, shannon, is_benign_token, looks_like_code_expr, code_call_shape  # deterministic secrets (always-on) + FP helpers
 import openai_adapter   # OpenAI /v1/chat/completions schema translation (Codex / omp / OpenAI-compatible)
 import responses_adapter   # OpenAI /v1/responses schema translation (Codex CLI speaks /v1/responses ONLY)
 import tool_arg_policy   # B5: withhold FLOOR/secret-class placeholders from EXECUTED tool-call arguments
@@ -217,7 +218,7 @@ _CANON_LABELS = ['account_number', 'address', 'card_cvv', 'card_expiry', 'date_o
                  'government_id', 'iban', 'ip_address', 'organization', 'password', 'payment_card', 'person',
                  'phone_number', 'postal_code', 'secret', 'sensitive_account_id', 'sensitive_date', 'tax_id',
                  'username', 'name', 'api_key', 'access_token', 'bank_account', 'routing_number', 'url',
-                 'path', 'filepath', 'phone']
+                 'path', 'filepath', 'phone', 'uuid', 'sensitive_ref']
 _STRIPPED_LABEL = {re.sub(r'[^a-z0-9]', '', lbl): lbl for lbl in _CANON_LABELS}
 
 
@@ -294,6 +295,33 @@ def _live_response(route, client, ctx, replay, present_phs):
             return
         entities = [{'placeholder': ph, 'value': replay[ph], 'label': _ph_label(ph)} for ph in phs]
         _live_emit('response', route, client, ctx, {'n_rehydrated': len(entities), 'entities': entities})
+    except Exception:
+        pass
+
+
+def _withheld_tokens(out_text, replay, tool_replay):
+    """Placeholder tokens left LITERAL in rehydrated TOOL-ARG output because tool_arg_policy suppressed them
+    (B5 anti-exfiltration): tokens present in the output that the full replay knows but the tool-arg replay
+    withheld. `tool_replay is replay` is the fast path when nothing was suppressed (see tool_arg_replay)."""
+    if not replay or tool_replay is replay:
+        return []
+    return [tok for tok in _PH_TOKEN_RE.findall(out_text) if tok in replay and tok not in tool_replay]
+
+
+def _live_tool_arg_withheld(live_ctx, withheld):
+    """Emit the WITHHELD event: floor/secret-class placeholders that stayed inert <LABEL_NNN> literals inside
+    EXECUTED tool-call arguments (tool_arg_policy suppression). Before this event the agent received the
+    literal token SILENTLY -- observed live 2026-07-02: an agent ran Write(<SENSITIVEACCOUNTID_004>/bench2.py)
+    and created a junk directory, and nothing on any console said why. Placeholder tokens + labels only,
+    never values (the withheld value staying secret is the whole point). Fully guarded like the other
+    live-view emitters: a live-view bug must never break the user's actual response."""
+    if not LIVE_VIEW or not withheld or not live_ctx:
+        return
+    try:
+        toks = sorted(withheld)
+        _live_emit('tool_arg_withheld', live_ctx['route'], live_ctx['client'], live_ctx['ctx'],
+                   {'n_withheld': len(toks), 'labels': sorted({_ph_label(t) for t in toks}),
+                    'placeholders': toks})
     except Exception:
         pass
 
@@ -489,6 +517,9 @@ _BENIGN_HASH = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 # narrows; `passthrough` drops every file_path span (paths reach the model verbatim, username included); `full`
 # keeps the model's whole-path span (the legacy over-redaction).
 PATH_POLICY = os.environ.get('GATEWAY_PATH_POLICY', 'username')
+# Wire-level date redaction opt-back-in (see resolve_pii_policy): default 0 = sensitive_date never redacts
+# at the egress in any mode. Set 1 to restore the pre-2026-07-02 behavior (privacy mode redacts dates).
+REDACT_DATES = os.environ.get('GATEWAY_REDACT_DATES', '0') == '1'
 # Home-dir username matcher. Case-INSENSITIVE (macOS resolves /users/ == /Users/; /HOME/ occurs), tolerant of
 # repeated separators (/home// path-join artifact) and BOTH separators, and accepts the Windows drive form
 # (C:\Users\<user>\) and the tilde home (~<user>/). .search() takes the FIRST home root so a mid-path "/Users/"
@@ -501,14 +532,183 @@ def _is_filepath_label(label):
     return re.sub(r'[^a-z0-9]', '', str(label or '').casefold()) in ('filepath', 'path')
 
 
+# ---------------------------------------------------------------------------
+# MODEL-FLOOR DIET -- floor = deterministic provenance (RC2 fat-floor fix, no retrain, 2026-07-02).
+#
+# The FLOOR privileges (merge-sticky, un-allowlistable, redacted even in 'off' mode, WITHHELD from executed
+# tool-call arguments) exist because the deterministic tier-0 rules that mint those labels are near-certain:
+# a Luhn card, a mod-97 IBAN, a keyword-cued credential. The GPU NER is out-of-distribution on coding traffic
+# and mints the SAME labels on junk -- observed live 2026-07-02: whole file paths tagged sensitive_account_id,
+# the Python identifier DIGIT_RUN_RE tagged password, the code fragment `re.compile(r` tagged secret. Because
+# the label alone carried the privilege, that junk became un-allowlistable, survived every mode, and was
+# withheld from tool args -- an agent received a literal <SENSITIVEACCOUNTID_004> as a file path and ran
+# Write(<SENSITIVEACCOUNTID_004>/bench2.py), creating a junk directory.
+#
+# Fix: floor privileges now REQUIRE deterministic provenance. Tier-0 rules own the hard guarantee (untouched
+# and still un-bypassable); a MODEL span (tier != 0) claiming a floor label is treated as RECALL for soft PII:
+#   - bank/account/government identity labels -> relabeled to the SOFT 'sensitive_ref' (still redacts in
+#     privacy AND coding -- the model's recall is kept -- but passes in 'off', is allowlist-exemptible, and
+#     not merge-sticky). It stays WITHHELD from executed tool args (adversarial review 2026-07-02:
+#     rehydrating a model-claimed identity into an executed command re-opens the B5 curl-exfil class); the
+#     Write(<placeholder>/...) incident class is fixed by the path-shape narrowing below plus the
+#     tool_arg_policy value-shape migration exceptions, not by tool-arg rehydration of identity refs.
+#     A REAL account/IBAN/SIN in the same text still gets its floor from the tier-0 twin span (digit-run /
+#     mod-97 / Luhn), which union-merges floor-sticky as before.
+#   - credential labels (secret/password/api_key/access_token) -> three-way verdict
+#     (_model_credential_verdict): 'floor' for real key/password shapes, 'drop' ONLY for provable code
+#     shapes (identifiers, call expressions -- keeps agent edits working), 'ref' for everything else so a
+#     model-detected human password STILL REDACTS (the original binary gate's shannon>=4.0 bar was
+#     unreachable under 16 chars and silently un-redacted prose passwords -- adversarial review, same
+#     night). Deterministic secrets rules are untouched.
+#   - payment_card / card_cvv / card_expiry / date_of_birth model spans are unchanged (no observed junk, and
+#     the model is the only recall for uncued DOBs -- dropping privilege there would be a real loss).
+#   - back-compat guard, ANY tier: a span labeled sensitive_account_id/account_number whose exact text is a
+#     UUID relabels to the soft 'uuid' -- the DEPLOYED GPU gate still emits the old floor label for UUIDs
+#     (its /detect spans arrive with tier 0) until it is redeployed with the 2026-07-02 demotion.
+# ---------------------------------------------------------------------------
+_MODEL_IDENTITY_FLOOR = frozenset({'sensitive_account_id', 'account_number', 'bank_account', 'iban',
+                                   'routing_number', 'government_id', 'tax_id'})
+_MODEL_CRED_FLOOR = frozenset({'secret', 'password', 'api_key', 'access_token'})
+_UUID_RELABEL = frozenset({'sensitive_account_id', 'account_number'})
+# Version-pin back-compat veto for model/old-gate email spans (re-review 2026-07-02): drop ONLY the observed
+# junk shape -- a numeric last segment (`core@0.2.0`, `unpkg@1.1.0`) or an IPv4 tail (`user@192.168.1.1`).
+# The earlier "no ASCII-alpha TLD" test also dropped legitimate accented/IDN-TLD addresses
+# (`usuario@empresa.quebec` with a Unicode TLD) that tier-0's ASCII EMAIL_RE cannot catch -- leaving the
+# model span as their only protection. A numeric-tail test keeps those redacted.
+_VERSION_PIN_TAIL_RE = re.compile(r'\.\d+$')
+# A bare code-identifier shape: what a Python/JS variable, constant, or function name looks like. The model
+# tags these as password/secret on coding traffic (DIGIT_RUN_RE -> password, live 2026-07-02).
+_CODE_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+# Known credential prefixes (the secrets_scan provider set, casefolded): a token starting with one of these is
+# a real key shape even when its tail is short/low-entropy, so the model's floor claim is honored.
+_CRED_PREFIXES = ('sk-', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'xox', 'akia', 'asia',
+                  'aiza', 'ya29.', 'npm_', 'pypi-', 'eyj', 'glpat-', 'rk_live_', 'rk_test_')
+
+
+def _model_credential_verdict(raw):
+    """Three-way verdict on a MODEL-claimed credential span (deterministic shape test only; the tier-0
+    secrets floor is unaffected either way):
+      'floor' -> the claim stands: real key/token shapes keep full floor privilege (withheld from tool args).
+      'drop'  -> unambiguous CODE, not a secret: bare code identifiers/expressions (DIGIT_RUN_RE,
+                 re.compile(r, os.environ.get(). Dropping keeps agent edits of source files working.
+      'ref'   -> everything else: demote to soft 'sensitive_ref' -- STILL REDACTED in privacy+coding.
+    RECALIBRATED after adversarial review (2026-07-02, same night as the diet landed): the original binary
+    keep-or-drop gate used shannon>=4.0, which is mathematically unreachable for tokens under 16 chars
+    (shannon <= log2(len)) -- it silently DROPPED nearly every model-detected human password
+    ('Hunter2Pass', 'sunshine1sunshine') in every mode, an under-redaction regression. Now a failed floor
+    test demotes instead of dropping: over-redaction is the safe error; only provable code shapes drop."""
+    tok = raw.strip().strip('\'"`')
+    if len(tok) < 8:
+        return 'drop'                  # sub-8 uncued model-only "credentials" are noise; cue rules own PINs
+    low = tok.casefold()
+    if any(low.startswith(p) for p in _CRED_PREFIXES):
+        return 'floor'
+    if is_benign_token(tok):           # UUID / git-SHA / all-digit / sequential (detect-secrets FP filters):
+        return 'drop'                  # owned elsewhere (uuid label, hash allowlist, numeric-cue rules)
+    # A CALL / SUBSCRIPT expression is unambiguously code at ANY entropy (`re.compile(r`,
+    # `base64.b64encode(x)`) -- drop it BEFORE the entropy escape, or a high-char-diversity code fragment the
+    # model mis-tags floors and re-breaks agent edits (the original incident; completeness fuzz 2026-07-02).
+    if code_call_shape(tok):
+        return 'drop'
+    n_classes = (any(c.islower() for c in tok) + any(c.isupper() for c in tok)
+                 + any(c.isdigit() for c in tok))
+    # Length-relative entropy: shannon is bounded by log2(len), so compare against the token's own ceiling
+    # rather than an absolute bar a short token can never reach. The distinct-character RATIO is a second,
+    # more stable randomness signal for single-alphabet blobs where a couple of collision-repeats drag
+    # shannon just under the bar (completeness fuzz 2026-07-02: ~3-7% of uniformly-random single-class
+    # alphabetic tokens leaked to 'ref' on shannon alone) -- a near-all-distinct token of real length is a
+    # generated key whatever its shannon.
+    rand_looking = (shannon(tok) >= 0.75 * _log2(max(2, len(tok)))
+                    or (len(tok) >= 12 and len(set(tok)) / len(tok) >= 0.7))
+    # ENTROPY ESCAPE: a random-looking multi-class token is credential-like WHATEVER (non-call) punctuation
+    # it carries -- a custom bearer token that happens to be underscore- or dot-shaped
+    # (`db_9fZ2Qw8rLm4xKp7Ty3Vn6Bs`, `v1a2b3.c4d5e6.f7g8h9`) keeps its floor instead of being dropped as a
+    # bare dotted/const reference below.
+    if rand_looking and n_classes >= 2:
+        return 'floor'
+    # DROP the remaining PROVABLE code shapes only: SCREAMING_CONST and bare dotted references
+    # (looks_like_code_expr, minus the call-shape already handled). A bare snake_case identifier is the
+    # documented AMBIGUOUS case (variable name vs `correct_horse_battery_staple` passphrase), NOT provable
+    # code -- routing it to 'drop' shipped uncued snake-case passwords the model tagged in every mode incl.
+    # privacy (completeness fuzz). It now falls through to 'ref' (redacted in privacy + coding; over-
+    # redaction is the safe error for the rare mis-tagged lowercase code identifier).
+    if looks_like_code_expr(tok):
+        return 'drop'
+    # A random-looking token keeps its floor even when SINGLE-class and not code-shaped -- an all-letter
+    # high-entropy blob (`xkqvhzwjlmnpr`) is a generated key, not prose (leak-check 2026-07-02: dropping the
+    # standalone rand_looking clause here let such a token demote to sensitive_ref and ship in OFF mode).
+    if n_classes >= 2 or rand_looking:
+        return 'floor'                 # mixed-class human password / random single-class blob -> floor
+    return 'ref'                       # single-class LOW-entropy prose-ish token: redact softly (no floor)
+
+
+def demote_model_floor(spans, text):
+    """Provenance-aware floor diet (see block comment above). Tier-0 spans pass through untouched -- the
+    deterministic floor is never weakened here (fail-closed direction preserved); only MODEL claims lose
+    unearned floor privilege. Runs BEFORE merge_spans so a demoted label can never become merge-sticky."""
+    out = []
+    for s in spans:
+        label = s.get('label')
+        val = text[s['start']:s['end']]
+        if label in _UUID_RELABEL and UUID_RE.fullmatch(val):
+            # any tier: the deployed gate's floor:uuid spans arrive as tier-0 sensitive_account_id until the
+            # gate-side 2026-07-02 demotion is redeployed; local tier-0 already mints 'uuid' directly.
+            out.append({**s, 'label': 'uuid'})
+            continue
+        if s.get('tier') == 0:
+            out.append(s)
+            continue
+        if label in _MODEL_IDENTITY_FLOOR:
+            out.append({**s, 'label': 'sensitive_ref'})
+            continue
+        if label == 'email' and _VERSION_PIN_TAIL_RE.search(val):
+            # deployed-gate back-compat: the old GPU gate still mints email spans for npm version pins
+            # (core@0.2.0) / IP tails until it is redeployed. Only those numeric-tail shapes are dropped;
+            # a real accented/IDN-TLD email keeps its span (see _VERSION_PIN_TAIL_RE).
+            continue
+        if label in _MODEL_CRED_FLOOR:
+            verdict = _model_credential_verdict(val)
+            if verdict == 'floor':
+                out.append(s)                              # real key/password shape: floor claim stands
+            elif verdict == 'ref':
+                out.append({**s, 'label': 'sensitive_ref'})  # still redacted (privacy+coding), no floor perks
+            continue                                       # 'drop': provable code shape (DIGIT_RUN_RE class)
+        out.append(s)
+    return out
+
+
+# Path-shaped text: an absolute/home/drive-rooted path with >= 2 separators and no whitespace. Used to extend
+# the file_path narrowing to demoted 'sensitive_ref'/'uuid' spans whose TEXT is really a path the model
+# mis-labeled (the observed whole-path-as-account_id junk).
+_DRIVE_ROOT_RE = re.compile(r'^[A-Za-z]:[\\/]')
+
+
+def _path_shaped(txt):
+    if not txt or any(ch.isspace() for ch in txt):
+        return False
+    if not (txt.startswith('/') or txt.startswith('~') or _DRIVE_ROOT_RE.match(txt)):
+        return False
+    return (txt.count('/') + txt.count('\\')) >= 2
+
+
 def _narrow_path_spans(spans, text):
     """Apply GATEWAY_PATH_POLICY to file_path spans. Non-file_path spans pass through unchanged. A narrowed
-    username keeps the original span's label/tier/conf, so it stays a case-sensitive file_path placeholder."""
+    username keeps the original span's label/tier/conf, so it stays a case-sensitive file_path placeholder.
+
+    EXTENDED 2026-07-02 (fat-floor diet follow-through): a 'sensitive_ref' or 'uuid' span whose TEXT is
+    path-shaped is the model mis-labeling a whole path (the junk demote_model_floor just softened) -- it gets
+    the SAME narrowing, RELABELED to file_path so the username (a) mints under the case-SENSITIVE file_path
+    contract (no /home/alex -> /home/Alex sweep-mangle) and (b) converges on the same placeholder an NER
+    file_path span of the same path would mint (prompt-cache byte-stability). Tier-0 FLOOR spans are NEVER
+    narrowed: they cannot reach either branch (floor labels are neither file_path nor sensitive_ref/uuid,
+    and demote_model_floor never touches tier-0 floor labels)."""
     if PATH_POLICY == 'full':
         return spans
     out = []
     for s in spans:
-        if not _is_filepath_label(s.get('label')):
+        pathish_soft = (s.get('label') in ('sensitive_ref', 'uuid')
+                        and _path_shaped(text[s['start']:s['end']]))
+        if not (_is_filepath_label(s.get('label')) or pathish_soft):
             out.append(s)
             continue
         if PATH_POLICY == 'passthrough':
@@ -521,7 +721,10 @@ def _narrow_path_spans(spans, text):
             continue   # the "username" is itself a leaked placeholder (/home/<FILEPATH_001>/...) echoed back --
                        # narrowing onto it would remint <FILEPATH_005> over <FILEPATH_001> and leak a raw token
                        # to the local chat on rehydrate (RC4). Already redacted -> leave it, do not re-mint.
-        out.append({**s, 'start': s['start'] + m.start(1), 'end': s['start'] + m.end(1)})
+        narrowed = {**s, 'start': s['start'] + m.start(1), 'end': s['start'] + m.end(1)}
+        if pathish_soft:
+            narrowed['label'] = 'file_path'   # case-sensitive mint + placeholder convergence (see docstring)
+        out.append(narrowed)
     return out
 
 
@@ -713,6 +916,13 @@ CATEGORY_LABELS = {
     'nas': ['government_id'], 'tax': ['tax_id'], 'card': ['payment_card', 'card_cvv', 'card_expiry'],
     'dob': ['date_of_birth'], 'date': ['sensitive_date'], 'postal': ['postal_code'], 'ip': ['ip_address'],
     'org': ['organization'], 'filepath': ['file_path'], 'username': ['username'],
+    # 'uuid' (demoted from the account floor 2026-07-02): deterministic tier-0 catch, SOFT policy -- privacy
+    # mode redacts it, coding/off pass it (session/request ids are load-bearing in agent traffic).
+    'uuid': ['uuid'],
+    # 'sensitive_ref' = a MODEL-claimed bank/account/government id with NO deterministic backstop (the
+    # provenance-demoted floor labels, see demote_model_floor). Redacts in privacy AND coding, passes in off,
+    # allowlist-exemptible, not merge-sticky, rehydrates into tool args.
+    'ref': ['sensitive_ref'],
 }
 LABEL_CATEGORY = {lab: cat for cat, labs in CATEGORY_LABELS.items() for lab in labs}
 _CONFIG = {}
@@ -803,9 +1013,11 @@ def _refresh_denylist_if_changed():
 # ---------------------------------------------------------------------------
 # Redaction MODE (privacy | coding | off) -- the one-switch UI toggle, read live from a tiny file the
 # settings API manages. Applied as a global overlay in resolve_pii_policy:
-#   privacy : redact ALL detected PII (default, strongest).
-#   coding  : let organizations / tech names through (org excluded) so a coding agent keeps framework
-#             context -- everything else (names, addresses, emails, the floor) still redacts.
+#   privacy : redact ALL detected PII (default, strongest). Exception: bare dates/versions never redact at
+#             the egress in any mode (wire-level date policy 2026-07-02; GATEWAY_REDACT_DATES=1 restores).
+#   coding  : additionally let org / ip / uuid categories through (org->organization, ip->ip_address,
+#             uuid->uuid) so a coding agent keeps framework names, bind/localhost IPs, and session/request
+#             ids -- everything else (names, addresses, emails, phones, the floor) still redacts.
 #   off     : pass SOFT PII (names/org/address/email/phone/...) through, for when redaction is in the way.
 # CRITICAL: 'off' is NOT a credential bypass. The deterministic floor -- secrets, payment cards, bank/IBAN,
 # government/tax IDs, DOB (FLOOR_NEVER_EXEMPT) -- is FORCE-redacted in every mode (policy_allows_pii returns
@@ -930,11 +1142,26 @@ def resolve_pii_policy(ctx):
         # like 2.4.11 (DATE_RE cannot tell those from a D.M.YY date by value, RC5), and IP literals that are bind
         # / localhost / config addresses (0.0.0.0, 127.0.0.1, ::1). Redacting them mangles diffs, version checks,
         # config, and networking code. Let those CATEGORIES through (org->organization, date->sensitive_date,
-        # ip->ip_address). The hard floor is untouched -- date_of_birth and every credential / card / account /
+        # ip->ip_address), plus 'uuid' (2026-07-02): session/request ids are load-bearing in agent traffic --
+        # redacting them broke file ops and churned the prompt cache while identifying nobody by themselves.
+        # The hard floor is untouched -- date_of_birth and every credential / card / account /
         # gov-id stay FLOOR_NEVER_EXEMPT and redact in coding mode -- and privacy mode still redacts all of these.
-        extra = [c for c in ('org', 'date', 'ip') if c not in (pol.get('exclude') or [])]
+        extra = [c for c in ('org', 'date', 'ip', 'uuid') if c not in (pol.get('exclude') or [])]
         if extra:
             pol = {**pol, 'exclude': list(pol.get('exclude') or []) + extra}
+    # WIRE-LEVEL DATE POLICY (operator decision 2026-07-02): bare dates/versions (label sensitive_date) are
+    # never redacted at the egress, in ANY mode. On real agent traffic they are the highest-volume false-
+    # positive class (ISO/log/changelog dates, YYYYMMDD build stamps, and semver like 2.4.11 that DATE_RE
+    # cannot tell from a D.M.YY date by value -- RC5), and every mint burns map entries + placeholder buffer
+    # for no defensible privacy gain: a bare date identifies nobody without the surrounding facts, which are
+    # what actually get redacted. The Workbench keeps its own date filter (user-toggleable + revertible there;
+    # this policy is appliance-only). date_of_birth is a FLOOR label and untouched by this exclude. Values
+    # already minted as sensitive_date stop being swept on the next request (_sweep_keeps honors this policy).
+    # Escape hatch: GATEWAY_REDACT_DATES=1 restores the old mode-scoped behavior (privacy mode redacts dates).
+    if not REDACT_DATES:
+        excl = pol.get('exclude') or []
+        if 'date' not in excl:
+            pol = {**pol, 'exclude': list(excl) + ['date']}
     return pol
 
 
@@ -964,15 +1191,30 @@ def policy_allows_pii(label, ctx):
     return True
 
 
-def _sweep_keeps(value, ph, ctx, allow):
+def _sweep_keeps(value, ph, ctx, allow, pol=None):
     """Pass-3 cross-turn sweep veto (RC3), mirroring the pass-2 span policy so a mode toggle / allowlist edit
     takes effect on values ALREADY in the session map -- instead of the sweep eternally replaying a placeholder
     minted under an older policy. Keep replaying value->ph only if the placeholder's own label is still
     redactable under the current policy/mode AND the value is not user-allowlisted. The hard floor is never
     exempt: policy_allows_pii returns True for FLOOR_NEVER_EXEMPT, and the allowlist check skips floor labels, so
-    a credential / card / gov-id / DOB minted earlier keeps being swept in every mode."""
+    a credential / card / gov-id / DOB minted earlier keeps being swept in every mode.
+
+    MIGRATION GUARD (adversarial review 2026-07-02): live session maps minted BEFORE the fat-floor diet hold
+    floor placeholders for values the diet no longer floors -- <SENSITIVEACCOUNTID_n> over a UUID or a whole
+    file path. By label alone those are FLOOR_NEVER_EXEMPT and would sweep forever, silently defeating the
+    uuid demotion and re-creating the Write(<placeholder>/bench2.py) incident for every session that spans
+    the upgrade. Mirror demote_model_floor at the map boundary, scoped to the IDENTITY labels only (a
+    credential/card/gov placeholder is never value-shape exempted): UUID-valued -> evaluate under the 'uuid'
+    policy (passes in coding/off, still sweeps in privacy); path-shaped -> stop sweeping (fresh pass-2
+    narrowing re-owns the path's username per request)."""
     label = _ph_label(ph)
-    if not policy_allows_pii(label, ctx):
+    if label in _UUID_RELABEL:
+        if UUID_RE.fullmatch(value):
+            label = 'uuid'
+        elif _path_shaped(value):
+            return False
+    allows = pol if pol is not None else (lambda lbl: policy_allows_pii(lbl, ctx))
+    if not allows(label):
         return False
     if label not in FLOOR_NEVER_EXEMPT and allow and allowlist_mod.is_allowlisted(value, allow):
         return False
@@ -1219,6 +1461,10 @@ async def redact_body(body, ctx, extract=extract_text_fields, detector=None):
             dspans = _denylist_spans(t, deny)
             if not spans and not dspans:
                 return None
+            # fat-floor diet (2026-07-02): strip unearned floor privilege off MODEL spans BEFORE merge_spans,
+            # so a junk model label can never become merge-sticky / un-allowlistable / tool-arg-withheld.
+            # Tier-0 spans pass through untouched (the deterministic floor is never weakened).
+            spans = demote_model_floor(spans, t)
             spans = _narrow_path_spans(spans, t)  # file_path over-redaction precision (GATEWAY_PATH_POLICY)
             spans = expand_word_spans(t, spans)   # cover the whole word when the model tagged only a fragment
             spans = post_merge_address(merge_spans(spans), t)
@@ -1314,7 +1560,17 @@ async def redact_body(body, ctx, extract=extract_text_fields, detector=None):
         # (e.g. an org minted in privacy) is replayed to its placeholder forever -- undoing what pass-2 correctly
         # let through after a 'coding' toggle, and ignoring a value the user just allowlisted. keep_sweep mirrors
         # the pass-2 span policy via the placeholder's own label; the hard floor is never exempt.
-        keep_sweep = lambda value, ph: _sweep_keeps(value, ph, ctx, allow)
+        # PERF (review 2026-07-02): policy resolution is constant within one request but keep_sweep runs once
+        # per map entry per unfrozen field (a migrated 3k-entry map x 100 fields paid ~5us each in mode-file
+        # stats + dict copies = seconds on the first post-restart turn). Memoize per label for this request;
+        # the config fingerprint above already pins the policy for the whole pass.
+        _pol_memo = {}
+        def _pol_cached(label):
+            got = _pol_memo.get(label)
+            if got is None:
+                got = _pol_memo[label] = policy_allows_pii(label, ctx)
+            return got
+        keep_sweep = lambda value, ph: _sweep_keeps(value, ph, ctx, allow, _pol_cached)
         known_re = build_known_re(emap, keep_values=keep_values, keep_placeholder=keep_sweep)
         for f in fields:
             src = orig_by_id.get(id(f))
@@ -1369,17 +1625,27 @@ def rehydrate_text(s, replay):
     return redact_core.rehydrate(s, replay)
 
 
-def _rehydrate_json(v, replay, tool_replay=None, floor_safe=False):
+def _rehydrate_json(v, replay, tool_replay=None, floor_safe=False, withheld=None):
     # B5 Half A: `floor_safe` marks that we are inside a tool-call ARGUMENT subtree (an Anthropic tool_use /
     # server_tool_use block's `input`, recursively). In that subtree we rehydrate with `tool_replay` -- the map
     # with FLOOR/secret-class tokens withheld -- so a secret left in an executed tool argument stays the inert
     # <LABEL_NNN> literal instead of the real value. Assistant TEXT and tool RESULTS keep the full `replay`.
+    # `withheld` (optional set, 2026-07-02): collects the tokens that suppression left literal in tool-arg
+    # output, so the caller can surface a 'tool_arg_withheld' live event instead of the agent receiving an
+    # inert token SILENTLY (the Write(<SENSITIVEACCOUNTID_004>/...) incident). Observation only -- it never
+    # changes what is rehydrated. (Withheld tokens in rehydrated KEYS are not tallied -- a floor token as an
+    # object key is not a value the agent executes; accepted blind spot.)
     if tool_replay is None:
         tool_replay = tool_arg_policy.tool_arg_replay(replay)
     if isinstance(v, str):
-        return rehydrate_text(v, tool_replay if floor_safe else replay)
+        if floor_safe:
+            out = rehydrate_text(v, tool_replay)
+            if withheld is not None:
+                withheld.update(_withheld_tokens(out, replay, tool_replay))
+            return out
+        return rehydrate_text(v, replay)
     if isinstance(v, list):
-        return [_rehydrate_json(x, replay, tool_replay, floor_safe) for x in v]
+        return [_rehydrate_json(x, replay, tool_replay, floor_safe, withheld) for x in v]
     if isinstance(v, dict):
         # OPAQUE REASONING block: never rehydrate a thinking/redacted_thinking block. Its `thinking` text is
         # covered by the `signature` MAC and the client re-sends the block verbatim next turn; rehydrating it
@@ -1407,7 +1673,7 @@ def _rehydrate_json(v, replay, tool_replay=None, floor_safe=False):
             nk = rehydrate_text(k, key_replay) if isinstance(k, str) else k
             if nk in rebuilt and nk != k:
                 nk = _disambiguate_key(nk if isinstance(nk, str) else k, rebuilt, k)
-            rebuilt[nk] = _rehydrate_json(x, replay, tool_replay, child_fs)
+            rebuilt[nk] = _rehydrate_json(x, replay, tool_replay, child_fs, withheld)
         return rebuilt
     return v
 
@@ -1467,10 +1733,11 @@ def _dump_rehydrated_dup_safe(v, replay):
     return json.dumps(v, ensure_ascii=False)
 
 
-def rehydrate_anthropic_response(obj, replay):
+def rehydrate_anthropic_response(obj, replay, withheld=None):
+    # `withheld` (optional set): tool-arg suppression visibility -- see _rehydrate_json / _live_tool_arg_withheld.
     if not replay or not isinstance(obj, (dict, list)):
         return obj
-    rehydrated = _rehydrate_json(obj, replay)
+    rehydrated = _rehydrate_json(obj, replay, withheld=withheld)
     if isinstance(obj, dict) and isinstance(rehydrated, dict):
         obj.clear()
         obj.update(rehydrated)
@@ -1479,6 +1746,13 @@ def rehydrate_anthropic_response(obj, replay):
         obj[:] = rehydrated
         return obj
     return rehydrated
+
+
+# Capability marker read by the shared forwarders (_finalize_upstream_response / _stream_or_error_response):
+# this rehydrator accepts a `withheld` collector, so the caller with live-emit context can surface the
+# 'tool_arg_withheld' event. The OpenAI/Responses adapter rehydrators do not carry the marker (yet), so the
+# forwarders call them with the unchanged 2-arg shape -- no signature break across adapters.
+rehydrate_anthropic_response._accepts_withheld = True
 
 
 def rehydrate_json_string(acc, replay):
@@ -1530,7 +1804,10 @@ def _emit(ev_type, obj):
     return f"data: {data}".encode('utf-8')
 
 
-def _transform_event(raw, replay, carry, block_type, json_acc):
+def _transform_event(raw, replay, carry, block_type, json_acc, withheld=None, tool_replay_memo=None):
+    # `withheld` (optional set, 2026-07-02): tool-arg suppression visibility. rehydrate_json_string stays PURE
+    # (tests call it directly); the tally happens here, where the assembled tool-arg output exists, and is
+    # surfaced by the caller holding live-emit context (_stream_or_error_response). Observation only.
     ev_type = None
     data_raw = None
     for ln in raw.split(b'\n'):
@@ -1586,8 +1863,16 @@ def _transform_event(raw, replay, carry, block_type, json_acc):
                 emits.append(_emit('content_block_delta', de))
         elif bt == 'tool_use':
             acc = json_acc.pop(idx, '')
+            rehydrated_args = rehydrate_json_string(acc, replay)
+            if withheld is not None and replay:
+                # tokens the tool-arg suppression left literal in the EXECUTED arguments (B5) -- tallied
+                # against the suppressed map so a restored VALUE that merely looks like a placeholder of
+                # another entry is never miscounted as withheld. The suppressed map is computed ONCE per
+                # stream (hoisted, perf review 2026-07-02), not per tool_use block.
+                if tool_replay_memo is not None:
+                    withheld.update(_withheld_tokens(rehydrated_args, replay, tool_replay_memo))
             de = {'type': 'content_block_delta', 'index': idx,
-                  'delta': {'type': 'input_json_delta', 'partial_json': rehydrate_json_string(acc, replay)}}
+                  'delta': {'type': 'input_json_delta', 'partial_json': rehydrated_args}}
             emits.append(_emit('content_block_delta', de))
         emits.append(_emit(ev_type, obj))
         return b'\n\n'.join(emits)
@@ -1595,22 +1880,31 @@ def _transform_event(raw, replay, carry, block_type, json_acc):
     return _emit(ev_type, obj)   # message_start / message_delta / message_stop / ping / error -> passthrough
 
 
-async def stream_rehydrate(upstream_aiter, replay):
+async def stream_rehydrate(upstream_aiter, replay, withheld=None):
     carry = {}
     block_type = {}
     json_acc = {}
     buf = b''
+    # One suppressed-replay computation for the whole stream (perf review 2026-07-02): tool_arg_replay is
+    # O(|replay|); rebuilding it per tool_use block multiplied that by the number of tool calls per response.
+    tool_replay_memo = tool_arg_policy.tool_arg_replay(replay) if (withheld is not None and replay) else None
     async for chunk in upstream_aiter:
         buf += chunk
         while b'\n\n' in buf:
             raw_event, buf = buf.split(b'\n\n', 1)
-            out = _transform_event(raw_event, replay, carry, block_type, json_acc)
+            out = _transform_event(raw_event, replay, carry, block_type, json_acc, withheld, tool_replay_memo)
             if out:
                 yield out + b'\n\n'
     if buf.strip():
-        out = _transform_event(buf, replay, carry, block_type, json_acc)
+        out = _transform_event(buf, replay, carry, block_type, json_acc, withheld, tool_replay_memo)
         if out:
             yield out + b'\n\n'
+
+
+# Capability marker (see rehydrate_anthropic_response._accepts_withheld): the shared streaming forwarder only
+# threads the withheld collector into transforms that declare support, so the adapter transforms (untouched
+# 2-arg signatures) keep working unchanged.
+stream_rehydrate._accepts_withheld = True
 
 
 # ----------------------------------------------------------------------------
@@ -1776,12 +2070,20 @@ def _log_usage(label, usage):
     print(f"[egress] usage {label} input={it} cache_read={cr_n} cache_creation={cc_n} prompt_cache={verdict}", flush=True)
 
 
-def _finalize_upstream_response(r, replay, json_rehydrate):
+def _finalize_upstream_response(r, replay, json_rehydrate, live_ctx=None):
     ct = r.headers.get('content-type', 'application/json')
     resp_headers = _upstream_response_headers(r.headers)
     if replay and 'json' in ct.lower():
         try:
-            obj = json_rehydrate(json.loads(r.content), replay)
+            # Tool-arg suppression visibility (2026-07-02): when the rehydrator supports it and we have live
+            # context, collect the floor tokens left literal in EXECUTED tool args and emit the distinct
+            # 'tool_arg_withheld' event -- the agent otherwise receives the inert token silently.
+            if LIVE_VIEW and live_ctx and getattr(json_rehydrate, '_accepts_withheld', False):
+                sink = set()
+                obj = json_rehydrate(json.loads(r.content), replay, withheld=sink)
+                _live_tool_arg_withheld(live_ctx, sink)
+            else:
+                obj = json_rehydrate(json.loads(r.content), replay)
             return JSONResponse(obj, status_code=r.status_code, headers=resp_headers)
         except Exception:
             pass
@@ -1821,7 +2123,13 @@ async def _stream_or_error_response(url, payload, headers, replay, stream_transf
             _live_response(live_ctx['route'], live_ctx['client'], live_ctx['ctx'], replay, present)
         if replay and 'json' in ct.lower():
             try:
-                obj = json_rehydrate(json.loads(content), replay)
+                # tool-arg suppression visibility (2026-07-02) -- see _finalize_upstream_response.
+                if LIVE_VIEW and live_ctx and getattr(json_rehydrate, '_accepts_withheld', False):
+                    sink = set()
+                    obj = json_rehydrate(json.loads(content), replay, withheld=sink)
+                    _live_tool_arg_withheld(live_ctx, sink)
+                else:
+                    obj = json_rehydrate(json.loads(content), replay)
                 return JSONResponse(obj, status_code=r.status_code, headers=resp_headers)
             except Exception:
                 pass
@@ -1846,6 +2154,12 @@ async def _stream_or_error_response(url, payload, headers, replay, stream_transf
                 ustate['logged'] = True
                 ubuf.clear()
 
+        # tool-arg suppression visibility (2026-07-02): thread a withheld-token collector into transforms
+        # that declare support (capability marker -- the Anthropic stream_rehydrate today; the adapter
+        # transforms keep their unchanged 2-arg call). Emitted once the stream drains, as its own distinct
+        # live event, so an inert <LABEL_NNN> handed to the executing agent is never silent again.
+        withheld_sink = (set() if (LIVE_VIEW and replay and live_ctx
+                                   and getattr(stream_transform, '_accepts_withheld', False)) else None)
         try:
             if not replay:
                 async for chunk in r.aiter_raw():
@@ -1853,10 +2167,14 @@ async def _stream_or_error_response(url, payload, headers, replay, stream_transf
                     yield chunk
             else:
                 src = _tally_rehydrations(r.aiter_raw(), replay, live_ctx) if live_ctx else r.aiter_raw()
-                async for out in stream_transform(src, replay):
+                agen = (stream_transform(src, replay, withheld=withheld_sink)
+                        if withheld_sink is not None else stream_transform(src, replay))
+                async for out in agen:
                     _maybe_log(out)
                     yield out
         finally:
+            if withheld_sink:
+                _live_tool_arg_withheld(live_ctx, withheld_sink)
             await r.aclose()
             await client.aclose()
 
@@ -1976,7 +2294,7 @@ async def messages(req: Request):
             _live_response('/v1/messages', client, ctx, replay, set(_PH_TOKEN_RE.findall(r.content.decode('utf-8', 'ignore'))))
         if LOG_USAGE:
             _log_usage('/v1/messages', _find_usage_obj(r.content.decode('utf-8', 'ignore')))
-        return _finalize_upstream_response(r, replay, rehydrate_anthropic_response)
+        return _finalize_upstream_response(r, replay, rehydrate_anthropic_response, live_ctx=live_ctx)
 
     # streaming: open upstream first so upstream auth/rate-limit/error statuses are not masked as local 200s.
     return await _stream_or_error_response(url, payload, headers, replay, stream_rehydrate,

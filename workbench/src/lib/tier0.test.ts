@@ -118,7 +118,7 @@ describe('tier0Spans', () => {
   it('detects UUID', () => {
     const text = 'Session ID: 446062b5-366a-4a17-d308-8a7cb0524be4'
     const found = lset(text)
-    expect([...found].some((e) => e.startsWith('sensitive_account_id:') && e.includes('446062b5'))).toBe(true)
+    expect([...found].some((e) => e.startsWith('uuid:') && e.includes('446062b5'))).toBe(true) // soft 'uuid' since the 2026-07-02 demotion
   })
 
   it('detects ISO date', () => {

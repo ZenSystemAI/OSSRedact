@@ -21,9 +21,19 @@ from collections import defaultdict
 # never-leak safety net with near-zero false positives. Loose shapes (dates, amounts, bare digit runs,
 # postal codes, phone numbers, IPs) are LEFT for the neural model, which owns recall AND labeling. This
 # REMOVES the precision tax the old tier0 imposed (it over-fired on every number/date/postal/phone shape).
-EMAIL_RE = re.compile(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b')
+# Alphabetic-TLD requirement mirrors appliance/privacy_gate.py: the old tail matched npm/version
+# strings ("unpkg@1.1.0" -> EMAIL). A real deliverable address ends in a letters-only label.
+EMAIL_RE = re.compile(r'\b[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b')
 # UUID (8-4-4-4-12 hex) = connection/session/request IDs (e.g. Flinks login id). Never occurs by accident
 # in natural text, so it is a deterministic catch at ~1.0 confidence, independent of the model threshold.
+# LABEL DEMOTED 2026-07-02 (mirrors appliance/privacy_gate.py tier0:uuid): minted as the SOFT label 'uuid',
+# no longer 'sensitive_account_id'. UUIDs are load-bearing session/request ids in coding traffic, and the
+# old floor label made them merge-sticky, un-allowlistable, redacted even in 'off' mode, AND withheld from
+# tool-call arguments -- a live agent received a literal <SENSITIVEACCOUNTID_004> as a file path and wrote a
+# junk directory. Floor privileges require deterministic provenance of a CATASTROPHIC shape; a UUID is
+# deterministic but not catastrophic, so it stays detected (stable placeholder when policy redacts it) while
+# the label lets modes/allowlist exempt it. The egress keeps a back-compat guard relabeling incoming
+# account-id-labeled UUID-shaped spans until every deployed gate copy carries this change.
 UUID_RE = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
 # IBAN: 2-letter country + 2 check digits + 11-30 alphanumerics (internal spaces/hyphens allowed). Validated
 # by the ISO 7064 mod-97 checksum (_iban_ok), so a match is a near-certain real IBAN with no precision risk.
@@ -154,7 +164,9 @@ def validated_floor(text: str):
     """The thin never-leak floor: emit ONLY checksum/format-exact catastrophic shapes (email, UUID,
     mod-97 IBAN, Luhn card, Luhn SIN). Loose shapes (dates, amounts, bare digit runs, postal, phone, IP)
     are LEFT for the neural model, which owns recall AND labeling. Matching runs on a length-preserving
-    _normseps copy, so the returned offsets index the ORIGINAL text the caller redacts."""
+    _normseps copy, so the returned offsets index the ORIGINAL text the caller redacts.
+    NOTE (2026-07-02): the UUID hit is deterministic but carries the SOFT label 'uuid' (not a FLOOR_LABEL),
+    so mode/allowlist policy at the egress can exempt it -- see the UUID_RE rationale above."""
     spans = []
     t = _normseps(text)
     def add(s, e, lab, conf, rule, **extra):
@@ -162,7 +174,9 @@ def validated_floor(text: str):
     for m in EMAIL_RE.finditer(t):
         add(m.start(), m.end(), 'email', 0.99, 'floor:email')
     for m in UUID_RE.finditer(t):
-        add(m.start(), m.end(), 'sensitive_account_id', 0.99, 'floor:uuid')
+        # 'uuid' is deterministic-but-SOFT (2026-07-02, see UUID_RE note): rule renamed 'floor:uuid' ->
+        # 'tier0:uuid' to match the appliance twin and stop implying floor privilege in /redact stats + audits.
+        add(m.start(), m.end(), 'uuid', 0.99, 'tier0:uuid')
     for m in IBAN_RE.finditer(t):
         iban = _valid_iban_candidate(m.group(1))
         if iban:

@@ -70,7 +70,9 @@ _add('generic_assign', r'(?i)(?<![A-Za-z])(?:[A-Za-z0-9]+[_\-.])*'
                        # jeton (token), cle/clef secrete/api
                        r'motdepasse|mot[_\-.]?de[_\-.]?passe|mdp|jeton|cl[eé]f?[_\-.]?(?:api|secr[eè]te?))'
                        r'(?:[_\-.][A-Za-z0-9]+)*'
-                       r'["\']?\s*[:=]\s*["\']?([^\s"\',;}{]{8,})', 2)
+                       # the value's opening quote is CAPTURED (group 2): a quoted value is a string literal by
+                       # construction, so the code-expression veto below never applies to it. Value = group 3.
+                       r'["\']?\s*[:=]\s*(["\'])?([^\s"\',;}{]{8,})', 3)
 
 # entropy backstop: AWS-secret-shaped bare base64 (40 chars). Hex-only of that length is a SHA -> filtered.
 # '=' is NOT excluded at the boundary: a bare token right after `KEY=` (the common assignment shape) must still
@@ -80,6 +82,48 @@ _B64_40 = re.compile(r'(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])')
 # ---- false-positive filters (detect-secrets heuristics) ----
 _UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
 _GITSHA = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')   # lowercase-hex commit / content hash = benign
+# Code-expression value veto (generic_assign FP, live incident 2026-07-02): a cue-bearing IDENTIFIER assigned
+# a CODE EXPRESSION -- `_NUM_SECRET_RE = re.compile(r'...` -- captured `re.compile(r` as the "value" and
+# floor-minted a code fragment as a secret. Downstream that placeholder is withheld from tool arguments
+# (B5 Half A), so every later agent edit of the source line failed against a literal <SECRET_NNN>.
+# SCOPE (tightened after adversarial review, same night): applies ONLY to UNQUOTED generic_assign captures --
+# a QUOTED value is a string literal by construction (never code), and a conn-string password is positionally
+# always a credential. Three code shapes are vetoed:
+#   (a) truncated call/subscript: identifier head + '('/'[' with NO closing bracket in the capture
+#       (`re.compile(r`, `os.environ.get('...` -- the capture stops at the quote);
+#   (b) balanced-TERMINAL call/subscript: the token ENDS at the closing bracket (`base64.b64encode(payload)`,
+#       `config[env_name]`) -- a password does not stop exactly at a closing bracket, a call does;
+#       a value whose tail continues PAST the close (`admin(2024)prod`, `Winter[2024]extra`) stays a secret;
+#   (c) constant/dotted identifier reference: SCREAMING_SNAKE (`MY_OTHER_CONST`) or a dotted path
+#       (`settings.secret_key`) -- config indirection, not a literal secret. lowercase snake_case is NOT
+#       vetoed (real passwords are sometimes snake-ish; over-redaction is the safe error).
+_CODE_CALL_OPEN = re.compile(r'^[A-Za-z_][\w.]*([([])')
+_SCREAMING_CONST = re.compile(r'^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$')
+_DOTTED_IDENT = re.compile(r'^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$')
+
+
+def code_call_shape(tok):
+    """A truncated or balanced-terminal call/subscript expression: `re.compile(r`, `config[env_name]`,
+    `base64.b64encode(x)`. Unambiguously CODE at any entropy -- the exact incident shape (a cue-bearing
+    identifier assigned a call). This is the ONLY veto applied on the DETERMINISTIC generic_assign floor:
+    a bare SCREAMING_CONST / dotted value after a credential cue is NOT vetoed there, so a real dotted key
+    (`api_key = SG.aB3cD4eF.gH5iJ6kL`) keeps its floor (adversarial re-review 2026-07-02)."""
+    m = _CODE_CALL_OPEN.match(tok)
+    if not m:
+        return False
+    close = ')' if m.group(1) == '(' else ']'
+    if close not in tok:
+        return True                     # truncated call: `re.compile(r`
+    return tok.endswith(close)          # balanced-terminal call/subscript = code; tail past close = secret
+
+
+def looks_like_code_expr(tok):
+    """Call/subscript OR a bare SCREAMING_CONST / dotted-identifier reference. Used by the MODEL-credential
+    verdict ONLY, which floors a high-entropy token BEFORE calling this -- so only a LOW-entropy token
+    reaches here, and a bare CONST/dotted name at low entropy is config indirection (MY_OTHER_CONST,
+    settings.secret_key), not a literal secret. The deterministic floor uses code_call_shape (above), which
+    never un-floors a bare dotted/const value, so this broader shape can never weaken that hard guarantee."""
+    return code_call_shape(tok) or bool(_SCREAMING_CONST.fullmatch(tok) or _DOTTED_IDENT.fullmatch(tok))
 
 
 def shannon(s):
@@ -130,8 +174,18 @@ def secret_spans(text, entropy_backstop=True):
             else:
                 s, e = m.start(), m.end()
             val = text[s:e]
-            if name in ('generic_assign', 'conn_string') and is_benign_token(val):
-                continue
+            if name in ('generic_assign', 'conn_string'):
+                # A UUID-valued CUED assignment is a bearer credential (session=<uuid>, sid: <uuid> --
+                # adversarial review 2026-07-02): the benign-UUID filter must not suppress it there. The
+                # other benign shapes (git SHA, all-digit, sequential) stay suppressed as before.
+                if is_benign_token(val) and not _UUID.match(val):
+                    continue
+                # Code-expression veto: UNQUOTED generic_assign captures only (a quoted value is a string
+                # literal, never code; a conn-string password is positionally always a credential), and ONLY
+                # the unambiguous call/subscript shape (code_call_shape) -- a bare dotted/const value after a
+                # credential cue is asserted-secret and must keep its floor (re-review 2026-07-02).
+                if name == 'generic_assign' and not m.group(2) and code_call_shape(val):
+                    continue
             add(s, e, name)
 
     if entropy_backstop:

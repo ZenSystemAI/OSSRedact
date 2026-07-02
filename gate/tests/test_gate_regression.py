@@ -26,7 +26,9 @@ def test_exact_shapes_email_uuid_sin_card():
     t = "courriel a@b.ca; uuid 446062b5-366a-fa17-d308-8a7cb0524be4; NAS 046 454 286; carte 4539148803436467"
     got = pairs(t)
     assert ("email", "a@b.ca") in got
-    assert ("sensitive_account_id", "446062b5-366a-fa17-d308-8a7cb0524be4") in got  # UUID
+    # 2026-07-02: UUIDs mint the SOFT label 'uuid' (was the floor label 'sensitive_account_id'):
+    # session/request ids are load-bearing in coding traffic and must stay mode/allowlist-exemptible.
+    assert ("uuid", "446062b5-366a-fa17-d308-8a7cb0524be4") in got  # UUID
     assert ("government_id", "046 454 286") in got                                  # 9-digit Luhn-ok SIN
     assert ("payment_card", "4539148803436467") in got                             # 16-digit Luhn-ok card
 

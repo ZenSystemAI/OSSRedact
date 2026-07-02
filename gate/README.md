@@ -7,6 +7,13 @@ redact/rehydrate. This core is held identical across `gate/`, `appliance/privacy
 in-browser `packages/redaction-core`, and is locked by `validation/parity_vectors.json` (the 3-way
 parity suites). Edit the shared core here, then deploy + mirror.
 
+**Deterministic is not the same as floor-privileged (2026-07-02):** `validated_floor` detects email and UUID
+deterministically but mints them with SOFT labels (`email`, `uuid`) -- egress mode/allowlist policy
+decides whether they redact. Only `FLOOR_LABELS` (credentials / cards / bank / government / DOB)
+carry floor privileges (redacted in every mode, un-allowlistable, withheld from tool arguments).
+UUIDs previously minted the floor label `sensitive_account_id`; that was demoted after a live
+incident where a coding agent received a literal `<SENSITIVEACCOUNTID_004>` as a file path.
+
 **Intentional divergence (not drift):** `appliance/privacy_gate.py` runs a deliberately THICKER
 deterministic floor (`tier0_spans`, plus `context_cued_id_spans` / `glued_checksum_spans` /
 `us_zip_spans`) because it has no co-located neural model to recall loose shapes (IP / postal /

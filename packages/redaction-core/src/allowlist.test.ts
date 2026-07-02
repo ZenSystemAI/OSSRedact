@@ -14,6 +14,18 @@ describe('normalizeAllowValue', () => {
     // NFC: composed vs decomposed e-acute compare equal
     expect(normalizeAllowValue('André')).toBe(normalizeAllowValue('André'))
   })
+
+  // possessive fold (live 2026-07-02: "Steven's" minted a fresh PERSON entry past an allowlisted "steven")
+  it('does not fold declared values; the possessive fold is lookup-side only (2026-07-02 direction fix)', () => {
+    expect(normalizeAllowValue("Steven's")).toBe("steven's")
+    expect(normalizeAllowValue('Steven’s')).toBe("steven's".replace("'", '’'))
+    // a word merely ending in "s" is untouched anywhere
+    expect(normalizeAllowValue('bass')).toBe('bass')
+    // the LOOKUP folds: declaring the base covers the possessive span, ASCII and U+2019
+    expect(isAllowlisted("Steven's", buildAllowSet(['steven']))).toBe(true)
+    expect(isAllowlisted('Steven’s', buildAllowSet(['steven']))).toBe(true)
+    expect(isAllowlisted('bass', buildAllowSet(['bas']))).toBe(false)
+  })
 })
 
 describe('buildAllowSet', () => {
@@ -112,5 +124,61 @@ describe('applyAllowlist', () => {
       const kept = applyAllowlist([span(text, 'SENSITIVE', label)], text, sensitiveAllow)
       expect(kept, `${label} must survive allowlisting`).toHaveLength(1)
     }
+  })
+
+  // --- possessive fold (live 2026-07-02) ---
+
+  it('drops a possessive span when the base value is declared', () => {
+    const text = "reviewed Steven's patch"
+    const kept = applyAllowlist([span(text, "Steven's", 'person')], text, buildAllowSet(['steven']))
+    expect(kept).toHaveLength(0)
+  })
+
+  it('keeps a base span redacted when only the possessive value is declared (lookup-side-only fold)', () => {
+    // DIRECTION (adversarial review 2026-07-02): declaring "McDonald's" covers "McDonald's" but NOT the
+    // bare span "McDonald" -- otherwise allowlisting a possessive brand ("Sam's") would silently exempt
+    // every unrelated person sharing the base token ("Sam").
+    const text = 'lunch at McDonald today'
+    const kept = applyAllowlist([span(text, 'McDonald', 'org')], text, buildAllowSet(["McDonald's"]))
+    expect(kept).toHaveLength(1)
+    const text2 = "lunch at McDonald's today"
+    expect(applyAllowlist([span(text2, "McDonald's", 'org')], text2, buildAllowSet(["McDonald's"]))).toHaveLength(0)
+  })
+
+  it('folds the U+2019 typographic possessive on the lookup side only', () => {
+    const text = 'per Steven’s note'
+    expect(applyAllowlist([span(text, 'Steven’s', 'person')], text, buildAllowSet(['steven']))).toHaveLength(0)
+    // the reverse direction is intentionally NOT exempt (lookup-side-only fold)
+    const text2 = 'by Steven now'
+    expect(applyAllowlist([span(text2, 'Steven', 'person')], text2, buildAllowSet(['Steven’s']))).toHaveLength(1)
+  })
+
+  it('does NOT match a double possessive against the base declaration (one strip only)', () => {
+    const text = "saw alex's's oddity"
+    const kept = applyAllowlist([span(text, "alex's's", 'person')], text, buildAllowSet(['alex']))
+    expect(kept).toHaveLength(1) // still redacted
+  })
+
+  it('never exempts a floor span via the possessive fold', () => {
+    // the guard keys on the LABEL before any text lookup, so neither the exact nor the possessive
+    // declaration of a hard-floor value can drop it.
+    const card = '4111111111111111'
+    const text = `card ${card}'s trail`
+    const floorAllow = buildAllowSet([card, `${card}'s`])
+    const kept = applyAllowlist(
+      [span(text, `${card}'s`, 'payment_card'), span(text, card, 'payment_card')],
+      text,
+      floorAllow,
+    )
+    expect(kept).toHaveLength(2) // both floor spans survive
+  })
+})
+
+describe('denylist guard (defense in depth, 2026-07-02)', () => {
+  it("never drops an always-redact 'custom' span, even on an exact allowlist hit", () => {
+    const text = 'project zenith is internal'
+    const spans = [{ start: 8, end: 14, label: 'custom' }]
+    const allow = buildAllowSet(['zenith'])
+    expect(applyAllowlist(spans, text, allow)).toHaveLength(1)
   })
 })

@@ -82,13 +82,16 @@ def test_replay_harness_coding_traffic_scorecard(monkeypatch, tmp_path):
 
 
 def test_replay_harness_privacy_redacts_more_than_coding(monkeypatch, tmp_path):
-    """Sanity: privacy mode is at least as aggressive as coding -- a version string redacts in privacy (a date)
-    but not coding (RC5), proving the harness actually discriminates policy. Recall holds in both."""
-    fix = [{'name': 'ver', 'text': 'ship 2.4.11 today', 'must_redact': [], 'benign': ['2.4.11']}]
+    """Sanity: privacy mode is at least as aggressive as coding -- an IP literal redacts in privacy but not
+    coding, proving the harness actually discriminates policy. The version string passes in BOTH modes now
+    (wire-level date policy 2026-07-02: sensitive_date never redacts at the egress; the Workbench keeps its
+    own toggleable date filter). Recall holds in both."""
+    fix = [{'name': 'ver', 'text': 'ship 2.4.11 today from 203.0.113.7',
+            'must_redact': [], 'benign': ['2.4.11', '203.0.113.7']}]
     _isolate_config(monkeypatch, tmp_path, 'coding')
     coding = replay_harness.score(fix, _make_redact_fn(_noop_detector))
     _isolate_config(monkeypatch, tmp_path, 'privacy')
     privacy = replay_harness.score(fix, _make_redact_fn(_noop_detector))
-    assert coding['over_redaction_count'] == 0, 'coding mode must pass the version string (RC5)'
-    assert privacy['over_redaction_count'] == 1, 'privacy mode redacts the version-shaped date'
+    assert coding['over_redaction_count'] == 0, 'coding mode must pass the version string (RC5) and the IP'
+    assert privacy['over_redaction_count'] == 1, 'privacy mode redacts the IP literal (dates now pass)'
     assert coding['recall_ok'] and privacy['recall_ok']

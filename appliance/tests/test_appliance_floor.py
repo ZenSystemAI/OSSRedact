@@ -115,6 +115,23 @@ def test_dmy_and_compact_dates_are_dates():
     assert ('sensitive_date', '20260701') in labset('build 20260701 shipped')
 
 
+def test_dob_cue_floors_date_but_french_negation_ne_does_not():
+    """Prose DOB backstop (2026-07-02) + its re-review fix: a birth cue near a date upgrades it to the FLOOR
+    date_of_birth (bare dates otherwise pass on the wire in every mode), BUT the FR "born" form must not
+    match the negation "ne" -- one of the commonest French words -- or it force-floors dates all over
+    Quebec-French prose."""
+    # born cues -> floor date_of_birth
+    assert ('date_of_birth', '1985-03-12') in labset('né le 1985-03-12')
+    assert ('date_of_birth', '1990-06-01') in labset('née 1990-06-01')
+    assert ('date_of_birth', '12/03/1985') in labset('born 12/03/1985')
+    assert ('date_of_birth', '1985-03-12') in labset('date de naissance du titulaire du compte: 1985-03-12')
+    # the negation "ne" must NOT floor a nearby date -- it stays a passthrough sensitive_date
+    assert ('sensitive_date', '2024-01-15') in labset('la fonction ne retourne rien depuis 2024-01-15')
+    assert 'date_of_birth' not in labels('la fonction ne retourne rien depuis 2024-01-15')
+    # a plain date with no birth cue is untouched
+    assert ('sensitive_date', '2026-07-01') in labset('shipped 2026-07-01 today')
+
+
 def test_beta_tag_date_suffix_not_account_id():
     # the real-world regression: a feature-flag tag with a trailing date got a SENSITIVEACCOUNTID placeholder
     t = 'enable context-1m-2025-08-07 today'
@@ -128,3 +145,25 @@ def test_space_grouped_runs_and_sins_still_caught():
     assert 'government_id' in labels('SIN 046-454-286 on file')
     # compact 8-digit runs that cannot be a real date stay account ids
     assert 'sensitive_account_id' in labels('acct 20269999 ok')
+
+
+# ---- UUID demotion (fat-floor diet, 2026-07-02): deterministic catch, SOFT label ----
+# UUIDs are load-bearing session/request ids in agent traffic; the old 'sensitive_account_id' mint gave every
+# UUID full floor privilege (merge-sticky, un-allowlistable, redacted in 'off', withheld from tool args) --
+# a live agent received a literal placeholder as a file path. The catch stays deterministic (conf 0.99); only
+# the label's privileges changed. Mode semantics (privacy redacts / coding+off pass) live in test_floor_diet.
+def test_uuid_minted_as_soft_uuid_label_not_account_floor():
+    t = 'Session ID 446062b5-366a-4a17-d308-8a7cb0524be4 ouverte.'
+    assert ('uuid', '446062b5-366a-4a17-d308-8a7cb0524be4') in labset(t)
+    assert 'sensitive_account_id' not in labels(t)
+    span = next(s for s in tier0_spans(t) if s['label'] == 'uuid')
+    assert span['rule'] == 'tier0:uuid' and span['conf'] == 0.99 and span['tier'] == 0
+
+
+def test_uuid_label_never_enters_floor_and_digit_run_floor_unchanged():
+    # 'uuid' must NEVER gain floor privileges (the whole point of the demotion)...
+    assert 'uuid' not in _mod.FLOOR_LABELS
+    # ...while the compact 7-19 digit-run bucket keeps minting the account floor exactly as before (the
+    # deterministic digit-run guarantee is deliberately NOT part of the diet).
+    assert ('sensitive_account_id', '81234567') in labset('account 81234567 active')
+    assert 'sensitive_account_id' in _mod.FLOOR_LABELS

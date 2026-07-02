@@ -17,7 +17,10 @@ def test_floor_fires_on_exact_shapes():
     t = "a@b.ca 446062b5-366a-fa17-d308-8a7cb0524be4 4539148803436467 046454286"
     labs = {l for l, _ in lset(t)}
     assert "email" in labs
-    assert "sensitive_account_id" in labs   # UUID
+    # 2026-07-02: UUID demoted to the SOFT label 'uuid' (was floor 'sensitive_account_id') -- still a
+    # deterministic tier-0 hit, but exemptible by mode/allowlist. Mirrors appliance tier0:uuid.
+    assert "uuid" in labs                   # UUID
+    assert "sensitive_account_id" not in labs  # the old floor label must NOT come back (regression guard)
     assert "payment_card" in labs           # Luhn-valid 16
     assert "government_id" in labs          # Luhn-valid 9 (SIN)
 

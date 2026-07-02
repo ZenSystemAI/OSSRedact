@@ -14,6 +14,13 @@ export const LABEL_REGISTRY: Record<string, LabelMeta> = {
   iban: { en: 'IBAN', fr: 'IBAN', color: '#14b8a6' },
   account_number: { en: 'Account number', fr: 'No de compte', color: '#a78bfa' },
   sensitive_account_id: { en: 'Account / file ID', fr: 'Compte / no dossier', color: '#c084fc' },
+  // 2026-07-02 fat-floor diet twins: 'uuid' = deterministic UUID-shape detection DEMOTED from the floor
+  // (session/request ids are load-bearing in coding traffic; the WIRE passes them in coding mode), and
+  // 'sensitive_ref' = a MODEL-claimed account/gov identity span stripped of floor privileges (deterministic
+  // provenance owns the hard guarantee). Both stay catastrophic-tier for DISPLAY: in the Workbench,
+  // redact-by-default with the per-label toggle is the right default for document review.
+  uuid: { en: 'Session / request ID', fr: 'ID de session / requête', color: '#d8b4fe' },
+  sensitive_ref: { en: 'Sensitive reference', fr: 'Référence sensible', color: '#c4b5fd' },
   tax_id: { en: 'Tax ID', fr: 'No fiscal', color: '#f472b6' },
   secret: { en: 'Secret / key', fr: 'Secret / clé', color: '#fb7185' },
   password: { en: 'Password', fr: 'Mot de passe', color: '#f43f5e' },
@@ -42,6 +49,8 @@ const CATASTROPHIC = new Set<string>([
   'government_id', 'payment_card', 'card_cvv', 'card_expiry', 'iban', 'account_number',
   'sensitive_account_id', 'tax_id', 'secret', 'password', 'email', 'person', 'date_of_birth',
   'name', 'sensitive_date', 'manual',
+  // Display tier only -- NOT floor members. See the registry comment on the 2026-07-02 demotion.
+  'uuid', 'sensitive_ref',
 ])
 
 // The HARD FLOOR: credential + money/government/identity labels that are NEVER allowlist-exempt and are

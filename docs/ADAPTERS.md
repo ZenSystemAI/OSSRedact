@@ -37,12 +37,22 @@ free text and are left structural.
 
 Two tiers do the detecting, and they are not equally strong -- be honest about which is which:
 
-- **The deterministic Tier-0 floor** (secrets/API keys, payment cards via Luhn, IBANs, bank
-  accounts, government/tax IDs, emails, IPs) is the hard, model-independent part: it runs on
-  every request in every mode, including `Off`, and is the layer you can rely on.
+- **The deterministic hard floor** (secrets/API keys, payment cards + CVV/expiry via Luhn+cues,
+  IBANs via mod-97, bank/account IDs via context cues, government/tax IDs, date of birth) is the
+  model-independent guarantee: detected by tier-0 rules, redacted on every request **in every mode
+  including `Off`**, never allowlist-exempt, and its placeholders are withheld from executed
+  tool-call arguments. This is the layer you can rely on.
+- **Deterministic but SOFT detections** (emails, IPs, UUIDs) are caught by the same tier-0 rules
+  but carry soft labels: `privacy` mode redacts them, `coding` mode passes IPs and UUIDs (they are
+  load-bearing in code traffic), and `Off` passes all of them. Bare dates/versions
+  (`sensitive_date`) are never redacted at the egress in any mode (2026-07-02 wire-level policy;
+  the Workbench keeps its own toggleable date filter). Do not mistake these for the floor.
 - **The neural tier** raises coverage for free-text PII (names, addresses, organizations) that
   has no deterministic signature. It is high-recall but model-dependent -- detection is not
   perfect, so treat free-text PII as best-effort *on top of* the floor, not a hard guarantee.
+  Since 2026-07-02 a model-only detection can no longer mint a floor-privileged label:
+  model-detected account-shaped values surface as soft `<SENSITIVEREF_n>` placeholders
+  (allowlistable, mode-exemptible, rehydrated into tool arguments).
 
 A once-identified entity is also re-masked anywhere it reappears later in the session via the
 known-entity backstop, so a value the model misses in a new context still cannot leak. If the

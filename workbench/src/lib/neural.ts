@@ -89,6 +89,15 @@ function ensureLoaded(): Promise<void> {
         })) as unknown as Model
         model = m
         id2label = m.config.id2label
+        // The user just committed ~278 MB to this origin (transformers.js keeps it in the Cache
+        // API). Ask the browser to mark the origin's storage PERSISTENT so the weights are exempt
+        // from best-effort eviction and the "download once, runs offline forever" promise holds.
+        // Chrome grants/denies silently by engagement heuristics; failure changes nothing.
+        try {
+          void navigator.storage?.persist?.().catch(() => {})
+        } catch {
+          /* storage API absent (very old webview): cache stays best-effort */
+        }
         return
       } catch (e) {
         lastErr = e

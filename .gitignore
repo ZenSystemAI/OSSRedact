@@ -1,0 +1,87 @@
+# Internal planning docs (specs/plans) -- never commit to a public repo
+docs/superpowers/
+# Internal research references (public facts, but kept local until an OSS release pass)
+docs/research/
+PRIOR-ART.md
+
+# Synthetic corpora + trained models (large, regenerable; never ship data)
+datasets/
+models/
+*.jsonl
+!validation/stress_orgaddr_heldout.jsonl
+
+# Media / screenshots (promo + landing assets, not model/code IP)
+*.mp4
+*.png
+!charts/
+!charts/*.png
+# README product screenshots (public repo needs them to render)
+!docs/media/
+!docs/media/*.png
+# Tauri build icons: required by tauri::generate_context! + the tray include_bytes -- a fresh
+# checkout (CI cargo test) fails to COMPILE without them. Not screenshots; keep tracked.
+!workbench/src-tauri/icons/
+!workbench/src-tauri/icons/32x32.png
+!workbench/src-tauri/icons/128x128.png
+!workbench/src-tauri/icons/128x128@2x.png
+
+# Python / venv / node
+__pycache__/
+.venv*/
+.pytest_cache/
+node_modules/
+
+# Backups + scratch
+*.bak*
+*.ok-*
+*.tmp
+/tmp/
+
+# Real-document (PII) validation work area -- raw text + per-doc offsets stay LOCAL only.
+# The committed artifact is validation/RESULT-realworld-*.md (aggregate, PII-free).
+validation/realworld/
+expenses-eval/
+*.pii.json
+*.pii.txt
+
+# Local agent + tooling scratch (worktrees, MCP browser snapshots) -- never commit
+.claude/
+.playwright-mcp/
+
+# Appliance runtime data + artifacts (egress proxy -- never commit)
+# SENSITIVE: encrypted session entity maps + .mapkey AES key
+maps/
+# model weights (singular dir on the host)
+model/
+# training output dir (trained model checkpoints, e.g. out/pii-gpu-xlmr-base-v11r9c)
+out/
+# int8 model weights
+model-v11r5-base-int8/
+# same-disk model backups
+model.bak-*/
+# OpenVINO compile cache
+.ovcache/
+# runtime/private dir
+private/
+# live host-specific config (commit gateway-config.example.yaml instead)
+gateway-config.yaml
+
+# local music-gen toolchain (ACE-Step, not part of the project)
+ACE-Step/
+.venv-music/
+
+# internal agent tooling + cross-model audit docs (never public)
+.agents/
+*PRELAUNCH-AUDIT*.md
+*PRELAUNCH-AUDIT*.MD
+
+# internal planning / handoff history + agent-conventions doc (kept local, excluded from the public snapshot)
+plans/
+AGENTS.md
+# (the bare AGENTS.md pattern above also covers workbench/AGENTS.md once untracked)
+
+# draft browser extension (WXT harness, not a shipping interceptor -- roadmap only; keep out of the snapshot)
+extension/
+
+# Generated client-data output, never commit.
+output-data/

@@ -1,0 +1,32 @@
+# Torch-free test dependencies for CI's pytest-discovery path.
+# This pins ONLY what CI and the pure-Python unit tests need; it is the verified
+# content of the local .venv-test. The full GPU inference stack (torch,
+# onnxruntime, transformers) is environment-specific to the GPU box and the deployed
+# appliance, and is intentionally NOT pinned here -- pin it where the model actually runs.
+#
+# Reproduce a matching test environment:
+#   python3.12 -m venv .venv-test
+#   . .venv-test/bin/activate
+#   python -m pip install -r requirements-test.txt
+#
+# CI discovers files below the suite directories and names the two deploy contracts explicitly; do not replace
+# the directory roots with a hand-maintained test-file list. Keep the processes separate: gate/ and appliance/
+# both ship privacy_gate.py, and a combined interpreter can reuse the wrong sys.modules entry.
+#   python -m pytest gate/tests training/gen/tests training/tests validation deploy/test_public_boundary.py deploy/test_repository_profiles.py deploy/test_install_units.py -v
+#   python -m pytest appliance/tests -v
+
+pytest==9.1.0
+numpy==2.4.6
+scipy==1.17.1
+cryptography==49.0.0
+
+# FastAPI TestClient stack -- required by the appliance redaction-critical tests (control CORS/CSRF guard,
+# floor hardening, secret-key force-redact, input-shape fail-open, settings/mode invariants, denylist,
+# live-view safety). CI discovers them under appliance/tests in a separately isolated process. They are
+# TORCH-FREE: appliance/egress_proxy.py imports only the Tier-0 floor from privacy_gate.py; the
+# torch/onnxruntime/transformers NER tiers are imported lazily inside methods and are never touched here.
+fastapi==0.137.1
+httpx==0.28.1
+uvicorn==0.49.0
+pydantic==2.13.4
+PyYAML==6.0.3

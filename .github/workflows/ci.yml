@@ -1,0 +1,546 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Repo hygiene: enforce text invariants that should fail before tests run.
+  # -----------------------------------------------------------------------
+  repo-hygiene:
+    name: Repo hygiene
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enforce repository tracked-path boundary
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REPOSITORY:-}" in
+            ZenSystemAI/OSSRedact)
+              profile=public
+              ;;
+            ZenSystemAI/OSSRedact-dev)
+              profile=private
+              ;;
+            *)
+              echo "Repository boundary profile is unavailable." >&2
+              exit 1
+              ;;
+          esac
+          if ! git ls-files -z 2>/dev/null | python deploy/public_boundary.py --stdin0 --profile "$profile" >/dev/null 2>&1; then
+            echo "Repository tracked-path boundary failed." >&2
+            exit 1
+          fi
+
+      - name: Enforce public tag annotation boundary
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REPOSITORY:-}" in
+            ZenSystemAI/OSSRedact)
+              profile=public
+              ;;
+            ZenSystemAI/OSSRedact-dev)
+              profile=private
+              ;;
+            *)
+              echo "Repository boundary profile is unavailable." >&2
+              exit 1
+              ;;
+          esac
+
+          tailnet_re='(^|[^0-9])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)'
+          tailnet_text_is_clean() {
+            local candidate="$1"
+            local -a scan_status
+            set +e
+            printf '%s\n' "$candidate" | grep -E "$tailnet_re" >/dev/null 2>&1
+            scan_status=("${PIPESTATUS[@]}")
+            set -e
+            case "${scan_status[0]}:${scan_status[1]}" in
+              0:1) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          tailnet_object_is_clean() {
+            local object_type="$1"
+            local object="$2"
+            local -a scan_status
+            set +e
+            git cat-file "$object_type" "$object" 2>/dev/null | grep -E "$tailnet_re" >/dev/null 2>&1
+            scan_status=("${PIPESTATUS[@]}")
+            set -e
+            case "${scan_status[0]}:${scan_status[1]}" in
+              0:1) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          case "${GITHUB_REF_TYPE:-}" in
+            tag)
+              ;;
+            branch)
+              exit 0
+              ;;
+            *)
+              echo "Tag annotation context is unavailable." >&2
+              exit 1
+              ;;
+          esac
+          case "${GITHUB_REF:-}" in
+            refs/tags/*)
+              tag_ref="$GITHUB_REF"
+              ;;
+            *)
+              echo "Tag annotation ref is unavailable." >&2
+              exit 1
+              ;;
+          esac
+          if ! printf '%s\n' "$tag_ref" | python3 deploy/public_boundary.py --text --profile "$profile" >/dev/null 2>&1; then
+            echo "Tag reference violates the repository boundary." >&2
+            exit 1
+          fi
+          if [ "$profile" = "public" ] && ! tailnet_text_is_clean "$tag_ref"; then
+            echo "Public tag reference carries an internal tailnet address." >&2
+            exit 1
+          fi
+          if ! tag_object="$(git rev-parse --verify --quiet "$tag_ref")"; then
+            echo "Tag object is unavailable." >&2
+            exit 1
+          fi
+          if ! tag_type="$(git cat-file -t "$tag_object" 2>/dev/null)"; then
+            echo "Tag object type is unavailable." >&2
+            exit 1
+          fi
+          case "$tag_type" in
+            tag)
+              if ! tag_commit="$(git rev-parse --verify --quiet "${tag_object}^{commit}")"; then
+                echo "Tag target is unavailable." >&2
+                exit 1
+              fi
+              if ! git cat-file tag "$tag_object" 2>/dev/null | python3 deploy/public_boundary.py --text --profile "$profile" >/dev/null 2>&1; then
+                echo "Tag annotation violates the repository boundary." >&2
+                exit 1
+              fi
+              if [ "$profile" = "public" ] && ! tailnet_object_is_clean tag "$tag_object"; then
+                echo "Public tag annotation carries an internal tailnet address." >&2
+                exit 1
+              fi
+              ;;
+            commit)
+              tag_commit="$tag_object"
+              ;;
+            *)
+              echo "Tag object type is unsupported." >&2
+              exit 1
+              ;;
+          esac
+          if ! git cat-file commit "$tag_commit" 2>/dev/null | python3 deploy/public_boundary.py --text --profile "$profile" >/dev/null 2>&1; then
+            echo "Tag target metadata violates the repository boundary." >&2
+            exit 1
+          fi
+          if [ "$profile" = "public" ] && ! tailnet_object_is_clean commit "$tag_commit"; then
+            echo "Public tag target metadata carries an internal tailnet address." >&2
+            exit 1
+          fi
+          if ! git ls-tree -r -z --name-only "$tag_commit" 2>/dev/null | python3 deploy/public_boundary.py --stdin0 --profile "$profile" >/dev/null 2>&1; then
+            echo "Tag target tree path boundary failed." >&2
+            exit 1
+          fi
+          if [ "$profile" = "public" ]; then
+            if ! public_main="$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)"; then
+              echo "Public main is unavailable for tag validation." >&2
+              exit 1
+            fi
+            if [ -z "$public_main" ]; then
+              echo "Public main is unavailable for tag validation." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$tag_commit" "$public_main" 2>/dev/null; then
+              echo "Public tag target is not reachable from public main." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Enforce public added-commit boundary
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REPOSITORY:-}" in
+            ZenSystemAI/OSSRedact)
+              profile=public
+              ;;
+            ZenSystemAI/OSSRedact-dev)
+              profile=private
+              ;;
+            *)
+              echo "Repository boundary profile is unavailable." >&2
+              exit 1
+              ;;
+          esac
+
+          if command -v python >/dev/null 2>&1; then
+            boundary_python=python
+          elif command -v python3 >/dev/null 2>&1; then
+            boundary_python=python3
+          else
+            echo "Python is required to enforce the added-commit boundary." >&2
+            exit 1
+          fi
+          tailnet_re='(^|[^0-9])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)'
+
+          # Local workflow harnesses do not interpolate GitHub expressions.
+          unresolved_base_sha='$''{{ github.event.pull_request.base.sha || github.event.before }}'
+          if [ "${BASE_SHA:-}" = "$unresolved_base_sha" ]; then
+            BASE_SHA="${GITHUB_EVENT_BEFORE:-}"
+          fi
+          unresolved_scan_head='$''{{ github.event.pull_request.head.sha || github.sha }}'
+          if [ "${SCAN_HEAD:-}" = "$unresolved_scan_head" ]; then
+            SCAN_HEAD="${GITHUB_SHA:-}"
+          fi
+          if ! SCAN_HEAD="$(git rev-parse --verify "${SCAN_HEAD:-}^{commit}" 2>/dev/null)"; then
+            echo "Added-commit boundary scan head is unavailable." >&2
+            exit 1
+          fi
+
+          is_tag_ref=false
+          case "${GITHUB_REF_TYPE:-}:${GITHUB_REF:-}" in
+            tag:refs/tags/*)
+              is_tag_ref=true
+              ;;
+          esac
+
+          if [ "$is_tag_ref" = true ]; then
+            if ! tag_commit="$(git rev-parse --verify "${GITHUB_REF:-}^{commit}" 2>/dev/null)"; then
+              echo "Added-commit boundary tag ref is unavailable." >&2
+              exit 1
+            fi
+            if [ "$tag_commit" != "$SCAN_HEAD" ]; then
+              echo "Added-commit boundary tag ref does not match the scan head." >&2
+              exit 1
+            fi
+            if ! git cat-file -e "refs/remotes/origin/main^{commit}" 2>/dev/null; then
+              echo "Added-commit boundary trusted main is unavailable." >&2
+              exit 1
+            fi
+            if ! tag_merge_base="$(git merge-base "refs/remotes/origin/main" "$tag_commit" 2>/dev/null)"; then
+              echo "Added-commit boundary tag merge base is unavailable." >&2
+              exit 1
+            fi
+            if [ -z "$tag_merge_base" ]; then
+              echo "Added-commit boundary tag merge base is unavailable." >&2
+              exit 1
+            fi
+            if ! commits="$(git rev-list "${tag_merge_base}..${tag_commit}")"; then
+              echo "Added-commit boundary tag candidate range is unavailable." >&2
+              exit 1
+            fi
+          elif [ -n "${BASE_SHA:-}" ] &&
+             [ "${BASE_SHA:-}" != "0000000000000000000000000000000000000000" ] &&
+             git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null &&
+             git merge-base --is-ancestor "$BASE_SHA" "$SCAN_HEAD" 2>/dev/null; then
+            if ! commits="$(git rev-list "${BASE_SHA}..${SCAN_HEAD}")"; then
+              echo "Added-commit boundary candidate range is unavailable." >&2
+              exit 1
+            fi
+          else
+            if [ "$profile" != "private" ] ||
+               [ "${GITHUB_EVENT_NAME:-}" != "push" ]; then
+              echo "Added-commit boundary fallback is not permitted for this repository event." >&2
+              exit 1
+            fi
+            case "${GITHUB_REF:-}" in
+              refs/heads/main)
+                echo "Added-commit boundary fallback is not permitted for main." >&2
+                exit 1
+                ;;
+              refs/heads/*)
+                ;;
+              *)
+                echo "Added-commit boundary fallback requires a topic branch ref." >&2
+                exit 1
+                ;;
+            esac
+            if ! git cat-file -e "refs/remotes/origin/main^{commit}" 2>/dev/null; then
+              echo "Added-commit boundary trusted main is unavailable." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "refs/remotes/origin/main" "$SCAN_HEAD" 2>/dev/null; then
+              echo "Added-commit boundary trusted main is not an ancestor of the scan head." >&2
+              exit 1
+            fi
+            if ! commits="$(git rev-list "refs/remotes/origin/main..${SCAN_HEAD}")"; then
+              echo "Added-commit boundary fallback range is unavailable." >&2
+              exit 1
+            fi
+          fi
+
+          while IFS= read -r commit || [ -n "${commit:-}" ]; do
+            [ -z "${commit:-}" ] && continue
+            if ! git ls-tree -r -z --name-only "$commit" 2>/dev/null | "$boundary_python" deploy/public_boundary.py --stdin0 --profile "$profile" >/dev/null 2>&1; then
+              echo "Added-commit tree path boundary failed." >&2
+              exit 1
+            fi
+            if ! git cat-file commit "$commit" 2>/dev/null | "$boundary_python" deploy/public_boundary.py --text --profile "$profile" >/dev/null 2>&1; then
+              echo "Added-commit metadata boundary failed." >&2
+              exit 1
+            fi
+
+            if [ "$profile" = "public" ]; then
+              set +e
+              git cat-file commit "$commit" 2>/dev/null | grep -E "$tailnet_re" >/dev/null 2>&1
+              message_scan_status=("${PIPESTATUS[@]}")
+              set -e
+              case "${message_scan_status[0]}:${message_scan_status[1]}" in
+                0:0)
+                  echo "Public added-commit metadata carries an internal tailnet (100.64/10) address." >&2
+                  exit 1
+                  ;;
+                0:1)
+                  ;;
+                *)
+                  echo "Public added-commit metadata tailnet scan failed." >&2
+                  exit 1
+                  ;;
+              esac
+
+              set +e
+              git grep -I -qE "$tailnet_re" "$commit" -- . >/dev/null 2>&1
+              content_scan_status=$?
+              set -e
+              case "$content_scan_status" in
+                0)
+                  echo "Public added-commit tree carries an internal tailnet (100.64/10) address." >&2
+                  exit 1
+                  ;;
+                1)
+                  ;;
+                *)
+                  echo "Public added-commit tree tailnet scan failed." >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+          done <<< "$commits"
+
+      - name: No internal tailnet addresses
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REPOSITORY:-}" in
+            ZenSystemAI/OSSRedact)
+              ;;
+            ZenSystemAI/OSSRedact-dev)
+              exit 0
+              ;;
+            *)
+              echo "Tailnet disclosure policy is unavailable." >&2
+              exit 1
+              ;;
+          esac
+          # CGNAT 100.64/10 is never a legitimate public example address in this codebase.
+          tailnet_re='(^|[^0-9])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)'
+          set +e
+          git grep -I -qE "$tailnet_re" -- . >/dev/null 2>&1
+          tailnet_status=$?
+          set -e
+          case "$tailnet_status" in
+            0)
+              echo "Internal tailnet (100.64/10) address found." >&2
+              exit 1
+              ;;
+            1)
+              ;;
+            *)
+              echo "Tailnet disclosure scan failed." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: No em dash
+        run: |
+          matches="$(git grep -n $'\u2014' -- . || true)"
+          if [ -n "$matches" ]; then
+            printf '%s\n' "$matches"
+            echo "Em dash found; use -- instead." >&2
+            exit 1
+          fi
+
+      - name: No invisible control bytes in text files
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+
+          text_ext = {
+              '',
+              '.css', '.html', '.js', '.json', '.jsonl', '.jsx', '.lock', '.md',
+              '.py', '.rs', '.service', '.sh', '.toml', '.ts', '.tsx', '.txt',
+              '.xml', '.yaml', '.yml',
+          }
+          allowed = {9, 10, 13}  # tab, LF, CR
+          bad = []
+
+          for name in subprocess.check_output(['git', 'ls-files'], text=True).splitlines():
+              path = pathlib.Path(name)
+              if not path.is_file() or path.suffix.lower() not in text_ext:
+                  continue
+              data = path.read_bytes()
+              offenders = [
+                  (offset, byte)
+                  for offset, byte in enumerate(data)
+                  if (byte < 32 and byte not in allowed) or byte == 127
+              ]
+              if offenders:
+                  offset, byte = offenders[0]
+                  bad.append((name, offset, byte, len(offenders)))
+
+          if bad:
+              for name, offset, byte, count in bad:
+                  print(f'{name}: byte offset {offset}: 0x{byte:02x} ({count} control byte(s))')
+              print('Invisible control bytes found in text-tracked files; use escaped literals instead.', file=sys.stderr)
+              sys.exit(1)
+          PY
+
+  # -----------------------------------------------------------------------
+  # Workbench: TypeScript build + vitest unit + round-trip tests
+  # -----------------------------------------------------------------------
+  workbench:
+    name: Workbench (Node 22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workbench
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: workbench/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: High-severity dependency audit
+        run: npm audit --audit-level=high
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Unit + round-trip tests
+        run: npm test
+
+  # -----------------------------------------------------------------------
+  # Redaction core package: build + unit tests
+  # -----------------------------------------------------------------------
+  redaction-core:
+    name: redaction-core (Node 22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/redaction-core
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: packages/redaction-core/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: High-severity dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+  # -----------------------------------------------------------------------
+  # Gate + appliance + training: torch-free tests via pytest DISCOVERY over each domain dir, so a NEW test
+  # file is never silently skipped by a hand-maintained list (the prior list omitted gate/tests/test_maxlen.py,
+  # which is in fact torch-free). The only torch-requiring module (training/tests/test_compute_metrics.py)
+  # self-skips via pytest.importorskip('torch'); the NER tiers in privacy_gate.py import torch/onnxruntime/
+  # transformers LAZILY inside methods, so the floor tests are torch-free. TestClient deps are pinned in
+  # requirements-test.txt.
+  # -----------------------------------------------------------------------
+  gate-floor:
+    name: Gate + appliance torch-free tests (Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test deps
+        run: pip install -r requirements-test.txt
+
+      - name: Python dependency audit
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit -r requirements-test.txt --strict
+
+      - name: Frozen CPU runtime dependency audit
+        run: python -m pip_audit -r deploy/requirements-gate-cpu.lock --strict
+
+      # gate/ and appliance/ MUST be SEPARATE pytest invocations: both ship a module named `privacy_gate`
+      # (the gate's checksum-exact floor vs the appliance's thicker floor), so one interpreter collides on
+      # sys.modules['privacy_gate'] and the second domain imports the wrong copy. Separate processes keep each
+      # domain importing its own file. training/ + validation/ ride with the gate process (no privacy_gate import).
+      - name: Run torch-free gate + training + validation tests
+        run: python -m pytest gate/tests training/gen/tests training/tests validation deploy/test_public_boundary.py deploy/test_repository_profiles.py deploy/test_install_units.py -v
+
+      # The FULL appliance suite, in its own process (the collision note above). This is the redaction-critical
+      # regression net: control CORS/CSRF guard, floor hardening (the 2026-06-20 bypass locks), secret-key
+      # force-redact, input-shape fail-open, settings/mode invariants, denylist, glued-checksum, IPv6 / US-ZIP,
+      # live-view safety, entity-map eviction/TTL, gate-fallback + body-cap + CORS-once. Hermeticity does not
+      # depend on the runner's $HOME: appliance/tests/conftest.py points GATEWAY_ALLOWLIST/DENYLIST/MODE_FILE at
+      # empty temp files (mode=privacy) at import, so a populated ~/.ossredact cannot cause false pass/fail.
+      - name: Run torch-free appliance tests
+        run: python -m pytest appliance/tests -v
+
+  # -----------------------------------------------------------------------
+  # Workbench Tauri shell: Rust unit tests. Guards the settings.json routing writer -- the code that points
+  # Claude Code at the local firewall and appends the [1m] context-window suffix. Untested before, it now fails
+  # CI on a regression to the ANTHROPIC_BASE_URL redirect / model-suffix / sibling-key-preservation logic.
+  # -----------------------------------------------------------------------
+  tauri-rust:
+    name: Workbench Tauri (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Tauri v2 links against system webkit/gtk; the src-tauri crate needs them present to compile its tests.
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
+
+      - name: Cargo test (routing writer)
+        run: cargo test --manifest-path workbench/src-tauri/Cargo.toml

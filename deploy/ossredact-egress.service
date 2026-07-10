@@ -1,0 +1,49 @@
+[Unit]
+Description=OSSRedact egress privacy proxy :8011
+After=network-online.target ossredact-gate-cpu.service
+Wants=network-online.target ossredact-gate-cpu.service
+
+[Service]
+Type=simple
+# QUICKSTART rewrites this to your own username -- the proxy writes its entity map under
+# that user's $HOME/.ossredact, so it must be a real account (not the placeholder below).
+User=ossredact
+WorkingDirectory=/opt/ossredact/appliance
+Environment=GATEWAY_HOST=127.0.0.1
+Environment=GATEWAY_PORT=8011
+Environment=GATEWAY_GATE_URL=http://127.0.0.1:8001
+# Avoid __pycache__ writes under ProtectSystem=strict
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+# Optional availability hedge: if GATEWAY_GATE_URL points at a REMOTE gate (e.g. a GPU tier on another host),
+# set a second gate here so a primary outage fails over to it instead of 503'ing every request. Point it at a
+# LOCAL/loopback gate so it survives a network outage too. The fallback runs the full floor + neural base, so
+# fail-closed is preserved. Leave unset when the gate is already local. Connection failures fail over; a
+# reachable gate's HTTP error does not.
+# Environment=GATEWAY_GATE_FALLBACK_URL=http://127.0.0.1:8001
+ExecStart=/opt/ossredact/.venv/bin/python /opt/ossredact/appliance/egress_proxy.py
+Restart=always
+RestartSec=5
+
+# --- Hardening (egress profile: no PrivateDevices; narrow write to entity-map/runtime dir) ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+ProtectHome=read-only
+ProtectSystem=strict
+# Entity maps + live policy under the placeholder account's home. Keep this narrow,
+# literal path aligned with User= when installing; non-/home layouts need a drop-in
+# ReadWritePaths override.
+ReadWritePaths=-/home/ossredact/.ossredact
+
+[Install]
+WantedBy=multi-user.target

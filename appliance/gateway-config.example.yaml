@@ -1,0 +1,61 @@
+# OSSRedact egress gateway policy.
+# Resolution order for PII: session override > project override > default. Secrets ALWAYS redact (exempt).
+# Edits are picked up live (mtime-watched) -- no restart needed for policy changes.
+
+secrets:
+  enabled: true            # always-on; here for visibility. Ignores the PII toggle below.
+  entropy_backstop: true   # flag AWS-secret-shaped high-entropy tokens (FP-filtered: uuid/sha/sequential)
+
+pii:
+  # categories: person, address, phone, email, account, nas, tax, card, dob, date, postal, ip, org, filepath, username, uuid
+  # credentials (password, api_key, access_token) always redact regardless of this config.
+  # 'date' is inert at the egress: bare dates/versions are NEVER redacted in any mode (2026-07-02 wire-level
+  # policy; GATEWAY_REDACT_DATES=1 restores the old behavior). date_of_birth is floor and always redacts.
+  # The mode toggle (privacy/coding/off) overlays this file: coding additionally passes org, ip, uuid.
+  default:
+    enabled: true
+    exclude: [username]                  # default OFF: bare usernames (coding-assistant noise). 'filepath' is
+                                         # NOT excluded by default anymore: GATEWAY_PATH_POLICY=username (the
+                                         # default) redacts only the home-dir username inside a path and passes
+                                         # the rest through, so agent file ops keep working. NOTE: organization
+                                         # IS redacted by default -- the v11r9c model detects it reliably and
+                                         # leaking an employer/client defeats the firewall. Add 'org' here (or
+                                         # per-project) only for code-heavy sessions where it's noise.
+    # categories: [...]                  # OPTIONAL restrictive allowlist (redact ONLY these); omit = redact all but exclude
+  projects: {}             # e.g.  myrepo: { categories: [person, email] }   or   { exclude: [] }  (redact everything)
+  sessions: {}             # e.g.  <session-id>: { enabled: false }          # this session: PII off (secrets still on)
+
+# The "do-not-redact" dictionary: YOUR OWN known-safe values that must NEVER be redacted, even when a
+# detector flags them (the inverse of detection). Use it to stop the gate interfering with your own
+# workflow -- your name inside file paths, your own email, internal project codenames. Value-EXACT (a span
+# is dropped only when its WHOLE text equals an entry) + case-insensitive, so "alex" passes through as
+# Alex / ALEX / the lowercase token in /home/alex (this also dissolves the case-mangle). WARNING:
+# allowlisted values DO reach the cloud verbatim -- only add things you are comfortable the model seeing.
+# Secrets / passwords / API keys are NEVER exempted by this list. Live-refreshed on save. (You can also
+# point GATEWAY_ALLOWLIST_FILE at a newline-delimited file of values; '#'-prefixed lines are comments.)
+allowlist: []
+  # - alex
+  # - alex@example.com
+
+# The "always-redact" dictionary (the INVERSE of the allowlist): YOUR OWN terms that must ALWAYS be
+# redacted, even when no detector flags them -- internal project codenames, client names, hostnames the
+# model does not recognize as PII. A term SCANNER (not value-exact): each term is found wherever it appears
+# in the text, case-insensitive, on token boundaries (so "acme" matches "Acme"/"acme-corp" but never inside
+# "acmecorp"); multi-word phrases match literally; terms under 2 chars are ignored. It ONLY ADDS redaction,
+# so it can never weaken the floor -- a stray entry over-redacts (safe). Live-refreshed on save. (You can
+# also point GATEWAY_DENYLIST_FILE at a newline-delimited file of terms; '#'-prefixed lines are comments.)
+denylist: []
+  # - Project Bluebird
+  # - Acme Robotics
+  # - /home/alex/dev/myrepo
+
+fast_path:
+  skip_pure_code: true     # forward pure-code / no-PII requests unchanged (zero model overhead)
+
+upstream:
+  anthropic: https://api.anthropic.com
+  openai: https://api.openai.com
+
+map:
+  ttl_hours: 24
+  store: ~/.ossredact/maps

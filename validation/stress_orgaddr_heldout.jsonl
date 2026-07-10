@@ -1,0 +1,82 @@
+{"input": "Je travaille chez Hydro-Québec depuis 2019.", "output": {"spans": [[18, 30, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Je travaille chez la SAAQ depuis 2019.", "output": {"spans": [[18, 25, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Je travaille chez Béland & Associés inc. depuis 2019.", "output": {"spans": [[18, 40, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Je travaille chez Groupe Patry SENC depuis 2019.", "output": {"spans": [[18, 35, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Je travaille chez Côté Désign depuis 2019.", "output": {"spans": [[18, 29, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "J'ai un rendez-vous à Desjardins demain matin.", "output": {"spans": [[22, 32, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "J'ai un rendez-vous à la SQDC demain matin.", "output": {"spans": [[22, 29, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "J'ai un rendez-vous à Tremblay Construction Ltée demain matin.", "output": {"spans": [[22, 48, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "J'ai un rendez-vous à Fortin Légal inc. demain matin.", "output": {"spans": [[22, 39, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Le contrat de service est avec Revenu Québec.", "output": {"spans": [[31, 44, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Le contrat de service est avec Loto-Québec.", "output": {"spans": [[31, 42, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Le contrat de service est avec Lavoie & Fils.", "output": {"spans": [[31, 44, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Le contrat de service est avec Bouchard & Gagnon.", "output": {"spans": [[31, 48, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Le contrat de service est avec Roy & Frères Ltée.", "output": {"spans": [[31, 48, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "We signed with Hydro-Québec last week.", "output": {"spans": [[15, 27, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "We signed with la SAAQ last week.", "output": {"spans": [[15, 22, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "We signed with Béland & Associés inc. last week.", "output": {"spans": [[15, 37, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "We signed with Groupe Patry SENC last week.", "output": {"spans": [[15, 32, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "We signed with Côté Désign last week.", "output": {"spans": [[15, 26, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Veuillez facturer Desjardins pour ce mandat.", "output": {"spans": [[18, 28, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Veuillez facturer la SQDC pour ce mandat.", "output": {"spans": [[18, 25, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Veuillez facturer Tremblay Construction Ltée pour ce mandat.", "output": {"spans": [[18, 44, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Veuillez facturer Fortin Légal inc. pour ce mandat.", "output": {"spans": [[18, 35, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Cordialement,\nMarie Tremblay\nRevenu Québec", "output": {"spans": [[29, 42, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Cordialement,\nMarie Tremblay\nLoto-Québec", "output": {"spans": [[29, 40, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Cordialement,\nMarie Tremblay\nLavoie & Fils", "output": {"spans": [[29, 42, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Cordialement,\nMarie Tremblay\nBouchard & Gagnon", "output": {"spans": [[29, 46, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Cordialement,\nMarie Tremblay\nRoy & Frères Ltée", "output": {"spans": [[29, 46, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"company\": \"Hydro-Québec\", \"status\": \"active\"}", "output": {"spans": [[13, 25, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"company\": \"la SAAQ\", \"status\": \"active\"}", "output": {"spans": [[13, 20, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"company\": \"Béland & Associés inc.\", \"status\": \"active\"}", "output": {"spans": [[13, 35, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"company\": \"Groupe Patry SENC\", \"status\": \"active\"}", "output": {"spans": [[13, 30, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"company\": \"Côté Désign\", \"status\": \"active\"}", "output": {"spans": [[13, 24, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "company,Desjardins,QC", "output": {"spans": [[8, 18, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "company,la SQDC,QC", "output": {"spans": [[8, 15, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "company,Tremblay Construction Ltée,QC", "output": {"spans": [[8, 34, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "company,Fortin Légal inc.,QC", "output": {"spans": [[8, 25, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre partenaire principal demeure Revenu Québec cette année.", "output": {"spans": [[35, 48, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre partenaire principal demeure Loto-Québec cette année.", "output": {"spans": [[35, 46, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre partenaire principal demeure Lavoie & Fils cette année.", "output": {"spans": [[35, 48, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre partenaire principal demeure Bouchard & Gagnon cette année.", "output": {"spans": [[35, 52, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre partenaire principal demeure Roy & Frères Ltée cette année.", "output": {"spans": [[35, 52, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "La soumission provient de Hydro-Québec.", "output": {"spans": [[26, 38, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "La soumission provient de la SAAQ.", "output": {"spans": [[26, 33, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "La soumission provient de Béland & Associés inc..", "output": {"spans": [[26, 48, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "La soumission provient de Groupe Patry SENC.", "output": {"spans": [[26, 43, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "La soumission provient de Côté Désign.", "output": {"spans": [[26, 37, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Groupe Patry SENC a fusionné avec Lavoie & Fils en 2021.", "output": {"spans": [[0, 17, "organization"], [34, 47, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Desjardins a fusionné avec Béland & Associés inc. en 2021.", "output": {"spans": [[0, 10, "organization"], [27, 49, "organization"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Ship to 200 King St W, please confirm.", "output": {"spans": [[8, 21, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Ship to 1200 Maisonneuve Blvd W, please confirm.", "output": {"spans": [[8, 31, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Ship to Case postale 6204, please confirm.", "output": {"spans": [[8, 25, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Ship to 1500 boul. René-Lévesque Ouest, please confirm.", "output": {"spans": [[8, 38, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Ship to 601 rang Sainte-Catherine, please confirm.", "output": {"spans": [[8, 33, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Ship to 15 chemin du Lac Ouest, please confirm.", "output": {"spans": [[8, 30, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "L'envoi va au 450 Sherbrooke Ave E, succ. Centre-ville.", "output": {"spans": [[14, 34, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "L'envoi va au 88 Wellington St N, succ. Centre-ville.", "output": {"spans": [[14, 32, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "L'envoi va au C.P. 1370, succ. Centre-ville.", "output": {"spans": [[14, 23, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "L'envoi va au 760 rue Saint-Jean Est, succ. Centre-ville.", "output": {"spans": [[14, 36, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "L'envoi va au 42 route des Pionniers, succ. Centre-ville.", "output": {"spans": [[14, 36, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre bureau est au 200 King St W, Montréal.", "output": {"spans": [[20, 33, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre bureau est au 1200 Maisonneuve Blvd W, Montréal.", "output": {"spans": [[20, 43, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre bureau est au Case postale 6204, Montréal.", "output": {"spans": [[20, 37, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre bureau est au 1500 boul. René-Lévesque Ouest, Montréal.", "output": {"spans": [[20, 50, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre bureau est au 601 rang Sainte-Catherine, Montréal.", "output": {"spans": [[20, 45, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Notre bureau est au 15 chemin du Lac Ouest, Montréal.", "output": {"spans": [[20, 42, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Livrer à 450 Sherbrooke Ave E avant vendredi.", "output": {"spans": [[9, 29, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Livrer à 88 Wellington St N avant vendredi.", "output": {"spans": [[9, 27, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Livrer à C.P. 1370 avant vendredi.", "output": {"spans": [[9, 18, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Livrer à 760 rue Saint-Jean Est avant vendredi.", "output": {"spans": [[9, 31, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "Livrer à 42 route des Pionniers avant vendredi.", "output": {"spans": [[9, 31, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "billing_address,200 King St W,QC", "output": {"spans": [[16, 29, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "billing_address,1200 Maisonneuve Blvd W,QC", "output": {"spans": [[16, 39, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "billing_address,Case postale 6204,QC", "output": {"spans": [[16, 33, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "billing_address,1500 boul. René-Lévesque Ouest,QC", "output": {"spans": [[16, 46, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "billing_address,601 rang Sainte-Catherine,QC", "output": {"spans": [[16, 41, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "billing_address,15 chemin du Lac Ouest,QC", "output": {"spans": [[16, 38, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"ship_to\": \"450 Sherbrooke Ave E\"}", "output": {"spans": [[13, 33, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"ship_to\": \"88 Wellington St N\"}", "output": {"spans": [[13, 31, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"ship_to\": \"C.P. 1370\"}", "output": {"spans": [[13, 22, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"ship_to\": \"760 rue Saint-Jean Est\"}", "output": {"spans": [[13, 35, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}
+{"input": "{\"ship_to\": \"42 route des Pionniers\"}", "output": {"spans": [[13, 35, "address"]], "entities": {}}, "meta": {"src": "stress_heldout"}}

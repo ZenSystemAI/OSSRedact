@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security / redaction-bypass report
+    url: https://github.com/ZenSystemAI/OSSRedact/security/advisories/new
+    about: Do NOT open a public issue for a leak or redaction bypass. Report it privately (see SECURITY.md).

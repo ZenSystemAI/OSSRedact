@@ -1368,7 +1368,7 @@ def test_repo_hygiene_checkout_fetches_full_history():
     checkouts = [
         step
         for step in steps
-        if isinstance(step, dict) and step.get("uses") == "actions/checkout@v4"
+        if isinstance(step, dict) and isinstance(step.get("uses"), str) and str(step.get("uses")).split("#")[0].strip().startswith("actions/checkout@")
     ]
 
     assert len(checkouts) == 1, "repo-hygiene must have exactly one checkout"

@@ -15,7 +15,7 @@
 #   python -m pytest gate/tests training/gen/tests training/tests validation deploy/test_public_boundary.py deploy/test_repository_profiles.py deploy/test_install_units.py -v
 #   python -m pytest appliance/tests -v
 
-pytest==9.1.0
+pytest==9.1.1
 numpy==2.4.6
 scipy==1.17.1
 cryptography==49.0.0
